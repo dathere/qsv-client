@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qsv-client"
+version = "0.1.0"
+description = "Run the qsv CSV toolkit from Python: timeouts that kill the whole process tree, typed errors, capability detection."
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "datHere" }]
+keywords = ["qsv", "csv", "data-wrangling", "subprocess"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/dathere/qsv-client"
+Issues = "https://github.com/dathere/qsv-client/issues"
+qsv = "https://github.com/dathere/qsv"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "mypy>=1.11", "ruff>=0.6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qsv_client"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
