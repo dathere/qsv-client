@@ -32,17 +32,17 @@ pip install qsv-client
 ```python
 from qsv_client import Qsv, QsvCsvError, QsvTimeout
 
-qsv = Qsv(timeout=600)              # finds $QSV_BIN, else qsv/qsvmcp/qsvdp/qsvlite on PATH
+qsv = Qsv(timeout=600)  # finds $QSV_BIN, else qsv/qsvmcp/qsvdp/qsvlite on PATH
 
-qsv.count("data.csv")               # -> 1000
-qsv.headers("data.csv")             # -> ["id", "name", ...]
-stats = qsv.stats("data.csv", "--everything")        # one dict per column
+qsv.count("data.csv")  # -> 1000
+qsv.headers("data.csv")  # -> ["id", "name", ...]
+stats = qsv.stats("data.csv", "--everything")  # one dict per column
 freq = qsv.frequency("data.csv", "--limit", "20")
 
 # anything else: run(command, *args)
 res = qsv.run("sqlp", "data.csv", "select count(*) from data")
 res.stdout, res.stderr, res.exit_code, res.duration
-res.csv_rows()                      # or res.json()
+res.csv_rows()  # or res.json()
 
 # large output: stream stdout to a file instead of holding it in memory
 qsv.run("stats", "big.csv", "--everything", stdout_path="big.stats.csv")
@@ -64,11 +64,11 @@ e.g. a broken pipe) count as success. `stdin=` feeds data on stdin; otherwise st
 import os
 
 qsv = Qsv(
-    llm_api_key=os.environ["OPENROUTER_API_KEY"],      # -> QSV_LLM_APIKEY
-    llm_base_url="https://openrouter.ai/api/v1",       # -> QSV_LLM_BASE_URL
-    llm_model="google/gemini-2.5-flash-lite",          # -> QSV_LLM_MODEL
+    llm_api_key=os.environ["OPENROUTER_API_KEY"],  # -> QSV_LLM_APIKEY
+    llm_base_url="https://openrouter.ai/api/v1",  # -> QSV_LLM_BASE_URL
+    llm_model="google/gemini-2.5-flash-lite",  # -> QSV_LLM_MODEL
 )
-dictionary = qsv.describegpt("data.csv", "--all")      # adds --format json, returns parsed JSON
+dictionary = qsv.describegpt("data.csv", "--all")  # adds --format json, returns parsed JSON
 ```
 
 ### asyncio
@@ -86,7 +86,7 @@ Cancelling the awaiting task kills the run's process group.
 ### Capabilities and version checks
 
 ```python
-qsv = Qsv(min_version="24.0.0")     # QsvVersionError on first use if older
+qsv = Qsv(min_version="24.0.0")  # QsvVersionError on first use if older
 caps = qsv.capabilities
 caps.binary, caps.version, caps.features, caps.commands
 caps.has_feature("polars"), caps.has_command("describegpt"), caps.supports_json_errors

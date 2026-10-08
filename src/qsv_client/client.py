@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import json
@@ -254,7 +255,8 @@ class Qsv(_Base):
             check: raise a :class:`QsvError` subclass if qsv fails (exit codes 0 and 255,
                 qsv's "warning" code, count as success).
             text: decode stdout as UTF-8 (``result.stdout``); False keeps bytes
-                (``result.stdout_bytes``).
+                (``result.stdout_bytes``). Use False for binary output (e.g. ``snappy
+                compress``), which would otherwise raise ``UnicodeDecodeError``.
 
         Raises:
             QsvError: (subclass by error kind) when ``check`` and the run failed.
@@ -326,26 +328,29 @@ class Qsv(_Base):
         return self.capabilities.version
 
     def _probe(self) -> Capabilities:
+        caps: Capabilities | None = None
         res = self._run_unchecked("", ["--capabilities"], check=False, timeout=60)
         if res.exit_code == 0 and res.stdout:
-            try:
-                return from_capabilities_json(res.stdout)
-            except ValueError:
-                pass
-        ver = self._run_unchecked("", ["--version"], timeout=60)
-        lst = self._run_unchecked("", ["--list"], check=False, timeout=60)
-        return from_version_output(ver.stdout or "", lst.stdout or "")
+            with contextlib.suppress(ValueError):
+                caps = from_capabilities_json(res.stdout)
+        if caps is None:
+            ver = self._run_unchecked("", ["--version"], timeout=60)
+            lst = self._run_unchecked("", ["--list"], check=False, timeout=60)
+            caps = from_version_output(ver.stdout or "", lst.stdout or "")
+        # checked here, so it holds however the cache gets filled
+        self._check_min_version(caps)
+        return caps
 
     def _check_version_once(self) -> None:
-        if self.min_version and self._capabilities is None:
-            self._check_min_version(self.capabilities)
+        if self.min_version:
+            _ = self.capabilities
 
     # -- conveniences -----------------------------------------------------------------------
 
     def count(self, path: Arg, *args: Arg, **kw: Any) -> int:
         """Number of records (``qsv count``)."""
         out = self.run("count", path, *args, **kw).stdout or ""
-        return int(out.strip().split()[0].replace(",", ""))
+        return int(out.strip().split()[0].split(";")[0].replace(",", ""))
 
     def headers(self, path: Arg, *args: Arg, **kw: Any) -> list[str]:
         """Column names (``qsv headers --just-names``)."""
@@ -452,23 +457,25 @@ class AsyncQsv(_Base):
         return (await self.capabilities()).version
 
     async def _probe(self) -> Capabilities:
+        caps: Capabilities | None = None
         res = await self._run_unchecked("", ["--capabilities"], check=False, timeout=60)
         if res.exit_code == 0 and res.stdout:
-            try:
-                return from_capabilities_json(res.stdout)
-            except ValueError:
-                pass
-        ver = await self._run_unchecked("", ["--version"], timeout=60)
-        lst = await self._run_unchecked("", ["--list"], check=False, timeout=60)
-        return from_version_output(ver.stdout or "", lst.stdout or "")
+            with contextlib.suppress(ValueError):
+                caps = from_capabilities_json(res.stdout)
+        if caps is None:
+            ver = await self._run_unchecked("", ["--version"], timeout=60)
+            lst = await self._run_unchecked("", ["--list"], check=False, timeout=60)
+            caps = from_version_output(ver.stdout or "", lst.stdout or "")
+        self._check_min_version(caps)
+        return caps
 
     async def _check_version_once(self) -> None:
-        if self.min_version and self._capabilities is None:
-            self._check_min_version(await self.capabilities())
+        if self.min_version:
+            await self.capabilities()
 
     async def count(self, path: Arg, *args: Arg, **kw: Any) -> int:
         out = (await self.run("count", path, *args, **kw)).stdout or ""
-        return int(out.strip().split()[0].replace(",", ""))
+        return int(out.strip().split()[0].split(";")[0].replace(",", ""))
 
     async def headers(self, path: Arg, *args: Arg, **kw: Any) -> list[str]:
         out = (await self.run("headers", "--just-names", path, *args, **kw)).stdout or ""

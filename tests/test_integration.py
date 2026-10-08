@@ -91,6 +91,20 @@ def test_min_version(qsv_bin: str, csv_files: Path) -> None:
     assert Qsv(qsv_bin, min_version="1.0.0").count(csv_files / "ok.csv") == 3
     with pytest.raises(QsvVersionError):
         Qsv(qsv_bin, min_version="999.0.0").count(csv_files / "ok.csv")
+    # touching .capabilities first must not let a too-old binary slip through later
+    too_old = Qsv(qsv_bin, min_version="999.0.0")
+    with pytest.raises(QsvVersionError):
+        _ = too_old.capabilities
+    with pytest.raises(QsvVersionError):
+        too_old.count(csv_files / "ok.csv")
+
+
+async def test_async_min_version(qsv_bin: str, csv_files: Path) -> None:
+    too_old = AsyncQsv(qsv_bin, min_version="999.0.0")
+    with pytest.raises(QsvVersionError):
+        await too_old.capabilities()
+    with pytest.raises(QsvVersionError):
+        await too_old.count(csv_files / "ok.csv")
 
 
 async def test_async_client(qsv_bin: str, csv_files: Path) -> None:
