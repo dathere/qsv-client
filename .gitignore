@@ -6,3 +6,5 @@ dist/
 .mypy_cache/
 .ruff_cache/
 qsv_r*.log
+# roborev snapshots
+/.roborev/
