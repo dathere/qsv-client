@@ -36,7 +36,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24", "mypy>=1.11", "ruff>=0.6"]
 packages = ["src/qsv_client"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/qsv_client", "tests", "README.md", "LICENSE"]
+include = ["src/qsv_client", "tests", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
