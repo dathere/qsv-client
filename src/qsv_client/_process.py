@@ -1,0 +1,147 @@
+"""Spawn qsv and reap it, including any children it started, on timeout or cancellation.
+
+qsv commands can start their own children (``validate`` runs pyshacl, ``viz`` a webdriver,
+``describegpt`` may shell out). Killing only the qsv pid would orphan them, so on POSIX each
+run gets its own session (process group) and the whole group is signalled: SIGTERM first,
+then SIGKILL after a grace period. On Windows the process is started in a new process group
+and killed directly; grandchildren are not reaped there.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import signal
+import subprocess
+import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import IO, Any
+
+IS_WINDOWS = sys.platform == "win32"
+
+
+@dataclass(frozen=True)
+class RawResult:
+    exit_code: int
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool
+
+
+def _spawn_kwargs() -> dict[str, Any]:
+    if IS_WINDOWS:
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined,unused-ignore]
+    return {"start_new_session": True}
+
+
+def _signal_group(pid: int, sig: int) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, sig)  # type: ignore[attr-defined,unused-ignore]
+
+
+def _terminate_sync(proc: subprocess.Popen[bytes], grace: float) -> None:
+    if IS_WINDOWS:
+        with contextlib.suppress(OSError):
+            proc.kill()
+        return
+    _signal_group(proc.pid, signal.SIGTERM)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=grace)
+    # SIGKILL the group even if the leader already exited: its children may not have
+    _signal_group(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
+
+
+def run_sync(
+    argv: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    cwd: str | None,
+    stdin: bytes | None,
+    stdout_file: IO[bytes] | None,
+    timeout: float | None,
+    kill_grace: float,
+) -> RawResult:
+    proc = subprocess.Popen(
+        list(argv),
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=stdout_file if stdout_file is not None else subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=dict(env),
+        cwd=cwd,
+        **_spawn_kwargs(),
+    )
+    timed_out = False
+    try:
+        out, err = proc.communicate(input=stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _terminate_sync(proc, kill_grace)
+        out, err = proc.communicate()
+    except BaseException:
+        # KeyboardInterrupt etc.: never leave a qsv process group running behind us
+        _terminate_sync(proc, kill_grace)
+        proc.wait()
+        raise
+    return RawResult(
+        exit_code=proc.returncode,
+        stdout=out or b"",
+        stderr=err or b"",
+        timed_out=timed_out,
+    )
+
+
+async def _terminate_async(proc: asyncio.subprocess.Process, grace: float) -> None:
+    if IS_WINDOWS:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        return
+    _signal_group(proc.pid, signal.SIGTERM)
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(proc.wait(), grace)
+    _signal_group(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
+    await proc.wait()
+
+
+async def run_async(
+    argv: Sequence[str],
+    *,
+    env: Mapping[str, str],
+    cwd: str | None,
+    stdin: bytes | None,
+    stdout_file: IO[bytes] | None,
+    timeout: float | None,
+    kill_grace: float,
+) -> RawResult:
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
+        stdout=stdout_file if stdout_file is not None else asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=dict(env),
+        cwd=cwd,
+        **_spawn_kwargs(),
+    )
+    timed_out = False
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout)
+    except asyncio.TimeoutError:
+        timed_out = True
+        await _terminate_async(proc, kill_grace)
+        out, err = b"", b""
+        if proc.stderr is not None:
+            with contextlib.suppress(Exception):
+                err = await proc.stderr.read()
+    except BaseException:
+        # task cancelled (or the loop is shutting down): reap the group, then propagate
+        await asyncio.shield(_terminate_async(proc, kill_grace))
+        raise
+    assert proc.returncode is not None
+    return RawResult(
+        exit_code=proc.returncode,
+        stdout=out or b"",
+        stderr=err or b"",
+        timed_out=timed_out,
+    )

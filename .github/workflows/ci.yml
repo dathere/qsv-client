@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync
+      - name: Download the latest qsv release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then target=x86_64-unknown-linux-musl; else target=aarch64-apple-darwin; fi
+          mkdir -p "$RUNNER_TEMP/qsv"
+          gh release download --repo dathere/qsv --pattern "qsv-*-${target}.zip" --dir "$RUNNER_TEMP/qsv"
+          unzip -o -q "$RUNNER_TEMP"/qsv/*.zip -d "$RUNNER_TEMP/qsv"
+          chmod +x "$RUNNER_TEMP"/qsv/qsv*
+          ls "$RUNNER_TEMP/qsv"
+      - name: Unit tests and integration tests (qsv)
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsv" uv run pytest -v
+      - name: Integration tests (qsvlite)
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsvlite" uv run pytest -q tests/test_integration.py
+      - name: Integration tests (qsvdp)
+        if: runner.os == 'Linux'
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsvdp" uv run pytest -q tests/test_integration.py
