@@ -319,3 +319,22 @@ def test_asyncio_run_returning_mid_cleanup_still_kills(
         assert _wait_dead(_read_pid(pidfile), 6), "leader survived the runner's shutdown"
     finally:
         _kill(_read_pid(pidfile))
+
+
+def test_asyncio_run_cancelling_background_run_mid_cleanup_still_kills(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    # the runner's shutdown cancels the run *and* its cleanup task directly, mid-grace-wait
+    pidfile = tmp_path / "leader.pid"
+    qsv = AsyncQsv(fake_qsv(IGNORE_SIGTERM_AND_HANG), kill_grace=2)
+
+    async def main() -> None:
+        background = asyncio.create_task(qsv.run("stats", pidfile, timeout=0.5))
+        await asyncio.sleep(1)
+        assert not background.done()  # still in its SIGTERM grace wait
+
+    try:
+        asyncio.run(main())
+        assert _wait_dead(_read_pid(pidfile), 6), "leader survived the runner's shutdown"
+    finally:
+        _kill(_read_pid(pidfile))

@@ -129,25 +129,48 @@ async def _release_async(proc: asyncio.subprocess.Process) -> None:
     Without the close, pipes held by an escaped descendant would keep their fds open and
     ``wait()`` pending until it exits. asyncio has no public API for this.
     """
-    transport = getattr(proc, "_transport", None)
-    if transport is not None:
-        transport.close()
+    _close_pipes(proc)
     await proc.wait()
 
 
+def _close_pipes(proc: asyncio.subprocess.Process) -> None:
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        transport.close()
+
+
+def _kill_now(proc: asyncio.subprocess.Process) -> None:
+    """Teardown was itself cancelled (e.g. by ``asyncio.run()`` shutting down): skip the
+    remaining grace and do the parts that matter synchronously."""
+    if IS_WINDOWS:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+    else:
+        _signal_group(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
+    _close_pipes(proc)
+
+
 async def _reap_async(proc: asyncio.subprocess.Process, grace: float) -> None:
-    await _terminate_async(proc, grace)
-    await _release_async(proc)
+    try:
+        await _terminate_async(proc, grace)
+        await _release_async(proc)
+    except asyncio.CancelledError:
+        _kill_now(proc)
+        raise
 
 
 async def _timeout_cleanup(proc: asyncio.subprocess.Process, grace: float) -> bytes:
     """Kill and release a timed-out run; return whatever stderr arrives within ``grace``."""
-    await _terminate_async(proc, grace)
-    err = b""
-    if proc.stderr is not None:
-        with contextlib.suppress(Exception):
-            err = await asyncio.wait_for(proc.stderr.read(), grace)
-    await _release_async(proc)
+    try:
+        await _terminate_async(proc, grace)
+        err = b""
+        if proc.stderr is not None:
+            with contextlib.suppress(Exception):
+                err = await asyncio.wait_for(proc.stderr.read(), grace)
+        await _release_async(proc)
+    except asyncio.CancelledError:
+        _kill_now(proc)
+        raise
     return err
 
 
