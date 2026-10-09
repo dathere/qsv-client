@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from qsv_client import AsyncQsv, Qsv, QsvTimeout
+from qsv_client import AsyncQsv, Qsv, QsvTimeout, QsvUsageError
 
 # The fake starts a grandchild that inherits stdout and records its pid, then hangs. If only
 # the fake were killed, the grandchild would keep the stdout pipe open and the run would hang
@@ -23,12 +26,25 @@ time.sleep(60)
 """
 
 
+def _is_zombie(pid: int) -> bool:
+    """Linux only: dead but not yet reaped. On Python 3.12+ asyncio reaps children from the
+    event loop (a pidfd reader), so a child killed as ``asyncio.run()`` shuts down is never
+    reaped by it and ``os.kill(pid, 0)`` keeps succeeding."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] == "Z"
+
+
 def _wait_dead(pid: int, within: float = 5.0) -> bool:
     deadline = time.monotonic() + within
     while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
+            return True
+        if _is_zombie(pid):
             return True
         time.sleep(0.05)
     return False
@@ -142,3 +158,196 @@ def test_warning_exit_code_is_success(fake_qsv: Callable[[str], str]) -> None:
     res = Qsv(fake_qsv("import sys; print('done'); sys.exit(255)")).run("x")
     assert res.ok
     assert res.exit_code == 255
+
+
+# Like HANG_WITH_GRANDCHILD, but the grandchild leaves the process group, so the group kill
+# misses it and it keeps the output pipes open.
+HANG_WITH_ESCAPED_GRANDCHILD = """
+import subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                         start_new_session=True)
+open(sys.argv[-1], "w").write(str(child.pid))
+time.sleep(60)
+"""
+
+
+def _kill(pid: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+
+
+def test_timeout_bounded_when_grandchild_escapes_group(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "child.pid"
+    qsv = Qsv(fake_qsv(HANG_WITH_ESCAPED_GRANDCHILD), kill_grace=0.5)
+    started = time.monotonic()
+    try:
+        with pytest.raises(QsvTimeout):
+            qsv.run("stats", pidfile, timeout=1)
+        assert time.monotonic() - started < 10
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+async def test_async_timeout_bounded_when_grandchild_escapes_group(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "child.pid"
+    qsv = AsyncQsv(fake_qsv(HANG_WITH_ESCAPED_GRANDCHILD), kill_grace=0.5)
+    started = time.monotonic()
+    try:
+        with pytest.raises(QsvTimeout):
+            await qsv.run("stats", pidfile, timeout=1)
+        assert time.monotonic() - started < 10
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+def test_undecodable_stdout_still_raises_typed_error(fake_qsv: Callable[[str], str]) -> None:
+    qsv = Qsv(fake_qsv("import sys; sys.stdout.buffer.write(b'\\xff'); sys.exit(2)"))
+    with pytest.raises(QsvUsageError):
+        qsv.run("x")
+
+
+COUNT_AND_HEADERS = """
+import sys
+print("3" if sys.argv[1] == "count" else "name\\nn")
+"""
+
+
+def test_count_and_headers_without_captured_text(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    qsv = Qsv(fake_qsv(COUNT_AND_HEADERS))
+    kws: list[dict[str, Any]] = [{"stdout_path": tmp_path / "out"}, {"text": False}]
+    for kw in kws:
+        assert qsv.count("in.csv", **kw) == 3
+        assert qsv.headers("in.csv", **kw) == ["name", "n"]
+
+
+async def test_async_count_and_headers_without_captured_text(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    qsv = AsyncQsv(fake_qsv(COUNT_AND_HEADERS))
+    kws: list[dict[str, Any]] = [{"stdout_path": tmp_path / "out"}, {"text": False}]
+    for kw in kws:
+        assert await qsv.count("in.csv", **kw) == 3
+        assert await qsv.headers("in.csv", **kw) == ["name", "n"]
+
+
+def test_relative_binary_with_cwd(
+    fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = Path(fake_qsv("print('ok')"))
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(fake.parent)
+    assert Qsv(f"./{fake.name}", cwd=other).run("x").stdout == "ok\n"
+
+
+def test_relative_binary_through_symlinked_dir(
+    fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # work/link -> bin, so work/link/../fake-qsv is tmp_path/fake-qsv, not work/fake-qsv
+    fake_qsv("print('ok')")
+    (tmp_path / "bin").mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "link").symlink_to(tmp_path / "bin")
+    monkeypatch.chdir(work)
+    assert Qsv("link/../fake-qsv").run("x").stdout == "ok\n"
+
+
+async def test_async_timeout_bounded_when_leader_ignores_sigterm_and_grandchild_escapes(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "child.pid"
+    body = "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    qsv = AsyncQsv(fake_qsv(body + HANG_WITH_ESCAPED_GRANDCHILD), kill_grace=0.5)
+    started = time.monotonic()
+    try:
+        with pytest.raises(QsvTimeout):
+            await qsv.run("stats", pidfile, timeout=1)
+        assert time.monotonic() - started < 10
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+async def test_async_timeout_releases_pipes_held_by_escaped_grandchild(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    qsv = AsyncQsv(fake_qsv(HANG_WITH_ESCAPED_GRANDCHILD), kill_grace=0.3)
+    pidfiles = [tmp_path / f"child{i}.pid" for i in range(3)]
+    open_fds = len(os.listdir("/dev/fd"))
+    try:
+        for pidfile in pidfiles:
+            with pytest.raises(QsvTimeout):
+                await qsv.run("stats", pidfile, timeout=0.5)
+        await asyncio.sleep(0)  # asyncio closes pipe fds in a call_soon callback
+        assert len(os.listdir("/dev/fd")) <= open_fds
+    finally:
+        for pidfile in pidfiles:
+            _kill(_read_pid(pidfile))
+
+
+IGNORE_SIGTERM_AND_HANG = """
+import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open(sys.argv[-1], "w").write(str(os.getpid()))
+time.sleep(60)
+"""
+
+
+async def test_async_cancel_during_timeout_cleanup_still_kills(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    # the run times out at 0.5s and starts its 2s SIGTERM grace wait; the outer deadline at
+    # 1s cancels it mid-cleanup, which must not skip the SIGKILL
+    pidfile = tmp_path / "leader.pid"
+    qsv = AsyncQsv(fake_qsv(IGNORE_SIGTERM_AND_HANG), kill_grace=2)
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(qsv.run("stats", pidfile, timeout=0.5), 1)
+        pid = _read_pid(pidfile)
+        assert await asyncio.to_thread(_wait_dead, pid, 6), "leader survived cancellation"
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+def test_asyncio_run_returning_mid_cleanup_still_kills(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    # as above, but asyncio.run() returns right after the outer deadline, so any cleanup still
+    # running in a background task would be cancelled by the runner's shutdown
+    pidfile = tmp_path / "leader.pid"
+    qsv = AsyncQsv(fake_qsv(IGNORE_SIGTERM_AND_HANG), kill_grace=2)
+
+    async def main() -> None:
+        await asyncio.wait_for(qsv.run("stats", pidfile, timeout=0.5), 1)
+
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            asyncio.run(main())
+        assert _wait_dead(_read_pid(pidfile), 6), "leader survived the runner's shutdown"
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+def test_asyncio_run_cancelling_background_run_mid_cleanup_still_kills(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    # the runner's shutdown cancels the run *and* its cleanup task directly, mid-grace-wait
+    pidfile = tmp_path / "leader.pid"
+    qsv = AsyncQsv(fake_qsv(IGNORE_SIGTERM_AND_HANG), kill_grace=2)
+
+    async def main() -> None:
+        background = asyncio.create_task(qsv.run("stats", pidfile, timeout=0.5))
+        await asyncio.sleep(1)
+        assert not background.done()  # still in its SIGTERM grace wait
+
+    try:
+        asyncio.run(main())
+        assert _wait_dead(_read_pid(pidfile), 6), "leader survived the runner's shutdown"
+    finally:
+        _kill(_read_pid(pidfile))

@@ -12,6 +12,21 @@ All notable changes to this project are documented here. The format follows
   included repository tooling files (`CLAUDE.md`, `.serena/`, `uv.lock`, `.github/`). The wheel
   is unchanged. ([#2](https://github.com/dathere/qsv-client/pull/2))
 
+### Fixed
+
+- A timeout now raises within a few `kill_grace` periods even when a process qsv started has
+  left the process group and still holds its output pipes, including when qsv ignores SIGTERM.
+  Previously the run waited for that process to exit. Output it still holds is dropped, and
+  `AsyncQsv` closes its pipe file descriptors instead of keeping them open until it exits.
+- Cancelling an `AsyncQsv` run now always kills its process group, even when the cancellation
+  arrives during timeout cleanup or comes from `asyncio.run()` shutting down. A cancelled run
+  finishes its teardown before the cancellation propagates.
+- A failed run whose stdout is not valid UTF-8 raises the typed `QsvError` instead of
+  `UnicodeDecodeError`.
+- `count()` and `headers()` work with `stdout_path=` and `text=False` instead of raising
+  `IndexError`.
+- A relative `binary` path now works together with `cwd=`. `find_qsv` returns absolute paths.
+
 ## [0.1.0] - 2026-10-08
 
 First release. ([#1](https://github.com/dathere/qsv-client/pull/1))

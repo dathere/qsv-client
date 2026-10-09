@@ -5,6 +5,10 @@ qsv commands can start their own children (``validate`` runs pyshacl, ``viz`` a 
 run gets its own session (process group) and the whole group is signalled: SIGTERM first,
 then SIGKILL after a grace period. On Windows the process is started in a new process group
 and killed directly; grandchildren are not reaped there.
+
+A descendant that leaves the group (e.g. by calling ``setsid``) survives the kill and may keep
+the output pipes open; after a timeout, output is collected for at most ``kill_grace`` seconds
+and anything that descendant still holds is dropped.
 """
 
 from __future__ import annotations
@@ -15,11 +19,13 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
-from typing import IO, Any
+from typing import IO, Any, TypeVar
 
 IS_WINDOWS = sys.platform == "win32"
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -78,7 +84,15 @@ def run_sync(
     except subprocess.TimeoutExpired:
         timed_out = True
         _terminate_sync(proc, kill_grace)
-        out, err = proc.communicate()
+        try:
+            out, err = proc.communicate(timeout=kill_grace)
+        except subprocess.TimeoutExpired:
+            # a descendant that left the group still holds the pipes: drop its output
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            proc.wait()
+            out, err = b"", b""
     except BaseException:
         # KeyboardInterrupt etc.: never leave a qsv process group running behind us
         _terminate_sync(proc, kill_grace)
@@ -96,13 +110,87 @@ async def _terminate_async(proc: asyncio.subprocess.Process, grace: float) -> No
     if IS_WINDOWS:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
-        await proc.wait()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), grace)
         return
+    # proc.wait() also waits for the output pipes to close, which a descendant that left the
+    # group can hold open indefinitely, so every wait here is bounded
     _signal_group(proc.pid, signal.SIGTERM)
     with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(proc.wait(), grace)
     _signal_group(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(proc.wait(), grace)
+
+
+async def _release_async(proc: asyncio.subprocess.Process) -> None:
+    """Close our ends of the pipes, then reap the (already killed) leader.
+
+    Without the close, pipes held by an escaped descendant would keep their fds open and
+    ``wait()`` pending until it exits. asyncio has no public API for this.
+    """
+    _close_pipes(proc)
     await proc.wait()
+
+
+def _close_pipes(proc: asyncio.subprocess.Process) -> None:
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        transport.close()
+
+
+def _kill_now(proc: asyncio.subprocess.Process) -> None:
+    """Teardown was itself cancelled (e.g. by ``asyncio.run()`` shutting down): skip the
+    remaining grace and do the parts that matter synchronously."""
+    if IS_WINDOWS:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+    else:
+        _signal_group(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
+    _close_pipes(proc)
+
+
+async def _reap_async(proc: asyncio.subprocess.Process, grace: float) -> None:
+    try:
+        await _terminate_async(proc, grace)
+        await _release_async(proc)
+    except asyncio.CancelledError:
+        _kill_now(proc)
+        raise
+
+
+async def _timeout_cleanup(proc: asyncio.subprocess.Process, grace: float) -> bytes:
+    """Kill and release a timed-out run; return whatever stderr arrives within ``grace``."""
+    try:
+        await _terminate_async(proc, grace)
+        err = b""
+        if proc.stderr is not None:
+            with contextlib.suppress(Exception):
+                err = await asyncio.wait_for(proc.stderr.read(), grace)
+        await _release_async(proc)
+    except asyncio.CancelledError:
+        _kill_now(proc)
+        raise
+    return err
+
+
+async def _finish_despite_cancel(coro: Coroutine[Any, Any, _T]) -> _T:
+    """Run ``coro`` to completion even if we are cancelled meanwhile, then re-raise the cancel.
+
+    ``asyncio.shield`` alone would propagate the cancellation at once, leaving the cleanup in
+    a background task that an ``asyncio.run()`` returning right after would cancel, skipping
+    the SIGKILL.
+    """
+    task = asyncio.ensure_future(coro)
+    cancel: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as exc:
+            cancel = exc
+    if cancel is not None:
+        raise cancel
+    return task.result()
 
 
 async def run_async(
@@ -129,14 +217,11 @@ async def run_async(
         out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout)
     except asyncio.TimeoutError:
         timed_out = True
-        await _terminate_async(proc, kill_grace)
-        out, err = b"", b""
-        if proc.stderr is not None:
-            with contextlib.suppress(Exception):
-                err = await proc.stderr.read()
+        # a cancellation arriving mid-cleanup must not skip the SIGKILL or the release
+        out, err = b"", await _finish_despite_cancel(_timeout_cleanup(proc, kill_grace))
     except BaseException:
         # task cancelled (or the loop is shutting down): reap the group, then propagate
-        await asyncio.shield(_terminate_async(proc, kill_grace))
+        await _finish_despite_cancel(_reap_async(proc, kill_grace))
         raise
     assert proc.returncode is not None
     return RawResult(

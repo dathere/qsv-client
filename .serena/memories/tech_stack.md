@@ -1,6 +1,6 @@
 # Tech stack
 
-- Python >=3.10 (ruff `target-version = py310`; CI matrix 3.10–3.13 on ubuntu + macos). Use `from __future__ import annotations`; no 3.11+ only stdlib features.
+- Python >=3.10 (ruff `target-version = py310`; CI matrix 3.10–3.14 on ubuntu + macos). Use `from __future__ import annotations`; no 3.11+ only stdlib features.
 - No runtime dependencies — keep it that way (stdlib `subprocess`/`asyncio` only).
 - Package/env manager: uv (`uv.lock` committed); dev deps in `[dependency-groups].dev`: pytest, pytest-asyncio, mypy, ruff.
 - Build: hatchling, src layout (`src/qsv_client`). License AGPL-3.0-or-later.
