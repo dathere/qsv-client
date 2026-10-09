@@ -43,13 +43,14 @@ def find_qsv(binary: str | os.PathLike[str] | None = None) -> str:
         candidates.extend(DEFAULT_BINARIES)
     for cand in candidates:
         if os.sep in cand or (os.altsep and os.altsep in cand):
-            # absolute, so a relative path still resolves when the run sets cwd=
+            # absolute, so a relative path still resolves when the run sets cwd=. Not
+            # normalized: collapsing `..` lexically would be wrong after a symlinked dir.
             if Path(cand).is_file():
-                return os.path.abspath(cand)
+                return str(Path(cand).absolute())
             continue
         found = shutil.which(cand)
         if found:
-            return os.path.abspath(found)
+            return str(Path(found).absolute())
     raise QsvNotFound(
         f"no qsv binary found (tried {', '.join(candidates)}). Install qsv "
         "(https://github.com/dathere/qsv/releases), put it on PATH, or pass binary= / set QSV_BIN."

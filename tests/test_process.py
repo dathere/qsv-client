@@ -231,3 +231,48 @@ def test_relative_binary_with_cwd(
     other.mkdir()
     monkeypatch.chdir(fake.parent)
     assert Qsv(f"./{fake.name}", cwd=other).run("x").stdout == "ok\n"
+
+
+def test_relative_binary_through_symlinked_dir(
+    fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # work/link -> bin, so work/link/../fake-qsv is tmp_path/fake-qsv, not work/fake-qsv
+    fake_qsv("print('ok')")
+    (tmp_path / "bin").mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "link").symlink_to(tmp_path / "bin")
+    monkeypatch.chdir(work)
+    assert Qsv("link/../fake-qsv").run("x").stdout == "ok\n"
+
+
+async def test_async_timeout_bounded_when_leader_ignores_sigterm_and_grandchild_escapes(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "child.pid"
+    body = "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    qsv = AsyncQsv(fake_qsv(body + HANG_WITH_ESCAPED_GRANDCHILD), kill_grace=0.5)
+    started = time.monotonic()
+    try:
+        with pytest.raises(QsvTimeout):
+            await qsv.run("stats", pidfile, timeout=1)
+        assert time.monotonic() - started < 10
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+async def test_async_timeout_releases_pipes_held_by_escaped_grandchild(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    qsv = AsyncQsv(fake_qsv(HANG_WITH_ESCAPED_GRANDCHILD), kill_grace=0.3)
+    pidfiles = [tmp_path / f"child{i}.pid" for i in range(3)]
+    open_fds = len(os.listdir("/dev/fd"))
+    try:
+        for pidfile in pidfiles:
+            with pytest.raises(QsvTimeout):
+                await qsv.run("stats", pidfile, timeout=0.5)
+        await asyncio.sleep(0)  # asyncio closes pipe fds in a call_soon callback
+        assert len(os.listdir("/dev/fd")) <= open_fds
+    finally:
+        for pidfile in pidfiles:
+            _kill(_read_pid(pidfile))

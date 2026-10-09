@@ -110,11 +110,31 @@ async def _terminate_async(proc: asyncio.subprocess.Process, grace: float) -> No
             proc.kill()
         await proc.wait()
         return
+    # proc.wait() also waits for the output pipes to close, which a descendant that left the
+    # group can hold open indefinitely, so every wait here is bounded
     _signal_group(proc.pid, signal.SIGTERM)
     with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(proc.wait(), grace)
     _signal_group(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(proc.wait(), grace)
+
+
+async def _release_async(proc: asyncio.subprocess.Process) -> None:
+    """Close our ends of the pipes, then reap the (already killed) leader.
+
+    Without the close, pipes held by an escaped descendant would keep their fds open and
+    ``wait()`` pending until it exits. asyncio has no public API for this.
+    """
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        transport.close()
     await proc.wait()
+
+
+async def _reap_async(proc: asyncio.subprocess.Process, grace: float) -> None:
+    await _terminate_async(proc, grace)
+    await _release_async(proc)
 
 
 async def run_async(
@@ -146,9 +166,10 @@ async def run_async(
         if proc.stderr is not None:
             with contextlib.suppress(Exception):
                 err = await asyncio.wait_for(proc.stderr.read(), kill_grace)
+        await _release_async(proc)
     except BaseException:
         # task cancelled (or the loop is shutting down): reap the group, then propagate
-        await asyncio.shield(_terminate_async(proc, kill_grace))
+        await asyncio.shield(_reap_async(proc, kill_grace))
         raise
     assert proc.returncode is not None
     return RawResult(

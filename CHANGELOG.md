@@ -14,9 +14,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- A timeout now raises within about `timeout + 2 * kill_grace` even when a process qsv started
-  has left the process group and still holds its output pipes. Previously the run waited for
-  that process to exit. Output it still holds is dropped.
+- A timeout now raises within a few `kill_grace` periods even when a process qsv started has
+  left the process group and still holds its output pipes, including when qsv ignores SIGTERM.
+  Previously the run waited for that process to exit. Output it still holds is dropped, and
+  `AsyncQsv` closes its pipe file descriptors instead of keeping them open until it exits.
 - A failed run whose stdout is not valid UTF-8 raises the typed `QsvError` instead of
   `UnicodeDecodeError`.
 - `count()` and `headers()` work with `stdout_path=` and `text=False` instead of raising
