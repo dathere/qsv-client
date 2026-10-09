@@ -6,19 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-09
+
 ### Added
 
 - Windows support. qsv is started suspended and placed in its own Job Object before it runs,
-  so a timeout or cancellation stops qsv *and* everything it started: `CTRL_BREAK_EVENT`
-  first, then `TerminateJobObject` after `kill_grace`. Previously only `qsv.exe` itself was
-  killed. With `inherit_env=False`, `SYSTEMROOT` is still passed on Windows, since many
-  programs fail to start without it. CI now runs the full test suite on Windows.
+  so a timeout, cancellation or Ctrl-C stops qsv *and* everything it started:
+  `CTRL_BREAK_EVENT` first, then `TerminateJobObject` after `kill_grace`. Previously only
+  `qsv.exe` itself was killed. With `inherit_env=False`, `SYSTEMROOT` is still passed on
+  Windows, since many programs fail to start without it. CI runs the full test suite on
+  Windows. ([#4](https://github.com/dathere/qsv-client/pull/4),
+  [#5](https://github.com/dathere/qsv-client/pull/5))
 
 ### Changed
 
 - The sdist now contains only the package, tests, README, CHANGELOG and LICENSE. 0.1.0's also
   included repository tooling files (`CLAUDE.md`, `.serena/`, `uv.lock`, `.github/`). The wheel
   is unchanged. ([#2](https://github.com/dathere/qsv-client/pull/2))
+- Tested on Python 3.14 as well as 3.10–3.13. ([#3](https://github.com/dathere/qsv-client/pull/3))
 
 ### Fixed
 
@@ -26,14 +31,22 @@ All notable changes to this project are documented here. The format follows
   left the process group and still holds its output pipes, including when qsv ignores SIGTERM.
   Previously the run waited for that process to exit. Output it still holds is dropped, and
   `AsyncQsv` closes its pipe file descriptors instead of keeping them open until it exits.
-- Cancelling an `AsyncQsv` run now always kills its process group, even when the cancellation
-  arrives during timeout cleanup or comes from `asyncio.run()` shutting down. A cancelled run
-  finishes its teardown before the cancellation propagates.
+  ([#3](https://github.com/dathere/qsv-client/pull/3))
+- Cancelling an `AsyncQsv` run now always kills qsv and everything it started, even when the
+  cancellation arrives during timeout cleanup or comes from `asyncio.run()` shutting down. A
+  cancelled run finishes its teardown before the cancellation propagates.
+  ([#3](https://github.com/dathere/qsv-client/pull/3))
+- A second Ctrl-C while a sync run is waiting out `kill_grace` no longer skips the forced kill,
+  which left a qsv that ignores the polite stop running. A Ctrl-C right after qsv starts is
+  handled the same way. ([#5](https://github.com/dathere/qsv-client/pull/5))
+- On Windows with Python 3.10–3.12, a run whose child stops reading a large `stdin=` payload
+  no longer hangs past its timeout. ([#5](https://github.com/dathere/qsv-client/pull/5))
 - A failed run whose stdout is not valid UTF-8 raises the typed `QsvError` instead of
-  `UnicodeDecodeError`.
+  `UnicodeDecodeError`. ([#3](https://github.com/dathere/qsv-client/pull/3))
 - `count()` and `headers()` work with `stdout_path=` and `text=False` instead of raising
-  `IndexError`.
+  `IndexError`. ([#3](https://github.com/dathere/qsv-client/pull/3))
 - A relative `binary` path now works together with `cwd=`. `find_qsv` returns absolute paths.
+  ([#3](https://github.com/dathere/qsv-client/pull/3))
 
 ## [0.1.0] - 2026-10-08
 
@@ -62,5 +75,6 @@ First release. ([#1](https://github.com/dathere/qsv-client/pull/1))
   environment variables, so keys never appear on the command line.
 - Type hints (`py.typed`), no runtime dependencies, Python 3.10+.
 
-[Unreleased]: https://github.com/dathere/qsv-client/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/dathere/qsv-client/compare/0.2.0...HEAD
+[0.2.0]: https://github.com/dathere/qsv-client/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/dathere/qsv-client/releases/tag/0.1.0
