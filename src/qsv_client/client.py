@@ -43,12 +43,13 @@ def find_qsv(binary: str | os.PathLike[str] | None = None) -> str:
         candidates.extend(DEFAULT_BINARIES)
     for cand in candidates:
         if os.sep in cand or (os.altsep and os.altsep in cand):
+            # absolute, so a relative path still resolves when the run sets cwd=
             if Path(cand).is_file():
-                return str(Path(cand))
+                return os.path.abspath(cand)
             continue
         found = shutil.which(cand)
         if found:
-            return found
+            return os.path.abspath(found)
     raise QsvNotFound(
         f"no qsv binary found (tried {', '.join(candidates)}). Install qsv "
         "(https://github.com/dathere/qsv/releases), put it on PATH, or pass binary= / set QSV_BIN."
@@ -122,6 +123,8 @@ class _Base:
                 ``QSV_LLM_APIKEY`` / ``QSV_LLM_BASE_URL`` / ``QSV_LLM_MODEL`` environment
                 variables, so the key never appears in the process table.
             min_version: raise :class:`QsvVersionError` on first use if the binary is older.
+            kill_grace: seconds to wait after SIGTERM before SIGKILL on timeout or
+                cancellation, and the most spent collecting output after the kill.
         """
         self.binary = find_qsv(binary)
         self.timeout = timeout
@@ -187,8 +190,16 @@ class _Base:
                 args=argv,
                 stderr=stderr,
             )
+        # before decoding stdout, so undecodable output can't mask the typed error
+        if check and raw.exit_code not in SUCCESS_EXIT_CODES:
+            raise error_from_run(
+                exit_code=raw.exit_code,
+                stderr=stderr,
+                args=argv,
+                command=command or None,
+            )
         captured = stdout_path is None
-        result = QsvResult(
+        return QsvResult(
             args=tuple(argv),
             exit_code=raw.exit_code,
             stdout=raw.stdout.decode("utf-8") if captured and text else None,
@@ -197,14 +208,6 @@ class _Base:
             duration=duration,
             stdout_path=stdout_path,
         )
-        if check and not result.ok:
-            raise error_from_run(
-                exit_code=raw.exit_code,
-                stderr=stderr,
-                args=argv,
-                command=command or None,
-            )
-        return result
 
 
 def _open_stdout(
@@ -349,12 +352,12 @@ class Qsv(_Base):
 
     def count(self, path: Arg, *args: Arg, **kw: Any) -> int:
         """Number of records (``qsv count``)."""
-        out = self.run("count", path, *args, **kw).stdout or ""
+        out = self.run("count", path, *args, **kw)._text()
         return int(out.strip().split()[0].split(";")[0].replace(",", ""))
 
     def headers(self, path: Arg, *args: Arg, **kw: Any) -> list[str]:
         """Column names (``qsv headers --just-names``)."""
-        out = self.run("headers", "--just-names", path, *args, **kw).stdout or ""
+        out = self.run("headers", "--just-names", path, *args, **kw)._text()
         return [line for line in out.splitlines() if line]
 
     def stats(self, path: Arg, *args: Arg, **kw: Any) -> list[dict[str, str]]:
@@ -474,11 +477,11 @@ class AsyncQsv(_Base):
             await self.capabilities()
 
     async def count(self, path: Arg, *args: Arg, **kw: Any) -> int:
-        out = (await self.run("count", path, *args, **kw)).stdout or ""
+        out = (await self.run("count", path, *args, **kw))._text()
         return int(out.strip().split()[0].split(";")[0].replace(",", ""))
 
     async def headers(self, path: Arg, *args: Arg, **kw: Any) -> list[str]:
-        out = (await self.run("headers", "--just-names", path, *args, **kw)).stdout or ""
+        out = (await self.run("headers", "--just-names", path, *args, **kw))._text()
         return [line for line in out.splitlines() if line]
 
     async def stats(self, path: Arg, *args: Arg, **kw: Any) -> list[dict[str, str]]:

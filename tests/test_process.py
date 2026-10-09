@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from qsv_client import AsyncQsv, Qsv, QsvTimeout
+from qsv_client import AsyncQsv, Qsv, QsvTimeout, QsvUsageError
 
 # The fake starts a grandchild that inherits stdout and records its pid, then hangs. If only
 # the fake were killed, the grandchild would keep the stdout pipe open and the run would hang
@@ -142,3 +145,89 @@ def test_warning_exit_code_is_success(fake_qsv: Callable[[str], str]) -> None:
     res = Qsv(fake_qsv("import sys; print('done'); sys.exit(255)")).run("x")
     assert res.ok
     assert res.exit_code == 255
+
+
+# Like HANG_WITH_GRANDCHILD, but the grandchild leaves the process group, so the group kill
+# misses it and it keeps the output pipes open.
+HANG_WITH_ESCAPED_GRANDCHILD = """
+import subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                         start_new_session=True)
+open(sys.argv[-1], "w").write(str(child.pid))
+time.sleep(60)
+"""
+
+
+def _kill(pid: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+
+
+def test_timeout_bounded_when_grandchild_escapes_group(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "child.pid"
+    qsv = Qsv(fake_qsv(HANG_WITH_ESCAPED_GRANDCHILD), kill_grace=0.5)
+    started = time.monotonic()
+    try:
+        with pytest.raises(QsvTimeout):
+            qsv.run("stats", pidfile, timeout=1)
+        assert time.monotonic() - started < 10
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+async def test_async_timeout_bounded_when_grandchild_escapes_group(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "child.pid"
+    qsv = AsyncQsv(fake_qsv(HANG_WITH_ESCAPED_GRANDCHILD), kill_grace=0.5)
+    started = time.monotonic()
+    try:
+        with pytest.raises(QsvTimeout):
+            await qsv.run("stats", pidfile, timeout=1)
+        assert time.monotonic() - started < 10
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+def test_undecodable_stdout_still_raises_typed_error(fake_qsv: Callable[[str], str]) -> None:
+    qsv = Qsv(fake_qsv("import sys; sys.stdout.buffer.write(b'\\xff'); sys.exit(2)"))
+    with pytest.raises(QsvUsageError):
+        qsv.run("x")
+
+
+COUNT_AND_HEADERS = """
+import sys
+print("3" if sys.argv[1] == "count" else "name\\nn")
+"""
+
+
+def test_count_and_headers_without_captured_text(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    qsv = Qsv(fake_qsv(COUNT_AND_HEADERS))
+    kws: list[dict[str, Any]] = [{"stdout_path": tmp_path / "out"}, {"text": False}]
+    for kw in kws:
+        assert qsv.count("in.csv", **kw) == 3
+        assert qsv.headers("in.csv", **kw) == ["name", "n"]
+
+
+async def test_async_count_and_headers_without_captured_text(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    qsv = AsyncQsv(fake_qsv(COUNT_AND_HEADERS))
+    kws: list[dict[str, Any]] = [{"stdout_path": tmp_path / "out"}, {"text": False}]
+    for kw in kws:
+        assert await qsv.count("in.csv", **kw) == 3
+        assert await qsv.headers("in.csv", **kw) == ["name", "n"]
+
+
+def test_relative_binary_with_cwd(
+    fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = Path(fake_qsv("print('ok')"))
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(fake.parent)
+    assert Qsv(f"./{fake.name}", cwd=other).run("x").stdout == "ok\n"

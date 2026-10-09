@@ -5,6 +5,10 @@ qsv commands can start their own children (``validate`` runs pyshacl, ``viz`` a 
 run gets its own session (process group) and the whole group is signalled: SIGTERM first,
 then SIGKILL after a grace period. On Windows the process is started in a new process group
 and killed directly; grandchildren are not reaped there.
+
+A descendant that leaves the group (e.g. by calling ``setsid``) survives the kill and may keep
+the output pipes open; after a timeout, output is collected for at most ``kill_grace`` seconds
+and anything that descendant still holds is dropped.
 """
 
 from __future__ import annotations
@@ -78,7 +82,15 @@ def run_sync(
     except subprocess.TimeoutExpired:
         timed_out = True
         _terminate_sync(proc, kill_grace)
-        out, err = proc.communicate()
+        try:
+            out, err = proc.communicate(timeout=kill_grace)
+        except subprocess.TimeoutExpired:
+            # a descendant that left the group still holds the pipes: drop its output
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            proc.wait()
+            out, err = b"", b""
     except BaseException:
         # KeyboardInterrupt etc.: never leave a qsv process group running behind us
         _terminate_sync(proc, kill_grace)
@@ -133,7 +145,7 @@ async def run_async(
         out, err = b"", b""
         if proc.stderr is not None:
             with contextlib.suppress(Exception):
-                err = await proc.stderr.read()
+                err = await asyncio.wait_for(proc.stderr.read(), kill_grace)
     except BaseException:
         # task cancelled (or the loop is shutting down): reap the group, then propagate
         await asyncio.shield(_terminate_async(proc, kill_grace))
