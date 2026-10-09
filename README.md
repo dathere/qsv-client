@@ -1,5 +1,7 @@
 # qsv-client
 
+[![PyPI](https://img.shields.io/pypi/v/qsv-client)](https://pypi.org/project/qsv-client/)
+
 Run the [qsv](https://github.com/dathere/qsv) CSV toolkit from Python, without the usual
 subprocess pitfalls:
 
