@@ -18,6 +18,9 @@ All notable changes to this project are documented here. The format follows
   left the process group and still holds its output pipes, including when qsv ignores SIGTERM.
   Previously the run waited for that process to exit. Output it still holds is dropped, and
   `AsyncQsv` closes its pipe file descriptors instead of keeping them open until it exits.
+- Cancelling an `AsyncQsv` run now always kills its process group, even when the cancellation
+  arrives during timeout cleanup or comes from `asyncio.run()` shutting down. A cancelled run
+  finishes its teardown before the cancellation propagates.
 - A failed run whose stdout is not valid UTF-8 raises the typed `QsvError` instead of
   `UnicodeDecodeError`.
 - `count()` and `headers()` work with `stdout_path=` and `text=False` instead of raising
