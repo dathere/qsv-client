@@ -409,3 +409,66 @@ def test_asyncio_run_cancelling_background_run_mid_cleanup_still_kills(
         assert _wait_dead(_read_pid(pidfile), 6), "leader survived the runner's shutdown"
     finally:
         _kill(_read_pid(pidfile))
+
+
+def _wait_reaped(pid: int, within: float = 5.0) -> bool:
+    """Our own child that nothing else will reap: reap it here, so a SIGKILLed one counts."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            done, _ = os.waitpid(pid, os.WNOHANG)  # type: ignore[attr-defined,unused-ignore]
+        except ChildProcessError:
+            return True
+        if done:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM")
+def test_second_interrupt_during_grace_wait_still_kills(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    # times out at 0.5s and starts its 3s grace wait; a "second Ctrl-C" at 1s interrupts it
+    pidfile = tmp_path / "leader.pid"
+    qsv = Qsv(fake_qsv(IGNORE_STOP_AND_HANG), kill_grace=3)
+
+    def interrupt(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGALRM, interrupt)  # type: ignore[attr-defined,unused-ignore]
+    signal.setitimer(signal.ITIMER_REAL, 1.0)  # type: ignore[attr-defined,unused-ignore]
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            qsv.run("stats", pidfile, timeout=0.5)
+        assert _wait_reaped(_read_pid(pidfile)), "leader survived the second interrupt"
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)  # type: ignore[attr-defined,unused-ignore]
+        signal.signal(signal.SIGALRM, previous)  # type: ignore[attr-defined,unused-ignore]
+        _kill(_read_pid(pidfile))
+
+
+# 4 MiB, far more than any OS pipe buffer, to a fake that never reads stdin
+HANG_WITHOUT_READING = """
+import time
+time.sleep(60)
+"""
+BIG_STDIN = b"x" * (4 << 20)
+
+
+def test_timeout_bounded_when_stdin_is_not_read(fake_qsv: Callable[[str], str]) -> None:
+    qsv = Qsv(fake_qsv(HANG_WITHOUT_READING), kill_grace=0.5)
+    started = time.monotonic()
+    with pytest.raises(QsvTimeout):
+        qsv.run("stats", stdin=BIG_STDIN, timeout=1)
+    assert time.monotonic() - started < 10
+
+
+async def test_async_timeout_bounded_when_stdin_is_not_read(
+    fake_qsv: Callable[[str], str],
+) -> None:
+    qsv = AsyncQsv(fake_qsv(HANG_WITHOUT_READING), kill_grace=0.5)
+    started = time.monotonic()
+    with pytest.raises(QsvTimeout):
+        await qsv.run("stats", stdin=BIG_STDIN, timeout=1)
+    assert time.monotonic() - started < 10

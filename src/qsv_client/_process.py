@@ -22,6 +22,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from typing import IO, Any, TypeVar
@@ -124,10 +125,40 @@ else:
 
 
 def _terminate_sync(proc: subprocess.Popen[bytes], tree: _ProcessTree, grace: float) -> None:
-    tree.interrupt()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=grace)
-    tree.kill()
+    try:
+        tree.interrupt()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=grace)
+    finally:
+        # even when a second Ctrl-C interrupts the grace wait; then reap the leader, which the
+        # forced kill ends at once, so it is not left behind as a zombie
+        tree.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=grace)
+
+
+def _feed_stdin_in_thread(proc: subprocess.Popen[bytes], data: bytes) -> threading.Thread:
+    """Write ``data`` to the child's stdin from a thread, then close it.
+
+    Before Python 3.13, ``communicate()`` on Windows writes stdin synchronously before it
+    checks its timeout, so a child that stops reading would block it forever. Detaching stdin
+    leaves ``communicate()`` only the reads, which do honor the timeout; killing the tree
+    breaks the pipe and ends this thread.
+    """
+    pipe, proc.stdin = proc.stdin, None
+
+    def feed() -> None:
+        assert pipe is not None
+        try:
+            with contextlib.suppress(OSError):
+                pipe.write(data)
+        finally:
+            with contextlib.suppress(OSError):
+                pipe.close()
+
+    thread = threading.Thread(target=feed, name="qsv-stdin", daemon=True)
+    thread.start()
+    return thread
 
 
 def run_sync(
@@ -150,6 +181,9 @@ def run_sync(
         **_spawn_kwargs(),
     )
     tree = _ProcessTree(proc.pid)
+    feeder = None
+    if IS_WINDOWS and stdin is not None:
+        feeder, stdin = _feed_stdin_in_thread(proc, stdin), None
     timed_out = False
     try:
         out, err = proc.communicate(input=stdin, timeout=timeout)
@@ -172,6 +206,13 @@ def run_sync(
         raise
     finally:
         tree.close()
+        if feeder is not None:
+            feeder.join(kill_grace)
+        # communicate() closes them when it finishes; an exception escaping first would not
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None and not pipe.closed:
+                with contextlib.suppress(OSError):
+                    pipe.close()
     return RawResult(
         exit_code=proc.returncode,
         stdout=out or b"",
