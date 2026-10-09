@@ -414,6 +414,8 @@ def test_asyncio_run_cancelling_background_run_mid_cleanup_still_kills(
 
 def _wait_reaped(pid: int, within: float = 5.0) -> bool:
     """Our own child that nothing else will reap: reap it here, so a SIGKILLed one counts."""
+    if sys.platform == "win32":  # no zombies (or waitpid) there
+        return _wait_dead(pid, within)
     deadline = time.monotonic() + within
     while time.monotonic() < deadline:
         try:
@@ -479,10 +481,13 @@ class _Interrupted(BaseException):
     """Stands in for Ctrl-C (or any BaseException) landing during setup after the spawn."""
 
 
-def _interrupting_tree(pidfile: Path) -> type:
+def _interrupting_tree(spawned: list[int]) -> type:
+    """A setup that is interrupted at once. On Windows qsv is then still suspended (it never
+    runs), so record the pid we were handed rather than wait for the fake to write one."""
+
     class Tree(_process._ProcessTree):
         def __init__(self, pid: int) -> None:
-            _read_pid(pidfile)  # let the fake get going, so its death can be checked
+            spawned.append(pid)
             raise _Interrupted
 
     return Tree
@@ -491,27 +496,29 @@ def _interrupting_tree(pidfile: Path) -> type:
 def test_interrupt_during_setup_still_kills(
     fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    pidfile = tmp_path / "leader.pid"
-    monkeypatch.setattr(_process, "_ProcessTree", _interrupting_tree(pidfile))
+    spawned: list[int] = []
+    monkeypatch.setattr(_process, "_ProcessTree", _interrupting_tree(spawned))
     try:
         with pytest.raises(_Interrupted):
-            Qsv(fake_qsv(IGNORE_STOP_AND_HANG)).run("stats", pidfile)
-        assert _wait_reaped(_read_pid(pidfile)), "leader survived an interrupted setup"
+            Qsv(fake_qsv(IGNORE_STOP_AND_HANG)).run("stats", tmp_path / "leader.pid")
+        assert _wait_dead(spawned[0]), "leader survived an interrupted setup"
     finally:
-        _kill(_read_pid(pidfile))
+        for pid in spawned:
+            _kill(pid)
 
 
 async def test_async_interrupt_during_setup_still_kills(
     fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    pidfile = tmp_path / "leader.pid"
-    monkeypatch.setattr(_process, "_ProcessTree", _interrupting_tree(pidfile))
+    spawned: list[int] = []
+    monkeypatch.setattr(_process, "_ProcessTree", _interrupting_tree(spawned))
     try:
         with pytest.raises(_Interrupted):
-            await AsyncQsv(fake_qsv(IGNORE_STOP_AND_HANG)).run("stats", pidfile)
-        assert await asyncio.to_thread(_wait_dead, _read_pid(pidfile)), "leader survived"
+            await AsyncQsv(fake_qsv(IGNORE_STOP_AND_HANG)).run("stats", tmp_path / "leader.pid")
+        assert await asyncio.to_thread(_wait_dead, spawned[0]), "leader survived"
     finally:
-        _kill(_read_pid(pidfile))
+        for pid in spawned:
+            _kill(pid)
 
 
 def test_stdin_feeder_failing_to_start_still_kills(
