@@ -15,6 +15,7 @@ uv run ruff format . && uv run ruff check . && uv run mypy            # must be 
 
 CI runs lint, format check, and mypy, plus tests on ubuntu/macos x Python 3.10–3.13 against
 qsv, qsvlite, and qsvdp (Linux only).
+On Windows (Python 3.10 and 3.14) it runs only the integration tests, against qsv and qsvlite.
 
 ## Layout (`src/qsv_client/`)
 
