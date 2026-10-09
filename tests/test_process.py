@@ -276,3 +276,27 @@ async def test_async_timeout_releases_pipes_held_by_escaped_grandchild(
     finally:
         for pidfile in pidfiles:
             _kill(_read_pid(pidfile))
+
+
+IGNORE_SIGTERM_AND_HANG = """
+import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open(sys.argv[-1], "w").write(str(os.getpid()))
+time.sleep(60)
+"""
+
+
+async def test_async_cancel_during_timeout_cleanup_still_kills(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    # the run times out at 0.5s and starts its 2s SIGTERM grace wait; the outer deadline at
+    # 1s cancels it mid-cleanup, which must not skip the SIGKILL
+    pidfile = tmp_path / "leader.pid"
+    qsv = AsyncQsv(fake_qsv(IGNORE_SIGTERM_AND_HANG), kill_grace=2)
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(qsv.run("stats", pidfile, timeout=0.5), 1)
+        pid = _read_pid(pidfile)
+        assert await asyncio.to_thread(_wait_dead, pid, 6), "leader survived cancellation"
+    finally:
+        _kill(_read_pid(pidfile))

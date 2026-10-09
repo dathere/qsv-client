@@ -108,7 +108,8 @@ async def _terminate_async(proc: asyncio.subprocess.Process, grace: float) -> No
     if IS_WINDOWS:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
-        await proc.wait()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), grace)
         return
     # proc.wait() also waits for the output pipes to close, which a descendant that left the
     # group can hold open indefinitely, so every wait here is bounded
@@ -137,6 +138,17 @@ async def _reap_async(proc: asyncio.subprocess.Process, grace: float) -> None:
     await _release_async(proc)
 
 
+async def _timeout_cleanup(proc: asyncio.subprocess.Process, grace: float) -> bytes:
+    """Kill and release a timed-out run; return whatever stderr arrives within ``grace``."""
+    await _terminate_async(proc, grace)
+    err = b""
+    if proc.stderr is not None:
+        with contextlib.suppress(Exception):
+            err = await asyncio.wait_for(proc.stderr.read(), grace)
+    await _release_async(proc)
+    return err
+
+
 async def run_async(
     argv: Sequence[str],
     *,
@@ -161,12 +173,8 @@ async def run_async(
         out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout)
     except asyncio.TimeoutError:
         timed_out = True
-        await _terminate_async(proc, kill_grace)
-        out, err = b"", b""
-        if proc.stderr is not None:
-            with contextlib.suppress(Exception):
-                err = await asyncio.wait_for(proc.stderr.read(), kill_grace)
-        await _release_async(proc)
+        # shielded, so a cancellation arriving mid-cleanup can't skip the SIGKILL or the release
+        out, err = b"", await asyncio.shield(_timeout_cleanup(proc, kill_grace))
     except BaseException:
         # task cancelled (or the loop is shutting down): reap the group, then propagate
         await asyncio.shield(_reap_async(proc, kill_grace))
