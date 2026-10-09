@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Windows support. qsv is started suspended and placed in its own Job Object before it runs,
+  so a timeout or cancellation stops qsv *and* everything it started: `CTRL_BREAK_EVENT`
+  first, then `TerminateJobObject` after `kill_grace`. Previously only `qsv.exe` itself was
+  killed. With `inherit_env=False`, `SYSTEMROOT` is still passed on Windows, since many
+  programs fail to start without it. CI now runs the full test suite on Windows.
+
 ### Changed
 
 - The sdist now contains only the package, tests, README, CHANGELOG and LICENSE. 0.1.0's also

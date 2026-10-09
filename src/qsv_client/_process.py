@@ -1,14 +1,17 @@
 """Spawn qsv and reap it, including any children it started, on timeout or cancellation.
 
 qsv commands can start their own children (``validate`` runs pyshacl, ``viz`` a webdriver,
-``describegpt`` may shell out). Killing only the qsv pid would orphan them, so on POSIX each
-run gets its own session (process group) and the whole group is signalled: SIGTERM first,
-then SIGKILL after a grace period. On Windows the process is started in a new process group
-and killed directly; grandchildren are not reaped there.
+``describegpt`` may shell out). Killing only the qsv pid would orphan them, so each run's
+process tree is tracked and stopped as a whole: first politely, then forcibly after a grace
+period.
 
-A descendant that leaves the group (e.g. by calling ``setsid``) survives the kill and may keep
-the output pipes open; after a timeout, output is collected for at most ``kill_grace`` seconds
-and anything that descendant still holds is dropped.
+- POSIX: each run gets its own session (process group). SIGTERM, then SIGKILL, to the group.
+  A descendant that leaves the group (e.g. by calling ``setsid``) survives the kill and may
+  keep the output pipes open; after a timeout, output is collected for at most ``kill_grace``
+  seconds and anything that descendant still holds is dropped.
+- Windows: qsv is created suspended, put in its own Job Object, then resumed, so every
+  process it starts is in the job and cannot leave it. ``CTRL_BREAK_EVENT`` to its process
+  group, then ``TerminateJobObject``.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from typing import IO, Any, TypeVar
@@ -36,27 +40,192 @@ class RawResult:
     timed_out: bool
 
 
-def _spawn_kwargs() -> dict[str, Any]:
-    if IS_WINDOWS:
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined,unused-ignore]
-    return {"start_new_session": True}
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    _kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    _kernel32.TerminateJobObject.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+
+    class _THREADENTRY32(ctypes.Structure):
+        _fields_ = (
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        )
+
+    _kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    _kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _kernel32.Thread32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(_THREADENTRY32))
+    _kernel32.Thread32First.restype = wintypes.BOOL
+    _kernel32.Thread32Next.argtypes = (wintypes.HANDLE, ctypes.POINTER(_THREADENTRY32))
+    _kernel32.Thread32Next.restype = wintypes.BOOL
+    _kernel32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _kernel32.OpenThread.restype = wintypes.HANDLE
+    _kernel32.ResumeThread.argtypes = (wintypes.HANDLE,)
+    _kernel32.ResumeThread.restype = wintypes.DWORD
+
+    _CREATE_SUSPENDED = 0x00000004
+    _PROCESS_TERMINATE = 0x0001
+    _PROCESS_SET_QUOTA = 0x0100
+    _TH32CS_SNAPTHREAD = 0x00000004
+    _THREAD_SUSPEND_RESUME = 0x0002
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    _RESUME_FAILED = 0xFFFFFFFF
+
+    def _spawn_kwargs() -> dict[str, Any]:
+        # its own console process group, so CTRL_BREAK_EVENT reaches qsv and its children
+        # only; suspended, so it can start nothing before it is in its Job Object
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED}
+
+    def _resume(pid: int) -> bool:
+        """Resume the threads of a process created with CREATE_SUSPENDED.
+
+        Popen closes the main thread's handle, so find it through a Toolhelp snapshot.
+        """
+        snapshot = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+        if not snapshot or snapshot == _INVALID_HANDLE_VALUE:
+            return False
+        resumed = False
+        try:
+            entry = _THREADENTRY32()
+            entry.dwSize = ctypes.sizeof(entry)
+            more = _kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while more:
+                if entry.th32OwnerProcessID == pid:
+                    thread = _kernel32.OpenThread(_THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                    if thread:
+                        try:
+                            if _kernel32.ResumeThread(thread) != _RESUME_FAILED:
+                                resumed = True
+                        finally:
+                            _kernel32.CloseHandle(thread)
+                more = _kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+        finally:
+            _kernel32.CloseHandle(snapshot)
+        return resumed
+
+    def _create_job(pid: int) -> int | None:
+        """A Job Object holding ``pid`` (and, from now on, everything it starts), or None."""
+        job = _kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        handle = _kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
+        try:
+            if handle and _kernel32.AssignProcessToJobObject(job, handle):
+                return int(job)
+        finally:
+            if handle:
+                _kernel32.CloseHandle(handle)
+        _kernel32.CloseHandle(job)
+        return None
+
+    class _ProcessTree:
+        def __init__(self, pid: int) -> None:
+            """Put the (suspended) process in a new Job Object, then let it run."""
+            self.pid = pid
+            self._job: int | None = None
+            try:
+                self._job = _create_job(pid)
+                if not _resume(pid):
+                    raise OSError(f"could not start qsv (pid {pid}): resuming its thread failed")
+            except BaseException:
+                # failed or interrupted (Ctrl-C): never leave it suspended, or running untracked
+                self.kill()
+                self.close()
+                raise
+
+        def interrupt(self) -> None:
+            with contextlib.suppress(OSError):
+                os.kill(self.pid, signal.CTRL_BREAK_EVENT)
+
+        def kill(self) -> None:
+            if self._job is not None and _kernel32.TerminateJobObject(self._job, 1):
+                return
+            # no job (creation failed): the leader is all we can reach. os.kill on Windows
+            # is TerminateProcess for anything but the console events.
+            with contextlib.suppress(OSError):
+                os.kill(self.pid, signal.SIGTERM)
+
+        def close(self) -> None:
+            if self._job is not None:
+                _kernel32.CloseHandle(self._job)
+                self._job = None
+
+else:
+
+    def _spawn_kwargs() -> dict[str, Any]:
+        return {"start_new_session": True}
+
+    def _signal_group(pid: int, sig: int) -> None:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pid, sig)
+
+    class _ProcessTree:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def interrupt(self) -> None:
+            _signal_group(self.pid, signal.SIGTERM)
+
+        def kill(self) -> None:
+            # the whole group, even if the leader already exited: its children may not have
+            _signal_group(self.pid, signal.SIGKILL)
+
+        def close(self) -> None:
+            pass
 
 
-def _signal_group(pid: int, sig: int) -> None:
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pid, sig)  # type: ignore[attr-defined,unused-ignore]
+def _terminate_sync(proc: subprocess.Popen[bytes], tree: _ProcessTree, grace: float) -> None:
+    try:
+        tree.interrupt()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=grace)
+    finally:
+        # even when a second Ctrl-C interrupts the grace wait; then reap the leader, which the
+        # forced kill ends at once, so it is not left behind as a zombie
+        tree.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=grace)
 
 
-def _terminate_sync(proc: subprocess.Popen[bytes], grace: float) -> None:
-    if IS_WINDOWS:
-        with contextlib.suppress(OSError):
-            proc.kill()
-        return
-    _signal_group(proc.pid, signal.SIGTERM)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=grace)
-    # SIGKILL the group even if the leader already exited: its children may not have
-    _signal_group(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
+def _feed_stdin_in_thread(proc: subprocess.Popen[bytes], data: bytes) -> threading.Thread:
+    """Write ``data`` to the child's stdin from a thread, then close it.
+
+    Before Python 3.13, ``communicate()`` on Windows writes stdin synchronously before it
+    checks its timeout, so a child that stops reading would block it forever. Detaching stdin
+    leaves ``communicate()`` only the reads, which do honor the timeout; killing the tree
+    breaks the pipe and ends this thread.
+    """
+    pipe = proc.stdin
+
+    def feed() -> None:
+        assert pipe is not None
+        try:
+            with contextlib.suppress(OSError):
+                pipe.write(data)
+        finally:
+            with contextlib.suppress(OSError):
+                pipe.close()
+
+    thread = threading.Thread(target=feed, name="qsv-stdin", daemon=True)
+    thread.start()
+    # only now: if start() failed, the caller still owns stdin and closes it
+    proc.stdin = None
+    return thread
 
 
 def run_sync(
@@ -78,12 +247,24 @@ def run_sync(
         cwd=cwd,
         **_spawn_kwargs(),
     )
+    try:
+        tree = _ProcessTree(proc.pid)
+    except BaseException:
+        # failed or interrupted (Ctrl-C) before there is a tree to tear down: _ProcessTree
+        # killed what it could; make sure of the leader, reap it and close its pipes
+        with contextlib.suppress(OSError):
+            proc.kill()
+        proc.communicate()
+        raise
+    feeder = None
     timed_out = False
     try:
+        if IS_WINDOWS and stdin is not None:
+            feeder, stdin = _feed_stdin_in_thread(proc, stdin), None
         out, err = proc.communicate(input=stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        _terminate_sync(proc, kill_grace)
+        _terminate_sync(proc, tree, kill_grace)
         try:
             out, err = proc.communicate(timeout=kill_grace)
         except subprocess.TimeoutExpired:
@@ -94,10 +275,19 @@ def run_sync(
             proc.wait()
             out, err = b"", b""
     except BaseException:
-        # KeyboardInterrupt etc.: never leave a qsv process group running behind us
-        _terminate_sync(proc, kill_grace)
+        # KeyboardInterrupt etc.: never leave a qsv process tree running behind us
+        _terminate_sync(proc, tree, kill_grace)
         proc.wait()
         raise
+    finally:
+        tree.close()
+        if feeder is not None:
+            feeder.join(kill_grace)
+        # communicate() closes them when it finishes; an exception escaping first would not
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe is not None and not pipe.closed:
+                with contextlib.suppress(OSError):
+                    pipe.close()
     return RawResult(
         exit_code=proc.returncode,
         stdout=out or b"",
@@ -106,19 +296,15 @@ def run_sync(
     )
 
 
-async def _terminate_async(proc: asyncio.subprocess.Process, grace: float) -> None:
-    if IS_WINDOWS:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(proc.wait(), grace)
-        return
+async def _terminate_async(
+    proc: asyncio.subprocess.Process, tree: _ProcessTree, grace: float
+) -> None:
     # proc.wait() also waits for the output pipes to close, which a descendant that left the
     # group can hold open indefinitely, so every wait here is bounded
-    _signal_group(proc.pid, signal.SIGTERM)
+    tree.interrupt()
     with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(proc.wait(), grace)
-    _signal_group(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
+    tree.kill()
     with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(proc.wait(), grace)
 
@@ -139,37 +325,35 @@ def _close_pipes(proc: asyncio.subprocess.Process) -> None:
         transport.close()
 
 
-def _kill_now(proc: asyncio.subprocess.Process) -> None:
+def _kill_now(proc: asyncio.subprocess.Process, tree: _ProcessTree) -> None:
     """Teardown was itself cancelled (e.g. by ``asyncio.run()`` shutting down): skip the
     remaining grace and do the parts that matter synchronously."""
-    if IS_WINDOWS:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-    else:
-        _signal_group(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
+    tree.kill()
     _close_pipes(proc)
 
 
-async def _reap_async(proc: asyncio.subprocess.Process, grace: float) -> None:
+async def _reap_async(proc: asyncio.subprocess.Process, tree: _ProcessTree, grace: float) -> None:
     try:
-        await _terminate_async(proc, grace)
+        await _terminate_async(proc, tree, grace)
         await _release_async(proc)
     except asyncio.CancelledError:
-        _kill_now(proc)
+        _kill_now(proc, tree)
         raise
 
 
-async def _timeout_cleanup(proc: asyncio.subprocess.Process, grace: float) -> bytes:
+async def _timeout_cleanup(
+    proc: asyncio.subprocess.Process, tree: _ProcessTree, grace: float
+) -> bytes:
     """Kill and release a timed-out run; return whatever stderr arrives within ``grace``."""
     try:
-        await _terminate_async(proc, grace)
+        await _terminate_async(proc, tree, grace)
         err = b""
         if proc.stderr is not None:
             with contextlib.suppress(Exception):
                 err = await asyncio.wait_for(proc.stderr.read(), grace)
         await _release_async(proc)
     except asyncio.CancelledError:
-        _kill_now(proc)
+        _kill_now(proc, tree)
         raise
     return err
 
@@ -179,7 +363,7 @@ async def _finish_despite_cancel(coro: Coroutine[Any, Any, _T]) -> _T:
 
     ``asyncio.shield`` alone would propagate the cancellation at once, leaving the cleanup in
     a background task that an ``asyncio.run()`` returning right after would cancel, skipping
-    the SIGKILL.
+    the forced kill.
     """
     task = asyncio.ensure_future(coro)
     cancel: asyncio.CancelledError | None = None
@@ -212,17 +396,27 @@ async def run_async(
         cwd=cwd,
         **_spawn_kwargs(),
     )
+    try:
+        tree = _ProcessTree(proc.pid)
+    except BaseException:
+        # failed or interrupted before there is a tree to tear down (see run_sync)
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.communicate()
+        raise
     timed_out = False
     try:
         out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout)
     except asyncio.TimeoutError:
         timed_out = True
-        # a cancellation arriving mid-cleanup must not skip the SIGKILL or the release
-        out, err = b"", await _finish_despite_cancel(_timeout_cleanup(proc, kill_grace))
+        # a cancellation arriving mid-cleanup must not skip the forced kill or the release
+        out, err = b"", await _finish_despite_cancel(_timeout_cleanup(proc, tree, kill_grace))
     except BaseException:
-        # task cancelled (or the loop is shutting down): reap the group, then propagate
-        await _finish_despite_cancel(_reap_async(proc, kill_grace))
+        # task cancelled (or the loop is shutting down): reap the tree, then propagate
+        await _finish_despite_cancel(_reap_async(proc, tree, kill_grace))
         raise
+    finally:
+        tree.close()
     assert proc.returncode is not None
     return RawResult(
         exit_code=proc.returncode,

@@ -118,8 +118,15 @@ runs.
 
 ## Platform notes
 
-Process-group cleanup uses POSIX sessions (Linux, macOS). On Windows, qsv is started in a new
-process group and killed directly; its own children are not reaped.
+On a timeout or cancellation, the client stops qsv and every process qsv started:
+
+- **Linux, macOS:** each run gets its own session. The client sends SIGTERM to the process
+  group, then SIGKILL after `kill_grace`. A process that leaves the group (by calling `setsid`)
+  survives.
+- **Windows:** qsv is started suspended, put in its own Job Object, and only then resumed, so
+  every process it starts is in the job and can't leave it. The client sends
+  `CTRL_BREAK_EVENT` to the run's process group, then calls `TerminateJobObject` after
+  `kill_grace`.
 
 ## Development
 
