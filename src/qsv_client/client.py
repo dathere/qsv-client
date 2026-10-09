@@ -118,13 +118,15 @@ class _Base:
                 whole process group is sent SIGTERM, then SIGKILL after ``kill_grace`` seconds,
                 and :class:`QsvTimeout` is raised.
             env: extra environment variables for every run.
-            inherit_env: start from ``os.environ`` (True) or from an empty environment.
+            inherit_env: start from ``os.environ`` (True) or from an empty environment
+                (on Windows, one holding only ``SYSTEMROOT``).
             cwd: working directory for every run.
             llm_api_key / llm_base_url / llm_model: passed to ``describegpt`` as
                 ``QSV_LLM_APIKEY`` / ``QSV_LLM_BASE_URL`` / ``QSV_LLM_MODEL`` environment
                 variables, so the key never appears in the process table.
             min_version: raise :class:`QsvVersionError` on first use if the binary is older.
-            kill_grace: seconds to wait after SIGTERM before SIGKILL on timeout or
+            kill_grace: seconds to wait between the polite stop (SIGTERM, or
+                ``CTRL_BREAK_EVENT`` on Windows) and the forced kill on timeout or
                 cancellation, and the most spent collecting output after the kill.
         """
         self.binary = find_qsv(binary)
@@ -148,6 +150,9 @@ class _Base:
 
     def _build_env(self, extra: Mapping[str, str] | None) -> dict[str, str]:
         env = dict(os.environ) if self.inherit_env else {}
+        if not self.inherit_env and _process.IS_WINDOWS and "SYSTEMROOT" in os.environ:
+            # Windows processes (the C runtime, Winsock) can fail to start without it
+            env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
         env.update(self._env)
         if extra:
             env.update(extra)

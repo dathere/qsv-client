@@ -15,7 +15,9 @@ uv run ruff format . && uv run ruff check . && uv run mypy            # must be 
 
 CI runs lint, format check, and mypy, plus tests on ubuntu/macos x Python 3.10–3.14 against
 qsv, qsvlite, and qsvdp (Linux only).
-On Windows (Python 3.10 and 3.14) it runs only the integration tests, against qsv and qsvlite.
+On Windows (Python 3.10–3.14) it runs the full suite against qsv, plus the integration tests
+against qsvlite. Windows teardown uses Job Objects via ctypes (`_ProcessTree` in `_process.py`);
+type-check it with `uv run mypy --platform win32` (the lint job runs both).
 
 ## Layout (`src/qsv_client/`)
 
@@ -32,8 +34,9 @@ On Windows (Python 3.10 and 3.14) it runs only the integration tests, against qs
 - `_Base._build_env` always sets `QSV_ERROR_FORMAT=json`. Older qsv versions ignore it, so
   their errors are classified by exit code.
 - Exit codes 0 and 255 (qsv's "warning") count as success.
-- On timeout, cancellation, or KeyboardInterrupt, the whole process group is killed: SIGTERM,
-  then SIGKILL after `kill_grace`. A timeout raises `QsvTimeout` (exit code 124) even when
+- On timeout, cancellation, or KeyboardInterrupt, the run's whole process tree is killed after
+  `kill_grace`: SIGTERM then SIGKILL to the process group on POSIX, `CTRL_BREAK_EVENT` then
+  `TerminateJobObject` on Windows. A timeout raises `QsvTimeout` (exit code 124) even when
   `check=False`.
 - LLM settings for describegpt are passed as env vars (`QSV_LLM_*`), never on argv.
 - `min_version` is enforced inside `_probe`, so it holds however the capabilities cache is
