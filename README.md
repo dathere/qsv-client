@@ -3,9 +3,10 @@
 Run the [qsv](https://github.com/dathere/qsv) CSV toolkit from Python, without the usual
 subprocess pitfalls:
 
-- **Timeouts that actually stop the work.** On timeout or task cancellation, the run's whole
-  process group gets SIGTERM, then SIGKILL after a grace period. That includes children qsv
-  started itself, which would otherwise keep the output pipe open and hang the caller.
+- **Timeouts that actually stop the work.** On a timeout, task cancellation or Ctrl-C, the
+  client stops qsv *and every process qsv started*: a polite stop first, then a forced kill
+  after a grace period. Without that, a child qsv started would keep the output pipe open and
+  hang the caller. See [Platform notes](#platform-notes) for how this works on each OS.
 - **Typed errors instead of stderr scraping.** A failure raises a `QsvError` subclass
   (`QsvUsageError`, `QsvCsvError`, `QsvIOError`, `QsvNoMatch`, `QsvTimeout`, ...) that carries
   the kind, message, exit code and command. Newer qsv builds report these as structured JSON
@@ -15,7 +16,8 @@ subprocess pitfalls:
   `qsv --capabilities` where available and falls back to parsing `--version` and `--list`.
 - **Secrets stay off the command line.** LLM settings for `describegpt` are passed as
   environment variables, so an API key never shows up in `ps` output.
-- **Sync and asyncio** clients with the same API. No runtime dependencies. Python 3.10+.
+- **Sync and asyncio** clients with the same API. No runtime dependencies. Python 3.10+ on
+  Linux, macOS and Windows.
 
 qsv itself is not bundled. Install it from the
 [qsv releases](https://github.com/dathere/qsv/releases) or a
@@ -57,6 +59,24 @@ except QsvTimeout:
 
 `check=False` returns the result even when qsv fails. Exit codes 0 and 255 (qsv's "warning",
 e.g. a broken pipe) count as success. `stdin=` feeds data on stdin; otherwise stdin is closed.
+`text=False` keeps stdout as bytes in `res.stdout_bytes`, for binary output such as
+`snappy compress`.
+
+### Client options
+
+```python
+qsv = Qsv(
+    "/opt/qsv/qsvlite",  # binary: path or name; default $QSV_BIN, then qsv/qsvmcp/qsvdp/qsvlite
+    timeout=600,  # default per-run timeout in seconds; run(..., timeout=) overrides it
+    kill_grace=5.0,  # seconds between the polite stop and the forced kill
+    env={"QSV_MAX_JOBS": "4"},  # extra environment for every run; run(..., env=) adds more
+    inherit_env=True,  # False starts from an empty environment (keeping SYSTEMROOT on Windows)
+    cwd="/data",  # working directory for every run
+)
+```
+
+A relative `binary` path is resolved against the current directory when the client is
+created, so it still works with `cwd=`.
 
 ### describegpt without exposing your key
 
@@ -81,7 +101,9 @@ n = await qsv.count("data.csv")
 caps = await qsv.capabilities()
 ```
 
-Cancelling the awaiting task kills the run's process group.
+Cancelling the awaiting task stops qsv and everything it started. This holds even when the
+cancellation comes from `asyncio.run()` shutting down. The teardown finishes before the
+cancellation propagates, so expect up to a few `kill_grace` periods.
 
 ### Capabilities and version checks
 
@@ -118,11 +140,12 @@ runs.
 
 ## Platform notes
 
-On a timeout or cancellation, the client stops qsv and every process qsv started:
+On a timeout, cancellation or Ctrl-C, the client stops qsv and every process qsv started:
 
 - **Linux, macOS:** each run gets its own session. The client sends SIGTERM to the process
   group, then SIGKILL after `kill_grace`. A process that leaves the group (by calling `setsid`)
-  survives.
+  survives. The timeout still fires on schedule, and any output that process still holds is
+  dropped.
 - **Windows:** qsv is started suspended, put in its own Job Object, and only then resumed, so
   every process it starts is in the job and can't leave it. The client sends
   `CTRL_BREAK_EVENT` to the run's process group, then calls `TerminateJobObject` after
@@ -133,7 +156,8 @@ On a timeout or cancellation, the client stops qsv and every process qsv started
 ```bash
 uv sync
 uv run pytest                        # integration tests need qsv: QSV_BIN=/path/to/qsv
-uv run ruff check . && uv run mypy
+uv run ruff format . && uv run ruff check .
+uv run mypy && uv run mypy --platform win32   # also type-checks the Windows-only code
 ```
 
 ## License
