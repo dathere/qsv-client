@@ -26,12 +26,25 @@ time.sleep(60)
 """
 
 
+def _is_zombie(pid: int) -> bool:
+    """Linux only: dead but not yet reaped. On Python 3.12+ asyncio reaps children from the
+    event loop (a pidfd reader), so a child killed as ``asyncio.run()`` shuts down is never
+    reaped by it and ``os.kill(pid, 0)`` keeps succeeding."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] == "Z"
+
+
 def _wait_dead(pid: int, within: float = 5.0) -> bool:
     deadline = time.monotonic() + within
     while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
+            return True
+        if _is_zombie(pid):
             return True
         time.sleep(0.05)
     return False
