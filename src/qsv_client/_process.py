@@ -19,11 +19,13 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
-from typing import IO, Any
+from typing import IO, Any, TypeVar
 
 IS_WINDOWS = sys.platform == "win32"
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,25 @@ async def _timeout_cleanup(proc: asyncio.subprocess.Process, grace: float) -> by
     return err
 
 
+async def _finish_despite_cancel(coro: Coroutine[Any, Any, _T]) -> _T:
+    """Run ``coro`` to completion even if we are cancelled meanwhile, then re-raise the cancel.
+
+    ``asyncio.shield`` alone would propagate the cancellation at once, leaving the cleanup in
+    a background task that an ``asyncio.run()`` returning right after would cancel, skipping
+    the SIGKILL.
+    """
+    task = asyncio.ensure_future(coro)
+    cancel: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as exc:
+            cancel = exc
+    if cancel is not None:
+        raise cancel
+    return task.result()
+
+
 async def run_async(
     argv: Sequence[str],
     *,
@@ -173,11 +194,11 @@ async def run_async(
         out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout)
     except asyncio.TimeoutError:
         timed_out = True
-        # shielded, so a cancellation arriving mid-cleanup can't skip the SIGKILL or the release
-        out, err = b"", await asyncio.shield(_timeout_cleanup(proc, kill_grace))
+        # a cancellation arriving mid-cleanup must not skip the SIGKILL or the release
+        out, err = b"", await _finish_despite_cancel(_timeout_cleanup(proc, kill_grace))
     except BaseException:
         # task cancelled (or the loop is shutting down): reap the group, then propagate
-        await asyncio.shield(_reap_async(proc, kill_grace))
+        await _finish_despite_cancel(_reap_async(proc, kill_grace))
         raise
     assert proc.returncode is not None
     return RawResult(

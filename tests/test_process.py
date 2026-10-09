@@ -300,3 +300,22 @@ async def test_async_cancel_during_timeout_cleanup_still_kills(
         assert await asyncio.to_thread(_wait_dead, pid, 6), "leader survived cancellation"
     finally:
         _kill(_read_pid(pidfile))
+
+
+def test_asyncio_run_returning_mid_cleanup_still_kills(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    # as above, but asyncio.run() returns right after the outer deadline, so any cleanup still
+    # running in a background task would be cancelled by the runner's shutdown
+    pidfile = tmp_path / "leader.pid"
+    qsv = AsyncQsv(fake_qsv(IGNORE_SIGTERM_AND_HANG), kill_grace=2)
+
+    async def main() -> None:
+        await asyncio.wait_for(qsv.run("stats", pidfile, timeout=0.5), 1)
+
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            asyncio.run(main())
+        assert _wait_dead(_read_pid(pidfile), 6), "leader survived the runner's shutdown"
+    finally:
+        _kill(_read_pid(pidfile))
