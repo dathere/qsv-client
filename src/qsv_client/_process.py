@@ -137,12 +137,16 @@ if sys.platform == "win32":
         def __init__(self, pid: int) -> None:
             """Put the (suspended) process in a new Job Object, then let it run."""
             self.pid = pid
-            self._job = _create_job(pid)
-            if not _resume(pid):
-                # never leave it suspended forever
+            self._job: int | None = None
+            try:
+                self._job = _create_job(pid)
+                if not _resume(pid):
+                    raise OSError(f"could not start qsv (pid {pid}): resuming its thread failed")
+            except BaseException:
+                # failed or interrupted (Ctrl-C): never leave it suspended, or running untracked
                 self.kill()
                 self.close()
-                raise OSError(f"could not start qsv (pid {pid}): resuming its thread failed")
+                raise
 
         def interrupt(self) -> None:
             with contextlib.suppress(OSError):
@@ -206,7 +210,7 @@ def _feed_stdin_in_thread(proc: subprocess.Popen[bytes], data: bytes) -> threadi
     leaves ``communicate()`` only the reads, which do honor the timeout; killing the tree
     breaks the pipe and ends this thread.
     """
-    pipe, proc.stdin = proc.stdin, None
+    pipe = proc.stdin
 
     def feed() -> None:
         assert pipe is not None
@@ -219,6 +223,8 @@ def _feed_stdin_in_thread(proc: subprocess.Popen[bytes], data: bytes) -> threadi
 
     thread = threading.Thread(target=feed, name="qsv-stdin", daemon=True)
     thread.start()
+    # only now: if start() failed, the caller still owns stdin and closes it
+    proc.stdin = None
     return thread
 
 
@@ -243,14 +249,18 @@ def run_sync(
     )
     try:
         tree = _ProcessTree(proc.pid)
-    except OSError:
-        proc.communicate()  # already killed: reap it and close its pipes
+    except BaseException:
+        # failed or interrupted (Ctrl-C) before there is a tree to tear down: _ProcessTree
+        # killed what it could; make sure of the leader, reap it and close its pipes
+        with contextlib.suppress(OSError):
+            proc.kill()
+        proc.communicate()
         raise
     feeder = None
-    if IS_WINDOWS and stdin is not None:
-        feeder, stdin = _feed_stdin_in_thread(proc, stdin), None
     timed_out = False
     try:
+        if IS_WINDOWS and stdin is not None:
+            feeder, stdin = _feed_stdin_in_thread(proc, stdin), None
         out, err = proc.communicate(input=stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
@@ -274,7 +284,7 @@ def run_sync(
         if feeder is not None:
             feeder.join(kill_grace)
         # communicate() closes them when it finishes; an exception escaping first would not
-        for pipe in (proc.stdout, proc.stderr):
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
             if pipe is not None and not pipe.closed:
                 with contextlib.suppress(OSError):
                     pipe.close()
@@ -388,8 +398,11 @@ async def run_async(
     )
     try:
         tree = _ProcessTree(proc.pid)
-    except OSError:
-        await proc.communicate()  # already killed: reap it and close its pipes
+    except BaseException:
+        # failed or interrupted before there is a tree to tear down (see run_sync)
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.communicate()
         raise
     timed_out = False
     try:

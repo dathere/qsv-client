@@ -7,6 +7,7 @@ import contextlib
 import os
 import signal
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from qsv_client import AsyncQsv, Qsv, QsvTimeout, QsvUsageError
+from qsv_client import AsyncQsv, Qsv, QsvTimeout, QsvUsageError, _process
 
 # The fake starts a grandchild that inherits stdout and records its pid, then hangs. If only
 # the fake were killed, the grandchild would keep the stdout pipe open and the run would hang
@@ -472,3 +473,64 @@ async def test_async_timeout_bounded_when_stdin_is_not_read(
     with pytest.raises(QsvTimeout):
         await qsv.run("stats", stdin=BIG_STDIN, timeout=1)
     assert time.monotonic() - started < 10
+
+
+class _Interrupted(BaseException):
+    """Stands in for Ctrl-C (or any BaseException) landing during setup after the spawn."""
+
+
+def _interrupting_tree(pidfile: Path) -> type:
+    class Tree(_process._ProcessTree):
+        def __init__(self, pid: int) -> None:
+            _read_pid(pidfile)  # let the fake get going, so its death can be checked
+            raise _Interrupted
+
+    return Tree
+
+
+def test_interrupt_during_setup_still_kills(
+    fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pidfile = tmp_path / "leader.pid"
+    monkeypatch.setattr(_process, "_ProcessTree", _interrupting_tree(pidfile))
+    try:
+        with pytest.raises(_Interrupted):
+            Qsv(fake_qsv(IGNORE_STOP_AND_HANG)).run("stats", pidfile)
+        assert _wait_reaped(_read_pid(pidfile)), "leader survived an interrupted setup"
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+async def test_async_interrupt_during_setup_still_kills(
+    fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pidfile = tmp_path / "leader.pid"
+    monkeypatch.setattr(_process, "_ProcessTree", _interrupting_tree(pidfile))
+    try:
+        with pytest.raises(_Interrupted):
+            await AsyncQsv(fake_qsv(IGNORE_STOP_AND_HANG)).run("stats", pidfile)
+        assert await asyncio.to_thread(_wait_dead, _read_pid(pidfile)), "leader survived"
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+def test_stdin_feeder_failing_to_start_still_kills(
+    fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the Windows stdin feeder, forced on here, cannot get a thread
+    pidfile = tmp_path / "leader.pid"
+
+    def no_thread(self: threading.Thread) -> None:
+        _read_pid(pidfile)
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(_process, "IS_WINDOWS", True)
+    monkeypatch.setattr(threading.Thread, "start", no_thread)
+    try:
+        with pytest.raises(RuntimeError):
+            Qsv(fake_qsv(IGNORE_STOP_AND_HANG), kill_grace=0.5).run(
+                "stats", pidfile, stdin=b"a,b\n"
+            )
+        assert _wait_reaped(_read_pid(pidfile)), "leader survived a failed feeder start"
+    finally:
+        _kill(_read_pid(pidfile))
