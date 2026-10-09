@@ -13,7 +13,7 @@ QSV_BIN=/path/to/qsvlite uv run pytest -q tests/test_integration.py   # other bi
 uv run ruff format . && uv run ruff check . && uv run mypy            # must be clean before done
 ```
 
-CI runs lint, format check, and mypy, plus tests on ubuntu/macos x Python 3.10–3.13 against
+CI runs lint, format check, and mypy, plus tests on ubuntu/macos x Python 3.10–3.14 against
 qsv, qsvlite, and qsvdp (Linux only).
 
 ## Layout (`src/qsv_client/`)
