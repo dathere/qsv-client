@@ -9,9 +9,9 @@ period.
   A descendant that leaves the group (e.g. by calling ``setsid``) survives the kill and may
   keep the output pipes open; after a timeout, output is collected for at most ``kill_grace``
   seconds and anything that descendant still holds is dropped.
-- Windows: each run is put in its own Job Object, which every process it starts joins and
-  cannot leave. ``CTRL_BREAK_EVENT`` to its process group, then ``TerminateJobObject``. A
-  child started in the instant between spawning qsv and assigning it to the job is missed.
+- Windows: qsv is created suspended, put in its own Job Object, then resumed, so every
+  process it starts is in the job and cannot leave it. ``CTRL_BREAK_EVENT`` to its process
+  group, then ``TerminateJobObject``.
 """
 
 from __future__ import annotations
@@ -56,12 +56,67 @@ if sys.platform == "win32":
     _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _kernel32.CloseHandle.restype = wintypes.BOOL
 
+    class _THREADENTRY32(ctypes.Structure):
+        _fields_ = (
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        )
+
+    _kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    _kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _kernel32.Thread32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(_THREADENTRY32))
+    _kernel32.Thread32First.restype = wintypes.BOOL
+    _kernel32.Thread32Next.argtypes = (wintypes.HANDLE, ctypes.POINTER(_THREADENTRY32))
+    _kernel32.Thread32Next.restype = wintypes.BOOL
+    _kernel32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _kernel32.OpenThread.restype = wintypes.HANDLE
+    _kernel32.ResumeThread.argtypes = (wintypes.HANDLE,)
+    _kernel32.ResumeThread.restype = wintypes.DWORD
+
+    _CREATE_SUSPENDED = 0x00000004
     _PROCESS_TERMINATE = 0x0001
     _PROCESS_SET_QUOTA = 0x0100
+    _TH32CS_SNAPTHREAD = 0x00000004
+    _THREAD_SUSPEND_RESUME = 0x0002
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    _RESUME_FAILED = 0xFFFFFFFF
 
     def _spawn_kwargs() -> dict[str, Any]:
-        # its own console process group, so CTRL_BREAK_EVENT reaches qsv and its children only
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        # its own console process group, so CTRL_BREAK_EVENT reaches qsv and its children
+        # only; suspended, so it can start nothing before it is in its Job Object
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED}
+
+    def _resume(pid: int) -> bool:
+        """Resume the threads of a process created with CREATE_SUSPENDED.
+
+        Popen closes the main thread's handle, so find it through a Toolhelp snapshot.
+        """
+        snapshot = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+        if not snapshot or snapshot == _INVALID_HANDLE_VALUE:
+            return False
+        resumed = False
+        try:
+            entry = _THREADENTRY32()
+            entry.dwSize = ctypes.sizeof(entry)
+            more = _kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while more:
+                if entry.th32OwnerProcessID == pid:
+                    thread = _kernel32.OpenThread(_THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                    if thread:
+                        try:
+                            if _kernel32.ResumeThread(thread) != _RESUME_FAILED:
+                                resumed = True
+                        finally:
+                            _kernel32.CloseHandle(thread)
+                more = _kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+        finally:
+            _kernel32.CloseHandle(snapshot)
+        return resumed
 
     def _create_job(pid: int) -> int | None:
         """A Job Object holding ``pid`` (and, from now on, everything it starts), or None."""
@@ -80,8 +135,14 @@ if sys.platform == "win32":
 
     class _ProcessTree:
         def __init__(self, pid: int) -> None:
+            """Put the (suspended) process in a new Job Object, then let it run."""
             self.pid = pid
             self._job = _create_job(pid)
+            if not _resume(pid):
+                # never leave it suspended forever
+                self.kill()
+                self.close()
+                raise OSError(f"could not start qsv (pid {pid}): resuming its thread failed")
 
         def interrupt(self) -> None:
             with contextlib.suppress(OSError):
@@ -180,7 +241,11 @@ def run_sync(
         cwd=cwd,
         **_spawn_kwargs(),
     )
-    tree = _ProcessTree(proc.pid)
+    try:
+        tree = _ProcessTree(proc.pid)
+    except OSError:
+        proc.communicate()  # already killed: reap it and close its pipes
+        raise
     feeder = None
     if IS_WINDOWS and stdin is not None:
         feeder, stdin = _feed_stdin_in_thread(proc, stdin), None
@@ -321,7 +386,11 @@ async def run_async(
         cwd=cwd,
         **_spawn_kwargs(),
     )
-    tree = _ProcessTree(proc.pid)
+    try:
+        tree = _ProcessTree(proc.pid)
+    except OSError:
+        await proc.communicate()  # already killed: reap it and close its pipes
+        raise
     timed_out = False
     try:
         out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout)

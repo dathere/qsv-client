@@ -8,11 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Windows support. Each run is placed in its own Job Object, so a timeout or cancellation
-  stops qsv *and* everything it started: `CTRL_BREAK_EVENT` first, then `TerminateJobObject`
-  after `kill_grace`. Previously only `qsv.exe` itself was killed. With `inherit_env=False`,
-  `SYSTEMROOT` is still passed on Windows, since many programs fail to start without it. CI
-  now runs the full test suite on Windows.
+- Windows support. qsv is started suspended and placed in its own Job Object before it runs,
+  so a timeout or cancellation stops qsv *and* everything it started: `CTRL_BREAK_EVENT`
+  first, then `TerminateJobObject` after `kill_grace`. Previously only `qsv.exe` itself was
+  killed. With `inherit_env=False`, `SYSTEMROOT` is still passed on Windows, since many
+  programs fail to start without it. CI now runs the full test suite on Windows.
 
 ### Changed
 

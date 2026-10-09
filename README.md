@@ -123,10 +123,10 @@ On a timeout or cancellation, the client stops qsv and every process qsv started
 - **Linux, macOS:** each run gets its own session. The client sends SIGTERM to the process
   group, then SIGKILL after `kill_grace`. A process that leaves the group (by calling `setsid`)
   survives.
-- **Windows:** each run goes in its own Job Object. The client sends `CTRL_BREAK_EVENT` to
-  the run's process group, then calls `TerminateJobObject` after `kill_grace`. Child processes
-  can't leave the job. A child started in the instant between qsv starting and being added to
-  the job is missed.
+- **Windows:** qsv is started suspended, put in its own Job Object, and only then resumed, so
+  every process it starts is in the job and can't leave it. The client sends
+  `CTRL_BREAK_EVENT` to the run's process group, then calls `TerminateJobObject` after
+  `kill_grace`.
 
 ## Development
 
