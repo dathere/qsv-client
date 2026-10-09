@@ -49,3 +49,38 @@ jobs:
       - name: Integration tests (qsvdp)
         if: runner.os == 'Linux'
         run: QSV_BIN="$RUNNER_TEMP/qsv/qsvdp" uv run pytest -q tests/test_integration.py
+
+  # Integration tests only: the unit tests' fake qsv relies on a shebang and skips on Windows,
+  # so process-group cleanup is not exercised here.
+  test-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync
+      - name: Download the latest qsv release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "qsv"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          gh release download --repo dathere/qsv --pattern "qsv-*-x86_64-pc-windows-msvc.zip" --dir $dir
+          Get-ChildItem $dir -Filter *.zip | ForEach-Object { Expand-Archive $_.FullName -DestinationPath $dir -Force }
+          Get-ChildItem $dir
+      - name: Integration tests (qsv)
+        run: |
+          $env:QSV_BIN = Join-Path $env:RUNNER_TEMP "qsv\qsv.exe"
+          uv run pytest -v tests/test_integration.py
+      - name: Integration tests (qsvlite)
+        run: |
+          $env:QSV_BIN = Join-Path $env:RUNNER_TEMP "qsv\qsvlite.exe"
+          uv run pytest -q tests/test_integration.py
