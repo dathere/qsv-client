@@ -42,7 +42,8 @@ class QsvError(Exception):
         message: the error message, without qsv's text-mode prefix (e.g. ``csv error: ``).
         exit_code: the process exit code.
         command: the qsv subcommand, when known.
-        args: the full argv that was run (binary first).
+        args_run: the full argv that was run (binary first). (``args`` is the standard
+            ``Exception.args``.)
         stderr: everything the process wrote to stderr.
         structured: True when the error came from qsv's JSON error line, False when it was
             inferred from the exit code and free-text stderr.

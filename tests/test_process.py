@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from qsv_client import AsyncQsv, Qsv, QsvTimeout, QsvUsageError, _process
+from qsv_client import AsyncQsv, Qsv, QsvError, QsvTimeout, QsvUsageError, _process
 
 # The fake starts a grandchild that inherits stdout and records its pid, then hangs. If only
 # the fake were killed, the grandchild would keep the stdout pipe open and the run would hang
@@ -565,3 +565,75 @@ def test_stdin_feeder_failing_to_start_still_kills(
         assert _wait_reaped(_read_pid(pidfile)), "leader survived a failed feeder start"
     finally:
         _kill(_read_pid(pidfile))
+
+
+PRINT_CSV = """
+print("a,b")
+print("1,2")
+"""
+
+
+def test_relative_stdout_path_follows_cwd(
+    fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work, elsewhere = tmp_path / "work", tmp_path / "elsewhere"
+    work.mkdir()
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    res = Qsv(fake_qsv(PRINT_CSV), cwd=work).run("select", stdout_path="out/res.csv")
+    assert res.stdout_path == work / "out" / "res.csv"
+    assert res.csv_rows() == [{"a": "1", "b": "2"}]
+    assert not (elsewhere / "out").exists()
+
+
+async def test_async_relative_stdout_path_follows_cwd(
+    fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work, elsewhere = tmp_path / "work", tmp_path / "elsewhere"
+    work.mkdir()
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    res = await AsyncQsv(fake_qsv(PRINT_CSV), cwd=work).run("select", stdout_path="res.csv")
+    assert res.stdout_path == work / "res.csv"
+    assert res.csv_rows() == [{"a": "1", "b": "2"}]
+
+
+# --capabilities answers with JSON of the wrong shape; --version is a valid qsvlite line
+MALFORMED_CAPABILITIES = """
+import sys
+if sys.argv[1] == "--capabilities":
+    print('{"version": "24.0.0", "feature_versions": ["oops"]}')
+elif sys.argv[1] == "--version":
+    print("qsvlite 24.0.0-standard--4-4;1 GiB-0 B-2 GiB-4 GiB "
+          "(x86_64-unknown-linux-gnu compiled with Rust 1.99;x-y;z-2) compiled")
+"""
+
+UNRECOGNIZED_VERSION = """
+print("not qsv at all")
+"""
+
+
+def test_malformed_capabilities_falls_back_to_version(fake_qsv: Callable[[str], str]) -> None:
+    caps = Qsv(fake_qsv(MALFORMED_CAPABILITIES)).capabilities
+    assert (caps.binary, caps.version) == ("qsvlite", "24.0.0")
+
+
+async def test_async_malformed_capabilities_falls_back_to_version(
+    fake_qsv: Callable[[str], str],
+) -> None:
+    caps = await AsyncQsv(fake_qsv(MALFORMED_CAPABILITIES)).capabilities()
+    assert (caps.binary, caps.version) == ("qsvlite", "24.0.0")
+
+
+def test_unrecognized_version_raises_qsv_error(fake_qsv: Callable[[str], str]) -> None:
+    qsv = Qsv(fake_qsv(UNRECOGNIZED_VERSION), min_version="1.0.0")
+    with pytest.raises(QsvError, match="could not determine the qsv version"):
+        qsv.run("count", "x.csv")
+
+
+async def test_async_unrecognized_version_raises_qsv_error(
+    fake_qsv: Callable[[str], str],
+) -> None:
+    qsv = AsyncQsv(fake_qsv(UNRECOGNIZED_VERSION), min_version="1.0.0")
+    with pytest.raises(QsvError, match="could not determine the qsv version"):
+        await qsv.run("count", "x.csv")

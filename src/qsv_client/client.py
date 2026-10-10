@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import csv
 import io
 import json
@@ -19,6 +18,7 @@ from .capabilities import Capabilities, from_capabilities_json, from_version_out
 from .errors import (
     EXIT_TIMEOUT,
     SUCCESS_EXIT_CODES,
+    QsvError,
     QsvNotFound,
     QsvTimeout,
     QsvVersionError,
@@ -217,13 +217,39 @@ class _Base:
 
 
 def _open_stdout(
-    stdout_path: str | os.PathLike[str] | None,
+    stdout_path: str | os.PathLike[str] | None, cwd: str | None
 ) -> tuple[Path | None, IO[bytes] | None]:
     if stdout_path is None:
         return None, None
     path = Path(stdout_path)
+    if cwd is not None and not path.is_absolute():
+        # like qsv's own --output: relative to the run's working directory
+        path = Path(cwd) / path
     path.parent.mkdir(parents=True, exist_ok=True)
     return path, path.open("wb")
+
+
+def _caps_from_json(res: QsvResult) -> Capabilities | None:
+    """Capabilities from a ``--capabilities`` run, or None if it gave nothing usable."""
+    if res.exit_code != 0 or not res.stdout:
+        return None
+    try:
+        return from_capabilities_json(res.stdout)
+    except (ValueError, TypeError, AttributeError):
+        # not JSON, or JSON of an unexpected shape: fall back to --version
+        return None
+
+
+def _caps_from_version(ver: QsvResult, lst: QsvResult) -> Capabilities:
+    try:
+        return from_version_output(ver.stdout or "", lst.stdout or "")
+    except ValueError as exc:
+        raise QsvError(
+            f"could not determine the qsv version: {exc}",
+            exit_code=ver.exit_code,
+            args=ver.args,
+            stderr=ver.stderr,
+        ) from exc
 
 
 def _ensure_json_format(args: Sequence[Arg]) -> list[Arg]:
@@ -258,7 +284,8 @@ class Qsv(_Base):
         Args:
             stdin: data to feed on stdin. Default: stdin is closed (``/dev/null``).
             stdout_path: stream stdout to this file instead of holding it in memory (use for
-                large outputs). The file is created/truncated, parent dirs included.
+                large outputs). The file is created/truncated, parent dirs included. A
+                relative path is resolved against the client's ``cwd``, if set.
             timeout: overrides the client default for this run.
             env: extra environment variables for this run.
             check: raise a :class:`QsvError` subclass if qsv fails (exit codes 0 and 255,
@@ -297,7 +324,7 @@ class Qsv(_Base):
     ) -> QsvResult:
         argv = self._argv(command, args)
         effective_timeout = timeout if timeout is not None else self.timeout
-        path, fh = _open_stdout(stdout_path)
+        path, fh = _open_stdout(stdout_path, self.cwd)
         started = time.monotonic()
         try:
             raw = _process.run_sync(
@@ -337,15 +364,12 @@ class Qsv(_Base):
         return self.capabilities.version
 
     def _probe(self) -> Capabilities:
-        caps: Capabilities | None = None
         res = self._run_unchecked("", ["--capabilities"], check=False, timeout=60)
-        if res.exit_code == 0 and res.stdout:
-            with contextlib.suppress(ValueError):
-                caps = from_capabilities_json(res.stdout)
+        caps = _caps_from_json(res)
         if caps is None:
             ver = self._run_unchecked("", ["--version"], timeout=60)
             lst = self._run_unchecked("", ["--list"], check=False, timeout=60)
-            caps = from_version_output(ver.stdout or "", lst.stdout or "")
+            caps = _caps_from_version(ver, lst)
         # checked here, so it holds however the cache gets filled
         self._check_min_version(caps)
         return caps
@@ -430,7 +454,7 @@ class AsyncQsv(_Base):
     ) -> QsvResult:
         argv = self._argv(command, args)
         effective_timeout = timeout if timeout is not None else self.timeout
-        path, fh = _open_stdout(stdout_path)
+        path, fh = _open_stdout(stdout_path, self.cwd)
         started = time.monotonic()
         try:
             raw = await _process.run_async(
@@ -466,15 +490,12 @@ class AsyncQsv(_Base):
         return (await self.capabilities()).version
 
     async def _probe(self) -> Capabilities:
-        caps: Capabilities | None = None
         res = await self._run_unchecked("", ["--capabilities"], check=False, timeout=60)
-        if res.exit_code == 0 and res.stdout:
-            with contextlib.suppress(ValueError):
-                caps = from_capabilities_json(res.stdout)
+        caps = _caps_from_json(res)
         if caps is None:
             ver = await self._run_unchecked("", ["--version"], timeout=60)
             lst = await self._run_unchecked("", ["--list"], check=False, timeout=60)
-            caps = from_version_output(ver.stdout or "", lst.stdout or "")
+            caps = _caps_from_version(ver, lst)
         self._check_min_version(caps)
         return caps
 

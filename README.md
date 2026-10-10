@@ -78,7 +78,8 @@ qsv = Qsv(
 ```
 
 A relative `binary` path is resolved against the current directory when the client is
-created, so it still works with `cwd=`.
+created, so it still works with `cwd=`. A relative `stdout_path` is resolved against `cwd=`,
+like a relative `--output` path given to qsv.
 
 ### describegpt without exposing your key
 
@@ -139,6 +140,8 @@ message is taken from stderr.
 
 `QsvNotFound` (no binary) and `QsvVersionError` (binary too old) are raised before anything
 runs.
+If the binary's `--version` output isn't recognized (and `--capabilities` gave nothing
+usable), `capabilities` (and `run` with `min_version`) raise a plain `QsvError`.
 
 ## Platform notes
 
