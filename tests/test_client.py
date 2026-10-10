@@ -239,3 +239,42 @@ async def test_async_min_version_from_capabilities_json(
     assert await AsyncQsv(binary, env=env, min_version="24.1.0").count("x.csv") == 3
     with pytest.raises(QsvVersionError, match=r"at least 25\.0\.0"):
         await AsyncQsv(binary, env=env, min_version="25.0.0").count("x.csv")
+
+
+# --capabilities JSON without a usable version; --version is a valid qsvlite line
+UNUSABLE_CAPABILITIES_VERSION = """
+import json, os, sys
+if sys.argv[1] == "--capabilities":
+    print(json.dumps({"binary": "qsv", "version": json.loads(os.environ["FAKE_VERSION"])}))
+elif sys.argv[1] == "--version":
+    print("qsvlite 24.0.0-standard--4-4;1 GiB-0 B-2 GiB-4 GiB "
+          "(x86_64-unknown-linux-gnu compiled with Rust 1.99;x-y;z-2) compiled")
+else:
+    print("3")
+"""
+
+
+@pytest.mark.parametrize("version", ["null", '"dev"', '""'])
+def test_unusable_capabilities_version_falls_back_to_version(
+    fake_qsv: Callable[[str], str], version: str
+) -> None:
+    qsv = Qsv(
+        fake_qsv(UNUSABLE_CAPABILITIES_VERSION),
+        env={"FAKE_VERSION": version},
+        min_version="24.0.0",
+    )
+    assert qsv.count("x.csv") == 3
+    assert (qsv.capabilities.binary, qsv.version) == ("qsvlite", "24.0.0")
+
+
+@pytest.mark.parametrize("version", ["null", '"dev"', '""'])
+async def test_async_unusable_capabilities_version_falls_back_to_version(
+    fake_qsv: Callable[[str], str], version: str
+) -> None:
+    qsv = AsyncQsv(
+        fake_qsv(UNUSABLE_CAPABILITIES_VERSION),
+        env={"FAKE_VERSION": version},
+        min_version="24.0.0",
+    )
+    assert await qsv.count("x.csv") == 3
+    assert (await qsv.version()) == "24.0.0"

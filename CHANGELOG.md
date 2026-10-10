@@ -23,7 +23,8 @@ All notable changes to this project are documented here. The format follows
   ([#6](https://github.com/dathere/qsv-client/pull/6))
 - `capabilities` (and `run` with `min_version`) raise `QsvError` instead of a bare
   `ValueError` when the binary's `--version` output isn't recognized, and fall back to `--version`
-  when `--capabilities` returns JSON of an unexpected shape. ([#7](https://github.com/dathere/qsv-client/pull/7))
+  when `--capabilities` returns JSON of an unexpected shape or without a usable version.
+  ([#7](https://github.com/dathere/qsv-client/pull/7), [#8](https://github.com/dathere/qsv-client/pull/8))
 - The `QsvError` docstring named the argv attribute `args`; it is `args_run`. ([#7](https://github.com/dathere/qsv-client/pull/7))
 - On Windows, `find_qsv` (and `binary=` / `QSV_BIN`) accept a path without its extension,
   such as `C:/tools/qsv` for `C:/tools/qsv.exe`, trying each `PATHEXT` extension.

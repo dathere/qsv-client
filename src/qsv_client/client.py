@@ -245,10 +245,12 @@ def _caps_from_json(res: QsvResult) -> Capabilities | None:
     if res.exit_code != 0 or not res.stdout:
         return None
     try:
-        return from_capabilities_json(res.stdout)
+        caps = from_capabilities_json(res.stdout)
+        parse_version(caps.version)
     except (ValueError, TypeError, AttributeError):
-        # not JSON, or JSON of an unexpected shape: fall back to --version
+        # not JSON, JSON of an unexpected shape, or no usable version: fall back to --version
         return None
+    return caps
 
 
 def _caps_from_version(ver: QsvResult, lst: QsvResult) -> Capabilities:
