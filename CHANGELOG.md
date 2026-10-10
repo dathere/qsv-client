@@ -27,6 +27,7 @@ All notable changes to this project are documented here. The format follows
 - The `QsvError` docstring named the argv attribute `args`; it is `args_run`. ([#7](https://github.com/dathere/qsv-client/pull/7))
 - On Windows, `find_qsv` (and `binary=` / `QSV_BIN`) accept a path without its extension,
   such as `C:/tools/qsv` for `C:/tools/qsv.exe`, trying each `PATHEXT` extension.
+  ([#8](https://github.com/dathere/qsv-client/pull/8))
 
 ## [0.2.0] - 2026-10-09
 
