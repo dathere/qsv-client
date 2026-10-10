@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-10
+
 ### Changed
 
 - **Behavior change:** a relative `stdout_path` is now resolved against the client's `cwd=`,
@@ -21,8 +23,12 @@ All notable changes to this project are documented here. The format follows
   ([#6](https://github.com/dathere/qsv-client/pull/6))
 - `capabilities` (and `run` with `min_version`) raise `QsvError` instead of a bare
   `ValueError` when the binary's `--version` output isn't recognized, and fall back to `--version`
-  when `--capabilities` returns JSON of an unexpected shape. ([#7](https://github.com/dathere/qsv-client/pull/7))
+  when `--capabilities` returns JSON of an unexpected shape or without a usable version.
+  ([#7](https://github.com/dathere/qsv-client/pull/7), [#8](https://github.com/dathere/qsv-client/pull/8))
 - The `QsvError` docstring named the argv attribute `args`; it is `args_run`. ([#7](https://github.com/dathere/qsv-client/pull/7))
+- On Windows, `find_qsv` (and `binary=` / `QSV_BIN`) accept a path without its extension,
+  such as `C:/tools/qsv` for `C:/tools/qsv.exe`, trying each `PATHEXT` extension.
+  ([#8](https://github.com/dathere/qsv-client/pull/8))
 
 ## [0.2.0] - 2026-10-09
 
@@ -93,6 +99,7 @@ First release. ([#1](https://github.com/dathere/qsv-client/pull/1))
   environment variables, so keys never appear on the command line.
 - Type hints (`py.typed`), no runtime dependencies, Python 3.10+.
 
-[Unreleased]: https://github.com/dathere/qsv-client/compare/0.2.0...HEAD
+[Unreleased]: https://github.com/dathere/qsv-client/compare/0.3.0...HEAD
+[0.3.0]: https://github.com/dathere/qsv-client/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/dathere/qsv-client/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/dathere/qsv-client/releases/tag/0.1.0

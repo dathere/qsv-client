@@ -31,6 +31,16 @@ DEFAULT_BINARIES = ("qsv", "qsvmcp", "qsvdp", "qsvlite")
 Arg = str | os.PathLike[str] | int | float
 
 
+def _with_pathext(cand: str) -> list[Path]:
+    """``cand``, then on Windows ``cand`` + each ``PATHEXT`` extension (``C:/qsv/qsv`` ->
+    ``C:/qsv/qsv.exe``). ``shutil.which`` only does this for a path from Python 3.12."""
+    paths = [Path(cand)]
+    if _process.IS_WINDOWS and not Path(cand).suffix:
+        exts = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
+        paths += [Path(cand + ext) for ext in exts if ext]
+    return paths
+
+
 def find_qsv(binary: str | os.PathLike[str] | None = None) -> str:
     """Resolve the qsv binary: ``binary`` -> ``$QSV_BIN`` -> first of qsv/qsvmcp/qsvdp/qsvlite
     on ``PATH``."""
@@ -45,8 +55,9 @@ def find_qsv(binary: str | os.PathLike[str] | None = None) -> str:
         if os.sep in cand or (os.altsep and os.altsep in cand):
             # absolute, so a relative path still resolves when the run sets cwd=. Not
             # normalized: collapsing `..` lexically would be wrong after a symlinked dir.
-            if Path(cand).is_file():
-                return str(Path(cand).absolute())
+            for path in _with_pathext(cand):
+                if path.is_file():
+                    return str(path.absolute())
             continue
         found = shutil.which(cand)
         if found:
@@ -234,10 +245,12 @@ def _caps_from_json(res: QsvResult) -> Capabilities | None:
     if res.exit_code != 0 or not res.stdout:
         return None
     try:
-        return from_capabilities_json(res.stdout)
+        caps = from_capabilities_json(res.stdout)
+        parse_version(caps.version)
     except (ValueError, TypeError, AttributeError):
-        # not JSON, or JSON of an unexpected shape: fall back to --version
+        # not JSON, JSON of an unexpected shape, or no usable version: fall back to --version
         return None
+    return caps
 
 
 def _caps_from_version(ver: QsvResult, lst: QsvResult) -> Capabilities:
