@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `AsyncQsv`: `QsvTimeout.stderr` now includes what qsv wrote before the timeout, as it
+  already did for `Qsv`. Previously, stderr already read when the timeout fired was lost.
+
 ## [0.2.0] - 2026-10-09
 
 ### Added
