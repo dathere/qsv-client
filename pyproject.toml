@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qsv-client"
-version = "0.2.0"
+version = "0.3.0"
 description = "Run the qsv CSV toolkit from Python: timeouts that kill the whole process tree, typed errors, capability detection."
 readme = "README.md"
 license = "AGPL-3.0-or-later"

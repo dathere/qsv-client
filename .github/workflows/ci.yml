@@ -84,3 +84,26 @@ jobs:
         run: |
           $env:QSV_BIN = Join-Path $env:RUNNER_TEMP "qsv\qsvlite.exe"
           uv run pytest -q tests/test_integration.py
+
+  # `test` uses the latest qsv release. This keeps the text-error / --version fallback paths
+  # covered once that release supports QSV_ERROR_FORMAT=json and --capabilities.
+  test-qsv-24-0-0:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      - name: Download qsv 24.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/qsv"
+          gh release download 24.0.0 --repo dathere/qsv --pattern "qsv-*-x86_64-unknown-linux-musl.zip" --dir "$RUNNER_TEMP/qsv"
+          unzip -o -q "$RUNNER_TEMP"/qsv/*.zip -d "$RUNNER_TEMP/qsv"
+          chmod +x "$RUNNER_TEMP"/qsv/qsv*
+      - name: Integration tests (qsv 24.0.0)
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsv" uv run pytest -q tests/test_integration.py
+      - name: Integration tests (qsvlite 24.0.0)
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsvlite" uv run pytest -q tests/test_integration.py
