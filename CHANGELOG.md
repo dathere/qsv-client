@@ -6,10 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Behavior change:** a relative `stdout_path` is now resolved against the client's `cwd=`,
+  like a relative `--output` path given to qsv. Previously it was resolved against Python's
+  working directory, so code combining `cwd=` with a relative `stdout_path` will now write its
+  output file somewhere else, without any error. Pass an absolute path to keep the old location.
+  ([#7](https://github.com/dathere/qsv-client/pull/7))
+
 ### Fixed
 
 - `AsyncQsv`: `QsvTimeout.stderr` now includes what qsv wrote before the timeout, as it
   already did for `Qsv`. Previously, stderr already read when the timeout fired was lost.
+  ([#6](https://github.com/dathere/qsv-client/pull/6))
+- `capabilities` (and `run` with `min_version`) raise `QsvError` instead of a bare
+  `ValueError` when the binary's `--version` output isn't recognized, and fall back to `--version`
+  when `--capabilities` returns JSON of an unexpected shape. ([#7](https://github.com/dathere/qsv-client/pull/7))
+- The `QsvError` docstring named the argv attribute `args`; it is `args_run`. ([#7](https://github.com/dathere/qsv-client/pull/7))
 
 ## [0.2.0] - 2026-10-09
 
