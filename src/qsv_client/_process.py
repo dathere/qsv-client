@@ -342,20 +342,33 @@ async def _reap_async(proc: asyncio.subprocess.Process, tree: _ProcessTree, grac
 
 
 async def _timeout_cleanup(
-    proc: asyncio.subprocess.Process, tree: _ProcessTree, grace: float
-) -> bytes:
-    """Kill and release a timed-out run; return whatever stderr arrives within ``grace``."""
+    proc: asyncio.subprocess.Process,
+    tree: _ProcessTree,
+    grace: float,
+    io_task: asyncio.Future[tuple[bytes, bytes]],
+) -> tuple[bytes, bytes]:
+    """Kill and release a timed-out run; return its output if the pipes close within ``grace``.
+
+    ``io_task`` is the run's ``communicate()``, still running: cancelling it would discard
+    what it has already read, so it is left to finish once the kill closes the pipes.
+    """
     try:
         await _terminate_async(proc, tree, grace)
-        err = b""
-        if proc.stderr is not None:
+        out, err = b"", b""
+        done, _ = await asyncio.wait({io_task}, timeout=grace)
+        if done:
             with contextlib.suppress(Exception):
-                err = await asyncio.wait_for(proc.stderr.read(), grace)
+                out, err = io_task.result()
+        else:
+            # a descendant that left the group still holds the pipes: drop its output, as
+            # run_sync does
+            io_task.cancel()
         await _release_async(proc)
     except asyncio.CancelledError:
+        io_task.cancel()
         _kill_now(proc, tree)
         raise
-    return err
+    return out, err
 
 
 async def _finish_despite_cancel(coro: Coroutine[Any, Any, _T]) -> _T:
@@ -404,15 +417,22 @@ async def run_async(
             proc.kill()
         await proc.communicate()
         raise
+    # not wait_for: a timeout must not cancel communicate(), which would lose what it has read
+    io_task = asyncio.ensure_future(proc.communicate(input=stdin))
     timed_out = False
     try:
-        out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout)
-    except asyncio.TimeoutError:
-        timed_out = True
-        # a cancellation arriving mid-cleanup must not skip the forced kill or the release
-        out, err = b"", await _finish_despite_cancel(_timeout_cleanup(proc, tree, kill_grace))
+        done, _ = await asyncio.wait({io_task}, timeout=timeout)
+        if done:
+            out, err = io_task.result()
+        else:
+            timed_out = True
+            # a cancellation arriving mid-cleanup must not skip the forced kill or the release
+            out, err = await _finish_despite_cancel(
+                _timeout_cleanup(proc, tree, kill_grace, io_task)
+            )
     except BaseException:
         # task cancelled (or the loop is shutting down): reap the tree, then propagate
+        io_task.cancel()
         await _finish_despite_cancel(_reap_async(proc, tree, kill_grace))
         raise
     finally:

@@ -128,6 +128,30 @@ async def test_async_cancel_kills_process_group(
     assert _wait_dead(pid), "grandchild survived cancellation"
 
 
+STDERR_THEN_HANG = """
+import sys, time
+sys.stderr.write("progress: 10%\\n")
+sys.stderr.flush()
+time.sleep(60)
+"""
+
+
+def test_timeout_keeps_stderr_written_before_it(fake_qsv: Callable[[str], str]) -> None:
+    qsv = Qsv(fake_qsv(STDERR_THEN_HANG), kill_grace=0.5)
+    with pytest.raises(QsvTimeout) as exc:
+        qsv.run("stats", timeout=1)
+    assert "progress: 10%" in exc.value.stderr
+
+
+async def test_async_timeout_keeps_stderr_written_before_it(
+    fake_qsv: Callable[[str], str],
+) -> None:
+    qsv = AsyncQsv(fake_qsv(STDERR_THEN_HANG), kill_grace=0.5)
+    with pytest.raises(QsvTimeout) as exc:
+        await qsv.run("stats", timeout=1)
+    assert "progress: 10%" in exc.value.stderr
+
+
 ECHO_ENV_AND_ARGS = """
 import json, os, sys
 keys = ["QSV_ERROR_FORMAT", "QSV_LLM_APIKEY", "QSV_LLM_BASE_URL", "QSV_LLM_MODEL", "EXTRA"]
