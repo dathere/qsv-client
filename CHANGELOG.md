@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-15
+
+qsv 25.0.0 or later is now required. It is the first release whose binaries (`qsv`,
+`qsvlite`, `qsvdp`, `qsvmcp`) all answer `--capabilities` and report errors as JSON, so the
+code that supported older qsv is gone.
+
 ### Changed
 
 - **Behavior change:** qsv 25.0.0 or later is now required (exported as `MIN_QSV_VERSION`).
@@ -15,33 +21,34 @@ All notable changes to this project are documented here. The format follows
   lower it. The check is bounded by the run's `timeout` (at most 60s) separately from the
   command, so a client's first run can take up to about twice its timeout. A check that fails
   for another reason, such as a crash or a startup error, raises the usual `QsvError` with
-  qsv's stderr.
-- `capabilities` is probed once per binary per Python process and shared by every `Qsv` and
-  `AsyncQsv`, so creating a client per call doesn't start an extra qsv each time. Concurrent
-  first calls from threads, or from coroutines on the same event loop, share one probe; a
-  sync and an async client starting at the same moment can each probe once. A binary
-  replaced in place (new size or modification time) is probed again. Each client still
-  applies its own `min_version`. Values in `Capabilities.raw` that depend on the environment,
-  such as `max_jobs`, come from the client that probed first.
-
+  qsv's stderr. ([#9](https://github.com/dathere/qsv-client/pull/9))
 - **Behavior change:** `QsvVersionError` is now a `QsvError` (kind `version`), so
   `except QsvError` around `run()` also catches a too-old binary. An `except QsvVersionError`
   placed after `except QsvError` is no longer reached, so put it first. Generic `QsvError`
   handlers now see version errors too: retry logic should not retry them, since a too-old
   qsv will never succeed. Its `exit_code`, `args_run` and `stderr` describe the
-  `--capabilities` check.
-- Each client gets its own copy of cached capabilities, so modifying `Capabilities.raw` or
-  `feature_versions` on one client no longer changes them for other clients.
+  `--capabilities` check. ([#10](https://github.com/dathere/qsv-client/pull/10))
+- `capabilities` is probed once per binary per Python process and shared by every `Qsv` and
+  `AsyncQsv`, so creating a client per call doesn't start an extra qsv each time. Concurrent
+  first calls from threads, or from coroutines on the same event loop, share one probe; a
+  sync and an async client starting at the same moment can each probe once. A binary
+  replaced in place (new size or modification time) is probed again. Each client still
+  applies its own `min_version` and gets its own copy of the result, so modifying
+  `Capabilities.raw` or `feature_versions` affects only that client. Values in `raw` that
+  depend on the environment, such as `max_jobs`, come from the client that probed first.
+  ([#9](https://github.com/dathere/qsv-client/pull/9), [#10](https://github.com/dathere/qsv-client/pull/10))
 
 ### Removed
 
 - The fallback that parsed `--version` and `--list` when `--capabilities` was unavailable,
   including `qsv_client.capabilities.from_version_output`. If `--capabilities` succeeds but
   its output can't be used, `capabilities` raises `QsvError`.
+  ([#9](https://github.com/dathere/qsv-client/pull/9))
 - `Capabilities.supports_json_errors` and `Capabilities.error_formats`: every supported qsv
   reports JSON errors. The value is still in `raw["error_formats"]`.
+  ([#10](https://github.com/dathere/qsv-client/pull/10))
 - `Capabilities.raw` is no longer optional; it is always the parsed `--capabilities` document.
-  `Capabilities` fields are now keyword-only.
+  `Capabilities` fields are now keyword-only. ([#10](https://github.com/dathere/qsv-client/pull/10))
 
 ## [0.3.0] - 2026-10-10
 
@@ -136,7 +143,8 @@ First release. ([#1](https://github.com/dathere/qsv-client/pull/1))
   environment variables, so keys never appear on the command line.
 - Type hints (`py.typed`), no runtime dependencies, Python 3.10+.
 
-[Unreleased]: https://github.com/dathere/qsv-client/compare/0.3.0...HEAD
+[Unreleased]: https://github.com/dathere/qsv-client/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/dathere/qsv-client/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/dathere/qsv-client/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/dathere/qsv-client/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/dathere/qsv-client/releases/tag/0.1.0
