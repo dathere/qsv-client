@@ -26,6 +26,7 @@ from .errors import (
     QsvTimeout,
     QsvVersionError,
     error_from_run,
+    parse_json_error,
 )
 
 #: binaries tried, in order, when none is given and ``QSV_BIN`` is unset
@@ -253,10 +254,15 @@ def _open_stdout(
 def _caps_from_probe(binary: str, res: QsvResult) -> Capabilities:
     """Capabilities from a ``--capabilities`` run."""
     if res.exit_code != 0:
-        # qsv before 25.0.0 rejects the flag as a usage error
-        raise QsvVersionError(
-            f"{binary} does not support --capabilities (exit code {res.exit_code}); "
-            f"qsv {MIN_QSV_VERSION} or later is required"
+        # qsv before 25.0.0 rejects the flag as a usage error ("Unknown flag: '--capabilities'");
+        # any other failure (a crash, a signal, a startup error) keeps its own diagnostics
+        if "--capabilities" in res.stderr and parse_json_error(res.stderr) is None:
+            raise QsvVersionError(
+                f"{binary} does not support --capabilities; "
+                f"qsv {MIN_QSV_VERSION} or later is required"
+            )
+        raise error_from_run(
+            exit_code=res.exit_code, stderr=res.stderr, args=res.args, command=None
         )
     try:
         caps = from_capabilities_json(res.stdout or "")
@@ -271,17 +277,34 @@ def _caps_from_probe(binary: str, res: QsvResult) -> Capabilities:
     return caps
 
 
-# One --capabilities probe per binary per process, shared by every Qsv and AsyncQsv. The key
-# includes size and mtime so a binary upgraded in place is probed again. Only successful
-# probes are cached; each client still applies its own min_version.
+# Successful --capabilities probes are cached per binary for the whole process and shared by
+# every Qsv and AsyncQsv. The key includes size and mtime so a binary upgraded in place is
+# probed again. Each client still applies its own min_version. Concurrent probes are deduped
+# per key among threads, and among coroutines on one event loop.
 _CapsKey = tuple[str, int, int]
 _caps_cache: dict[_CapsKey, Capabilities] = {}
 _sync_probe_locks: dict[_CapsKey, threading.Lock] = {}
-# asyncio.Lock is bound to the loop it is first used on, so async locks are per loop
+# asyncio.Lock is bound to the loop it is first contended on and then references it, so the
+# locks are held weakly: a strong value would keep its weakly-keyed loop alive forever
 _async_probe_locks: weakref.WeakKeyDictionary[
-    asyncio.AbstractEventLoop, dict[_CapsKey, asyncio.Lock]
+    asyncio.AbstractEventLoop, weakref.WeakValueDictionary[_CapsKey, asyncio.Lock]
 ] = weakref.WeakKeyDictionary()
 _probe_locks_guard = threading.Lock()
+
+#: upper bound on the --capabilities probe; a shorter run timeout bounds it further
+_PROBE_TIMEOUT = 60.0
+
+
+def _probe_limit(timeout: float | None) -> float:
+    return _PROBE_TIMEOUT if timeout is None else min(timeout, _PROBE_TIMEOUT)
+
+
+def _probe_wait_timeout(binary: str, limit: float) -> QsvTimeout:
+    return QsvTimeout(
+        f"timed out after {limit}s waiting for another client's --capabilities probe",
+        exit_code=EXIT_TIMEOUT,
+        args=[binary, "--capabilities"],
+    )
 
 
 def _caps_key(binary: str) -> _CapsKey | None:
@@ -302,8 +325,11 @@ def _async_probe_lock(key: _CapsKey) -> asyncio.Lock:
     with _probe_locks_guard:
         locks = _async_probe_locks.get(loop)
         if locks is None:
-            locks = _async_probe_locks[loop] = {}
-        return locks.setdefault(key, asyncio.Lock())
+            locks = _async_probe_locks[loop] = weakref.WeakValueDictionary()
+        lock = locks.get(key)
+        if lock is None:
+            lock = locks[key] = asyncio.Lock()
+        return lock
 
 
 def _ensure_json_format(args: Sequence[Arg]) -> list[Arg]:
@@ -352,7 +378,7 @@ class Qsv(_Base):
             QsvError: (subclass by error kind) when ``check`` and the run failed.
             QsvTimeout: the run exceeded its timeout; it and its children were killed.
         """
-        self._check_version_once()
+        self._check_version_once(timeout)
         return self._run_unchecked(
             command,
             args,
@@ -421,26 +447,35 @@ class Qsv(_Base):
     def version(self) -> str:
         return self.capabilities.version
 
-    def _probe(self) -> Capabilities:
+    def _probe(self, timeout: float | None = None) -> Capabilities:
+        limit = _probe_limit(timeout if timeout is not None else self.timeout)
         key = _caps_key(self.binary)
         if key is None:
-            caps = self._probe_uncached()
+            caps = self._probe_uncached(limit)
         else:
-            with _sync_probe_lock(key):
+            deadline = time.monotonic() + limit
+            lock = _sync_probe_lock(key)
+            if not lock.acquire(timeout=limit):
+                raise _probe_wait_timeout(self.binary, limit)
+            try:
                 cached = _caps_cache.get(key)
                 if cached is None:
-                    cached = _caps_cache[key] = self._probe_uncached()
+                    remaining = max(deadline - time.monotonic(), 0.01)
+                    cached = _caps_cache[key] = self._probe_uncached(remaining)
                 caps = cached
+            finally:
+                lock.release()
         # checked here, so it holds however the cache gets filled
         self._check_min_version(caps)
         return caps
 
-    def _probe_uncached(self) -> Capabilities:
-        res = self._run_unchecked("", ["--capabilities"], check=False, timeout=60)
+    def _probe_uncached(self, timeout: float) -> Capabilities:
+        res = self._run_unchecked("", ["--capabilities"], check=False, timeout=timeout)
         return _caps_from_probe(self.binary, res)
 
-    def _check_version_once(self) -> None:
-        _ = self.capabilities
+    def _check_version_once(self, timeout: float | None = None) -> None:
+        if self._capabilities is None:
+            self._capabilities = self._probe(timeout)
 
     # -- conveniences -----------------------------------------------------------------------
 
@@ -492,7 +527,7 @@ class AsyncQsv(_Base):
         text: bool = True,
     ) -> QsvResult:
         """See :meth:`Qsv.run`."""
-        await self._check_version_once()
+        await self._check_version_once(timeout)
         return await self._run_unchecked(
             command,
             args,
@@ -557,25 +592,36 @@ class AsyncQsv(_Base):
     async def version(self) -> str:
         return (await self.capabilities()).version
 
-    async def _probe(self) -> Capabilities:
+    async def _probe(self, timeout: float | None = None) -> Capabilities:
+        limit = _probe_limit(timeout if timeout is not None else self.timeout)
         key = _caps_key(self.binary)
         if key is None:
-            caps = await self._probe_uncached()
+            caps = await self._probe_uncached(limit)
         else:
-            async with _async_probe_lock(key):
+            deadline = time.monotonic() + limit
+            lock = _async_probe_lock(key)
+            try:
+                await asyncio.wait_for(lock.acquire(), limit)
+            except asyncio.TimeoutError:
+                raise _probe_wait_timeout(self.binary, limit) from None
+            try:
                 cached = _caps_cache.get(key)
                 if cached is None:
-                    cached = _caps_cache[key] = await self._probe_uncached()
+                    remaining = max(deadline - time.monotonic(), 0.01)
+                    cached = _caps_cache[key] = await self._probe_uncached(remaining)
                 caps = cached
+            finally:
+                lock.release()
         self._check_min_version(caps)
         return caps
 
-    async def _probe_uncached(self) -> Capabilities:
-        res = await self._run_unchecked("", ["--capabilities"], check=False, timeout=60)
+    async def _probe_uncached(self, timeout: float) -> Capabilities:
+        res = await self._run_unchecked("", ["--capabilities"], check=False, timeout=timeout)
         return _caps_from_probe(self.binary, res)
 
-    async def _check_version_once(self) -> None:
-        await self.capabilities()
+    async def _check_version_once(self, timeout: float | None = None) -> None:
+        if self._capabilities is None:
+            self._capabilities = await self._probe(timeout)
 
     async def count(self, path: Arg, *args: Arg, **kw: Any) -> int:
         out = (await self.run("count", path, *args, **kw))._text()

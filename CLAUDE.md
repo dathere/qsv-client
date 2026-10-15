@@ -36,7 +36,10 @@ type-check it with `uv run mypy --platform win32` (the lint job runs both).
   raises `QsvVersionError`. `min_version=` can raise the floor, not lower it.
 - Successful probes are cached process-wide in `client._caps_cache`, keyed by
   (path, size, mtime_ns) and shared by `Qsv` and `AsyncQsv`. A per-key lock (per event loop
-  for async) dedups concurrent probes. Tests clear the cache in an autouse fixture.
+  for async, held weakly so loops can be collected) dedups concurrent probes; sync and async
+  locks are separate. The probe and the lock wait are bounded by the run's timeout (at most
+  60s). Only qsv's "Unknown flag: '--capabilities'" means `QsvVersionError`; other probe
+  failures go through `error_from_run`. Tests clear the cache in an autouse fixture.
 - `_Base._build_env` always sets `QSV_ERROR_FORMAT=json`. Runs that die without the JSON line
   (panics, signals) are still classified by exit code, so keep that fallback.
 - Exit codes 0 and 255 (qsv's "warning") count as success.

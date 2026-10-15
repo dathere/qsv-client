@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib.metadata
 import os
 import stat
 import sys
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -23,6 +25,7 @@ from qsv_client import (
     QsvIOError,
     QsvNoMatch,
     QsvNotFound,
+    QsvTimeout,
     QsvUsageError,
     QsvVersionError,
     _process,
@@ -300,6 +303,7 @@ LOGGED_PRE_CAPABILITIES = """
 import os, sys
 open(os.environ["FAKE_CALLS"], "a").write(sys.argv[1] + "\\n")
 if sys.argv[1] == "--capabilities":
+    sys.stderr.write("Unknown flag: '--capabilities'\\n")
     sys.exit(1)
 print("3")
 """
@@ -347,6 +351,116 @@ async def test_async_concurrent_first_calls_probe_once(
     clients = [shared, shared, AsyncQsv(binary, env=env), AsyncQsv(binary, env=env)]
     assert await asyncio.gather(*(q.count("x.csv") for q in clients)) == [3] * len(clients)
     assert calls.read_text().split().count("--capabilities") == 1
+
+
+# --capabilities hangs; the run's timeout must bound it
+HUNG_CAPABILITIES = """
+import sys, time
+if sys.argv[1] == "--capabilities":
+    time.sleep(float(sys.argv[2]) if len(sys.argv) > 2 else 30)
+print("3")
+"""
+
+
+def test_run_timeout_bounds_the_probe(fake_qsv: Callable[[str], str]) -> None:
+    qsv = Qsv(fake_qsv(HUNG_CAPABILITIES), kill_grace=0.5)
+    started = time.monotonic()
+    with pytest.raises(QsvTimeout):
+        qsv.run("count", "x.csv", timeout=0.5)
+    assert time.monotonic() - started < 10
+
+
+async def test_async_run_timeout_bounds_the_probe(fake_qsv: Callable[[str], str]) -> None:
+    qsv = AsyncQsv(fake_qsv(HUNG_CAPABILITIES), kill_grace=0.5)
+    started = time.monotonic()
+    with pytest.raises(QsvTimeout):
+        await qsv.run("count", "x.csv", timeout=0.5)
+    assert time.monotonic() - started < 10
+
+
+def test_run_timeout_bounds_waiting_for_another_probe(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    calls = tmp_path / "calls.txt"
+    binary = fake_qsv(SLOW_CAPABILITIES)
+    env = {"FAKE_CALLS": str(calls)}
+    with ThreadPoolExecutor(1) as pool:
+        first = pool.submit(lambda: Qsv(binary, env=env).count("x.csv"))
+        while not calls.exists():  # the first client's probe is running
+            time.sleep(0.01)
+        with pytest.raises(QsvTimeout, match="waiting for another client"):
+            Qsv(binary, env=env).run("count", "x.csv", timeout=0.1)
+        assert first.result() == 3
+
+
+async def test_async_run_timeout_bounds_waiting_for_another_probe(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    binary = fake_qsv(SLOW_CAPABILITIES)
+    env = {"FAKE_CALLS": str(tmp_path / "calls.txt")}
+    first = asyncio.ensure_future(AsyncQsv(binary, env=env).count("x.csv"))
+    await asyncio.sleep(0.1)  # the first client holds the probe lock
+    with pytest.raises(QsvTimeout, match="waiting for another client"):
+        await AsyncQsv(binary, env=env).run("count", "x.csv", timeout=0.1)
+    assert await first == 3
+
+
+# a supported qsv whose probe fails for another reason (crash, startup error)
+CRASHING_PROBE = """
+import sys
+if sys.argv[1] == "--capabilities":
+    sys.stderr.write("error while loading shared libraries: libfoo.so\\n")
+    sys.exit(127)
+print("3")
+"""
+
+
+def test_probe_failure_is_not_a_version_error(fake_qsv: Callable[[str], str]) -> None:
+    with pytest.raises(QsvError) as exc:
+        Qsv(fake_qsv(CRASHING_PROBE)).count("x.csv")
+    assert not isinstance(exc.value, QsvVersionError)
+    assert exc.value.exit_code == 127
+    assert "libfoo.so" in exc.value.stderr
+
+
+async def test_async_probe_failure_is_not_a_version_error(
+    fake_qsv: Callable[[str], str],
+) -> None:
+    with pytest.raises(QsvError) as exc:
+        await AsyncQsv(fake_qsv(CRASHING_PROBE)).count("x.csv")
+    assert not isinstance(exc.value, QsvVersionError)
+    assert exc.value.exit_code == 127
+    assert "libfoo.so" in exc.value.stderr
+
+
+# rejects --capabilities slowly, so concurrent callers contend for the probe lock
+SLOW_PRE_CAPABILITIES = """
+import sys, time
+if sys.argv[1] == "--capabilities":
+    time.sleep(0.2)
+    sys.stderr.write("Unknown flag: '--capabilities'\\n")
+    sys.exit(1)
+print("3")
+"""
+
+
+def test_contended_async_probe_locks_do_not_retain_event_loops(
+    fake_qsv: Callable[[str], str],
+) -> None:
+    binary = fake_qsv(SLOW_PRE_CAPABILITIES)
+
+    async def contend() -> None:
+        results = await asyncio.gather(
+            AsyncQsv(binary).count("x.csv"),
+            AsyncQsv(binary).count("x.csv"),
+            return_exceptions=True,
+        )
+        assert all(isinstance(r, QsvVersionError) for r in results)
+
+    for _ in range(3):
+        asyncio.run(contend())
+    gc.collect()
+    assert len(qsv_client.client._async_probe_locks) == 0
 
 
 # min_version can raise the 25.0.0 floor, never lower it
