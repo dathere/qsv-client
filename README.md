@@ -114,7 +114,7 @@ cancellation propagates, so expect up to a few `kill_grace` periods.
 qsv = Qsv(min_version="25.1.0")  # QsvVersionError on first use if older
 caps = qsv.capabilities
 caps.binary, caps.version, caps.features, caps.commands
-caps.has_feature("polars"), caps.has_command("describegpt"), caps.supports_json_errors
+caps.has_feature("polars"), caps.has_command("describegpt")
 ```
 
 Capabilities are probed once per binary per process and shared by all clients, so creating a
@@ -134,6 +134,7 @@ client per call costs nothing extra after the first.
 | `QsvInferenceError` | `inference` (an LLM call failed) | 1 |
 | `QsvWriteError` | `write` (e.g. disk full) | 1 |
 | `QsvTimeout` | `timeout` (killed by this client) | 124 |
+| `QsvVersionError` | `version` (binary older than 25.0.0, or than `min_version`) | |
 | `QsvError` | anything else; base class of all of the above | |
 
 `QsvError.structured` is True when the error came from qsv's JSON error line. A run that
@@ -141,9 +142,10 @@ dies without writing one (a panic, a signal) is classified by exit code instead:
 exit-code categories (usage, network, out of memory, encoding) can be told apart, other
 failures are `QsvError` with kind `unknown`, and the message is taken from stderr.
 
-`QsvNotFound` (no binary) and `QsvVersionError` (binary older than 25.0.0, or than
-`min_version`) are raised before anything runs. If `--capabilities` succeeds but its output
+`QsvVersionError` is raised before the command runs; its `exit_code`, `args_run` and
+`stderr` describe the `--capabilities` check. If `--capabilities` succeeds but its output
 isn't recognized, `capabilities` (and the first `run`) raise a plain `QsvError`.
+`QsvNotFound` (no binary) is not a `QsvError`: it is raised when the client is created.
 
 ## Platform notes
 

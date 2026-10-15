@@ -24,11 +24,24 @@ All notable changes to this project are documented here. The format follows
   applies its own `min_version`. Values in `Capabilities.raw` that depend on the environment,
   such as `max_jobs`, come from the client that probed first.
 
+- **Behavior change:** `QsvVersionError` is now a `QsvError` (kind `version`), so
+  `except QsvError` around `run()` also catches a too-old binary. An `except QsvVersionError`
+  placed after `except QsvError` is no longer reached, so put it first. Generic `QsvError`
+  handlers now see version errors too: retry logic should not retry them, since a too-old
+  qsv will never succeed. Its `exit_code`, `args_run` and `stderr` describe the
+  `--capabilities` check.
+- Each client gets its own copy of cached capabilities, so modifying `Capabilities.raw` or
+  `feature_versions` on one client no longer changes them for other clients.
+
 ### Removed
 
 - The fallback that parsed `--version` and `--list` when `--capabilities` was unavailable,
   including `qsv_client.capabilities.from_version_output`. If `--capabilities` succeeds but
   its output can't be used, `capabilities` raises `QsvError`.
+- `Capabilities.supports_json_errors` and `Capabilities.error_formats`: every supported qsv
+  reports JSON errors. The value is still in `raw["error_formats"]`.
+- `Capabilities.raw` is no longer optional; it is always the parsed `--capabilities` document.
+  `Capabilities` fields are now keyword-only.
 
 ## [0.3.0] - 2026-10-10
 

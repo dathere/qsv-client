@@ -10,6 +10,7 @@ from qsv_client import (
     QsvNetworkError,
     QsvNoMatch,
     QsvUsageError,
+    QsvVersionError,
     QsvWriteError,
 )
 from qsv_client.errors import error_from_run, parse_json_error
@@ -46,6 +47,13 @@ def test_json_kind_maps_to_class(kind: str, cls: type[QsvError]) -> None:
     assert exc.message == f"{kind} happened"
     assert exc.command == "select"  # the JSON line wins over the caller's guess
     assert exc.args_run == ("qsv", "select")
+
+
+def test_version_error_is_a_qsv_error_with_a_plain_message() -> None:
+    exc = QsvVersionError("qsv is qsv 24.0.0; at least 25.0.0 is required", exit_code=0)
+    assert isinstance(exc, QsvError)
+    assert exc.kind == "version"
+    assert str(exc) == "qsv is qsv 24.0.0; at least 25.0.0 is required"
 
 
 def test_unknown_json_kind_is_base_class() -> None:

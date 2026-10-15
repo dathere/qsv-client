@@ -38,7 +38,8 @@ class QsvError(Exception):
     Attributes:
         kind: qsv's error category (``usage``, ``csv``, ``io``, ``no_match``, ``network``,
             ``out_of_memory``, ``encoding``, ``inference``, ``write``, ``other``), or
-            ``timeout`` for a run this client killed. ``unknown`` when qsv exited with
+            ``timeout`` for a run this client killed, or ``version`` for a binary this client
+            rejected as too old. ``unknown`` when qsv exited with
             code 1 without writing a structured error (e.g. after a panic).
         message: the error message, without qsv's text-mode prefix (e.g. ``csv error: ``).
         exit_code: the process exit code.
@@ -142,8 +143,17 @@ class QsvNotFound(Exception):
     """No qsv binary could be found."""
 
 
-class QsvVersionError(Exception):
-    """The qsv binary is older than 25.0.0, or than the client's ``min_version``."""
+class QsvVersionError(QsvError):
+    """The qsv binary is older than 25.0.0, or than the client's ``min_version``.
+
+    Raised before the command runs. ``exit_code``, ``args_run`` and ``stderr`` describe the
+    ``--capabilities`` check, not the command.
+    """
+
+    kind = "version"
+
+    def __str__(self) -> str:
+        return self.message
 
 
 _KIND_TO_CLASS: dict[str, type[QsvError]] = {
@@ -159,6 +169,7 @@ _KIND_TO_CLASS: dict[str, type[QsvError]] = {
         QsvInferenceError,
         QsvWriteError,
         QsvTimeout,
+        QsvVersionError,
     )
 }
 

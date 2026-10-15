@@ -22,7 +22,6 @@ def test_capabilities_json() -> None:
     }
     caps = from_capabilities_json(json.dumps(doc))
     assert caps.binary == "qsvdp"
-    assert caps.supports_json_errors
     assert caps.has_feature("polars") and not caps.has_feature("luau")
     assert caps.has_command("stats")
     assert caps.raw == doc

@@ -195,12 +195,11 @@ else:
 
 def _check_caps(caps: qsv_client.Capabilities) -> None:
     assert (caps.binary, caps.version, caps.version_tuple) == ("qsv", "25.1.0", (25, 1, 0))
-    assert caps.supports_json_errors
     assert caps.has_feature("polars") and not caps.has_feature("luau")
     assert caps.feature_versions == {"polars": "0.55.1"}
     assert caps.has_command("stats") and not caps.has_command("describegpt")
     assert caps.target == "x86_64-unknown-linux-gnu"
-    assert caps.raw is not None
+    assert caps.raw["error_formats"] == ["text", "json"]
 
 
 def test_capabilities_from_json_are_probed_once(
@@ -271,6 +270,33 @@ async def test_async_capabilities_are_shared_across_clients(
     with pytest.raises(QsvVersionError, match=r"at least 25\.2\.0"):
         await AsyncQsv(binary, env=env, min_version="25.2.0").count("x.csv")
     assert calls.read_text().split() == ["--capabilities", "count", "count", "count"]
+
+
+def test_cached_capabilities_are_private_to_each_client(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    binary = fake_qsv(CAPABILITIES)
+    env = {"FAKE_CALLS": str(tmp_path / "calls.txt")}
+    first = Qsv(binary, env=env).capabilities
+    first.raw["commands"].append("hacked")
+    first.raw["injected"] = True
+    first.feature_versions["polars"] = "0.0.0"
+    for caps in (Qsv(binary, env=env).capabilities, Qsv(binary, env=env).capabilities):
+        assert "hacked" not in caps.raw["commands"] and "injected" not in caps.raw
+        assert caps.feature_versions == {"polars": "0.55.1"}
+
+
+async def test_async_cached_capabilities_are_private_to_each_client(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    binary = fake_qsv(CAPABILITIES)
+    env = {"FAKE_CALLS": str(tmp_path / "calls.txt")}
+    first = await AsyncQsv(binary, env=env).capabilities()
+    first.raw["injected"] = True
+    first.feature_versions["polars"] = "0.0.0"
+    caps = await AsyncQsv(binary, env=env).capabilities()
+    assert "injected" not in caps.raw
+    assert caps.feature_versions == {"polars": "0.55.1"}
 
 
 def test_replaced_binary_is_probed_again(fake_qsv: Callable[[str], str], tmp_path: Path) -> None:
@@ -492,8 +518,12 @@ def test_floor_is_enforced_before_first_run(
     calls = tmp_path / "calls.txt"
     env = {"FAKE_CALLS": str(calls), "FAKE_VERSION": "24.9.0"}
     qsv = Qsv(fake_qsv(CAPABILITIES), env=env, min_version=min_version)
-    with pytest.raises(QsvVersionError, match=r"qsv 24\.9\.0; at least 25\.0\.0"):
+    # `except QsvError` around run() also catches a too-old binary
+    with pytest.raises(QsvError, match=r"qsv 24\.9\.0; at least 25\.0\.0") as e:
         qsv.count("x.csv")
+    assert type(e.value) is QsvVersionError
+    assert (e.value.kind, e.value.exit_code) == ("version", 0)
+    assert str(e.value) == e.value.message
     assert calls.read_text().split() == ["--capabilities"]
 
 
@@ -521,8 +551,13 @@ print("3")
 
 def test_binary_without_capabilities_is_too_old(fake_qsv: Callable[[str], str]) -> None:
     qsv = Qsv(fake_qsv(PRE_CAPABILITIES))
-    with pytest.raises(QsvVersionError, match=r"does not support --capabilities.*25\.0\.0"):
+    with pytest.raises(QsvVersionError, match=r"does not support --capabilities.*25\.0\.0") as e:
         qsv.count("x.csv")
+    # a QsvError, describing the --capabilities check that rejected the binary
+    assert isinstance(e.value, QsvError)
+    assert (e.value.kind, e.value.exit_code) == ("version", 1)
+    assert e.value.args_run[1:] == ("--capabilities",)
+    assert "Unknown flag: '--capabilities'" in e.value.stderr
     with pytest.raises(QsvVersionError):
         _ = qsv.capabilities
 
