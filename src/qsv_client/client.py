@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import csv
 import io
 import json
@@ -12,7 +13,7 @@ import threading
 import time
 import weakref
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any
 
@@ -192,7 +193,9 @@ class _Base:
             required = self.min_version
         if caps.version_tuple < parse_version(required):
             raise QsvVersionError(
-                f"{self.binary} is qsv {caps.version}; at least {required} is required"
+                f"{self.binary} is qsv {caps.version}; at least {required} is required",
+                exit_code=0,
+                args=[self.binary, "--capabilities"],
             )
 
     def _finish(
@@ -258,7 +261,10 @@ def _caps_from_probe(binary: str, res: QsvResult) -> Capabilities:
         if "Unknown flag: '--capabilities'" in res.stderr:
             raise QsvVersionError(
                 f"{binary} does not support --capabilities; "
-                f"qsv {MIN_QSV_VERSION} or later is required"
+                f"qsv {MIN_QSV_VERSION} or later is required",
+                exit_code=res.exit_code,
+                args=res.args,
+                stderr=res.stderr,
             )
         raise error_from_run(
             exit_code=res.exit_code, stderr=res.stderr, args=res.args, command=None
@@ -312,6 +318,12 @@ def _caps_key(binary: str) -> _CapsKey | None:
     except OSError:
         return None
     return (binary, st.st_size, st.st_mtime_ns)
+
+
+def _private_copy(caps: Capabilities) -> Capabilities:
+    """A copy of cached capabilities whose dicts no other client shares, so one caller
+    mutating ``raw`` or ``feature_versions`` cannot change what other clients see."""
+    return replace(caps, feature_versions=dict(caps.feature_versions), raw=copy.deepcopy(caps.raw))
 
 
 def _sync_probe_lock(key: _CapsKey) -> threading.Lock:
@@ -469,7 +481,7 @@ class Qsv(_Base):
                 lock.release()
         # checked here, so it holds however the cache gets filled
         self._check_min_version(caps)
-        return caps
+        return _private_copy(caps)
 
     def _probe_uncached(self, timeout: float) -> Capabilities:
         res = self._run_unchecked("", ["--capabilities"], check=False, timeout=timeout)
@@ -615,7 +627,7 @@ class AsyncQsv(_Base):
             finally:
                 lock.release()
         self._check_min_version(caps)
-        return caps
+        return _private_copy(caps)
 
     async def _probe_uncached(self, timeout: float) -> Capabilities:
         res = await self._run_unchecked("", ["--capabilities"], check=False, timeout=timeout)
