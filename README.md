@@ -11,17 +11,17 @@ subprocess pitfalls:
   hang the caller. See [Platform notes](#platform-notes) for how this works on each OS.
 - **Typed errors instead of stderr scraping.** A failure raises a `QsvError` subclass
   (`QsvUsageError`, `QsvCsvError`, `QsvIOError`, `QsvNoMatch`, `QsvTimeout`, ...) that carries
-  the kind, message, exit code and command. Newer qsv builds report these as structured JSON
-  (`QSV_ERROR_FORMAT=json`). Older ones are classified from their exit code.
+  the kind, message, exit code and command, read from qsv's structured JSON error output
+  (`QSV_ERROR_FORMAT=json`).
 - **Capability detection.** `Qsv().capabilities` tells you the binary (`qsv`, `qsvdp`,
-  `qsvlite`, `qsvmcp`), its version, compiled-in features and installed commands. It reads
-  `qsv --capabilities` where available and falls back to parsing `--version` and `--list`.
+  `qsvlite`, `qsvmcp`), its version, compiled-in features and installed commands, from
+  `qsv --capabilities`.
 - **Secrets stay off the command line.** LLM settings for `describegpt` are passed as
   environment variables, so an API key never shows up in `ps` output.
 - **Sync and asyncio** clients with the same API. No runtime dependencies. Python 3.10+ on
   Linux, macOS and Windows.
 
-qsv itself is not bundled. Install it from the
+qsv itself is not bundled, and **qsv 25.0.0 or later** is required. Install it from the
 [qsv releases](https://github.com/dathere/qsv/releases) or a
 [package manager](https://github.com/dathere/qsv#installation-options).
 
@@ -111,11 +111,14 @@ cancellation propagates, so expect up to a few `kill_grace` periods.
 ### Capabilities and version checks
 
 ```python
-qsv = Qsv(min_version="24.0.0")  # QsvVersionError on first use if older
+qsv = Qsv(min_version="25.1.0")  # QsvVersionError on first use if older
 caps = qsv.capabilities
 caps.binary, caps.version, caps.features, caps.commands
 caps.has_feature("polars"), caps.has_command("describegpt"), caps.supports_json_errors
 ```
+
+Capabilities are probed once per binary per process and shared by all clients, so creating a
+client per call costs nothing extra after the first.
 
 ## Errors
 
@@ -133,15 +136,14 @@ caps.has_feature("polars"), caps.has_command("describegpt"), caps.supports_json_
 | `QsvTimeout` | `timeout` (killed by this client) | 124 |
 | `QsvError` | anything else; base class of all of the above | |
 
-`QsvError.structured` is True when the error came from qsv's JSON error line. With qsv
-versions that predate it, only the exit-code categories (usage, network, out of memory,
-encoding) can be told apart; other failures are `QsvError` with kind `unknown`, and the
-message is taken from stderr.
+`QsvError.structured` is True when the error came from qsv's JSON error line. A run that
+dies without writing one (a panic, a signal) is classified by exit code instead: only the
+exit-code categories (usage, network, out of memory, encoding) can be told apart, other
+failures are `QsvError` with kind `unknown`, and the message is taken from stderr.
 
-`QsvNotFound` (no binary) and `QsvVersionError` (binary too old) are raised before anything
-runs.
-If the binary's `--version` output isn't recognized (and `--capabilities` gave nothing
-usable), `capabilities` (and `run` with `min_version`) raise a plain `QsvError`.
+`QsvNotFound` (no binary) and `QsvVersionError` (binary older than 25.0.0, or than
+`min_version`) are raised before anything runs. If `--capabilities` succeeds but its output
+isn't recognized, `capabilities` (and the first `run`) raise a plain `QsvError`.
 
 ## Platform notes
 

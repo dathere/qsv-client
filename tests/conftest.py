@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from qsv_client import Qsv
+from qsv_client import Qsv, client
+
+
+@pytest.fixture(autouse=True)
+def _fresh_capabilities_cache() -> None:
+    """Each test starts with an empty process-wide --capabilities cache."""
+    client._caps_cache.clear()
 
 
 def _real_qsv() -> str | None:
@@ -42,14 +48,25 @@ def csv_files(tmp_path: Path) -> Path:
 def fake_qsv(tmp_path: Path) -> Callable[[str], str]:
     """Write an executable stand-in for qsv running the given Python body; return its path.
 
+    The client probes ``--capabilities`` before its first run, so unless ``body`` mentions
+    ``--capabilities`` (to answer it itself), the stand-in answers as qsv 25.0.0.
+
     POSIX: a script with a shebang. Windows: the script plus a ``fake-qsv.cmd`` wrapper that
     runs it (the extra ``cmd.exe`` is inside the run's Job Object, so it is killed with it).
     """
     # qsv writes "\n" on every platform; without this, print() writes "\r\n" on Windows
     prelude = 'import sys; sys.stdout.reconfigure(newline="\\n")\n'
+    capabilities = (
+        'if sys.argv[1:] == ["--capabilities"]:\n'
+        '    print(\'{"binary": "qsv", "version": "25.0.0", "error_formats": ["text", "json"]}\')\n'
+        "    sys.exit(0)\n"
+    )
 
     def make(body: str) -> str:
-        script = prelude + textwrap.dedent(body)
+        script = prelude
+        if "--capabilities" not in body:
+            script += capabilities
+        script += textwrap.dedent(body)
         if sys.platform == "win32":
             (tmp_path / "fake-qsv.py").write_text(script)
             wrapper = tmp_path / "fake-qsv.cmd"

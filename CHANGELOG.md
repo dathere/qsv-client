@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Behavior change:** qsv 25.0.0 or later is now required (exported as `MIN_QSV_VERSION`).
+  Before the first command, `qsv --capabilities` is now always run, even without
+  `min_version=`. A qsv that is too old, or that rejects `--capabilities`, raises
+  `QsvVersionError` instead of running. `min_version=` can still raise the floor, but not
+  lower it. The check is bounded by the run's `timeout` (at most 60s) separately from the
+  command, so a client's first run can take up to about twice its timeout. A check that fails
+  for another reason, such as a crash or a startup error, raises the usual `QsvError` with
+  qsv's stderr.
+- `capabilities` is probed once per binary per Python process and shared by every `Qsv` and
+  `AsyncQsv`, so creating a client per call doesn't start an extra qsv each time. Concurrent
+  first calls from threads, or from coroutines on the same event loop, share one probe; a
+  sync and an async client starting at the same moment can each probe once. A binary
+  replaced in place (new size or modification time) is probed again. Each client still
+  applies its own `min_version`. Values in `Capabilities.raw` that depend on the environment,
+  such as `max_jobs`, come from the client that probed first.
+
+### Removed
+
+- The fallback that parsed `--version` and `--list` when `--capabilities` was unavailable,
+  including `qsv_client.capabilities.from_version_output`. If `--capabilities` succeeds but
+  its output can't be used, `capabilities` raises `QsvError`.
+
 ## [0.3.0] - 2026-10-10
 
 ### Changed

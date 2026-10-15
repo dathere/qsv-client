@@ -27,12 +27,21 @@ type-check it with `uv run mypy --platform win32` (the lint job runs both).
   raises qsv errors.
 - `errors.py`: the `QsvError` hierarchy and exit-code constants. `error_from_run` maps errors
   by JSON `kind` first, then by exit code.
-- `capabilities.py`: parses `qsv --capabilities`, falling back to `--version` + `--list`.
+- `capabilities.py`: parses `qsv --capabilities`.
 
 ## Invariants
 
-- `_Base._build_env` always sets `QSV_ERROR_FORMAT=json`. Older qsv versions ignore it, so
-  their errors are classified by exit code.
+- qsv 25.0.0 is the minimum (`MIN_QSV_VERSION`): the first `--capabilities` qsv with JSON
+  errors. `--capabilities` is probed before the first run; a binary that rejects the flag
+  raises `QsvVersionError`. `min_version=` can raise the floor, not lower it.
+- Successful probes are cached process-wide in `client._caps_cache`, keyed by
+  (path, size, mtime_ns) and shared by `Qsv` and `AsyncQsv`. A per-key lock (per event loop
+  for async, held weakly so loops can be collected) dedups concurrent probes; sync and async
+  locks are separate. The probe and the lock wait are bounded by the run's timeout (at most
+  60s), separately from the command: `timeout` limits each process, not the whole `run()`. Only qsv's "Unknown flag: '--capabilities'" means `QsvVersionError`; other probe
+  failures go through `error_from_run`. Tests clear the cache in an autouse fixture.
+- `_Base._build_env` always sets `QSV_ERROR_FORMAT=json`. Runs that die without the JSON line
+  (panics, signals) are still classified by exit code, so keep that fallback.
 - Exit codes 0 and 255 (qsv's "warning") count as success.
 - On timeout, cancellation, or KeyboardInterrupt, the run's whole process tree is killed after
   `kill_grace`: SIGTERM then SIGKILL to the process group on POSIX, `CTRL_BREAK_EVENT` then
