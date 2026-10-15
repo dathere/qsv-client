@@ -25,8 +25,10 @@ All notable changes to this project are documented here. The format follows
   such as `max_jobs`, come from the client that probed first.
 
 - **Behavior change:** `QsvVersionError` is now a `QsvError` (kind `version`), so
-  `except QsvError` around `run()` also catches a too-old binary. Code that catches both should
-  handle `QsvVersionError` first. Its `exit_code`, `args_run` and `stderr` describe the
+  `except QsvError` around `run()` also catches a too-old binary. An `except QsvVersionError`
+  placed after `except QsvError` is no longer reached, so put it first. Generic `QsvError`
+  handlers now see version errors too: retry logic should not retry them, since a too-old
+  qsv will never succeed. Its `exit_code`, `args_run` and `stderr` describe the
   `--capabilities` check.
 - Each client gets its own copy of cached capabilities, so modifying `Capabilities.raw` or
   `feature_versions` on one client no longer changes them for other clients.
