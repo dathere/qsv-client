@@ -423,6 +423,27 @@ def test_probe_failure_is_not_a_version_error(fake_qsv: Callable[[str], str]) ->
     assert "libfoo.so" in exc.value.stderr
 
 
+# a wrapper that traces the command line (mentioning the flag) and then fails to start qsv
+TRACING_WRAPPER_FAILURE = """
+import sys
+if sys.argv[1] == "--capabilities":
+    sys.stderr.write("+ exec qsv --capabilities\\n")
+    sys.stderr.write("error while loading shared libraries: libfoo.so\\n")
+    sys.exit(127)
+print("3")
+"""
+
+
+def test_probe_failure_mentioning_the_flag_is_not_a_version_error(
+    fake_qsv: Callable[[str], str],
+) -> None:
+    with pytest.raises(QsvError) as exc:
+        Qsv(fake_qsv(TRACING_WRAPPER_FAILURE)).count("x.csv")
+    assert not isinstance(exc.value, QsvVersionError)
+    assert exc.value.exit_code == 127
+    assert "libfoo.so" in exc.value.stderr
+
+
 async def test_async_probe_failure_is_not_a_version_error(
     fake_qsv: Callable[[str], str],
 ) -> None:

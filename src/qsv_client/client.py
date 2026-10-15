@@ -26,7 +26,6 @@ from .errors import (
     QsvTimeout,
     QsvVersionError,
     error_from_run,
-    parse_json_error,
 )
 
 #: binaries tried, in order, when none is given and ``QSV_BIN`` is unset
@@ -256,7 +255,7 @@ def _caps_from_probe(binary: str, res: QsvResult) -> Capabilities:
     if res.exit_code != 0:
         # qsv before 25.0.0 rejects the flag as a usage error ("Unknown flag: '--capabilities'");
         # any other failure (a crash, a signal, a startup error) keeps its own diagnostics
-        if "--capabilities" in res.stderr and parse_json_error(res.stderr) is None:
+        if "Unknown flag: '--capabilities'" in res.stderr:
             raise QsvVersionError(
                 f"{binary} does not support --capabilities; "
                 f"qsv {MIN_QSV_VERSION} or later is required"
@@ -366,7 +365,10 @@ class Qsv(_Base):
             stdout_path: stream stdout to this file instead of holding it in memory (use for
                 large outputs). The file is created/truncated, parent dirs included. A
                 relative path is resolved against the client's ``cwd``, if set.
-            timeout: overrides the client default for this run.
+            timeout: overrides the client default for this run. It limits each qsv process
+                separately: a client's first run checks ``--capabilities`` first (bounded by
+                the same timeout, at most 60s), so that run can take up to about twice as
+                long.
             env: extra environment variables for this run.
             check: raise a :class:`QsvError` subclass if qsv fails (exit codes 0 and 255,
                 qsv's "warning" code, count as success).
