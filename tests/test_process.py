@@ -521,10 +521,12 @@ def test_interrupt_during_setup_still_kills(
     fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spawned: list[int] = []
+    qsv = Qsv(fake_qsv(IGNORE_STOP_AND_HANG))
+    _ = qsv.capabilities  # probe first, so the interruption hits the stats run
     monkeypatch.setattr(_process, "_ProcessTree", _interrupting_tree(spawned))
     try:
         with pytest.raises(_Interrupted):
-            Qsv(fake_qsv(IGNORE_STOP_AND_HANG)).run("stats", tmp_path / "leader.pid")
+            qsv.run("stats", tmp_path / "leader.pid")
         assert _wait_dead(spawned[0]), "leader survived an interrupted setup"
     finally:
         for pid in spawned:
@@ -535,10 +537,12 @@ async def test_async_interrupt_during_setup_still_kills(
     fake_qsv: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spawned: list[int] = []
+    qsv = AsyncQsv(fake_qsv(IGNORE_STOP_AND_HANG))
+    await qsv.capabilities()  # probe first, so the interruption hits the stats run
     monkeypatch.setattr(_process, "_ProcessTree", _interrupting_tree(spawned))
     try:
         with pytest.raises(_Interrupted):
-            await AsyncQsv(fake_qsv(IGNORE_STOP_AND_HANG)).run("stats", tmp_path / "leader.pid")
+            await qsv.run("stats", tmp_path / "leader.pid")
         assert await asyncio.to_thread(_wait_dead, spawned[0]), "leader survived"
     finally:
         for pid in spawned:
@@ -555,13 +559,14 @@ def test_stdin_feeder_failing_to_start_still_kills(
         _read_pid(pidfile)
         raise RuntimeError("can't start new thread")
 
+    qsv = Qsv(fake_qsv(IGNORE_STOP_AND_HANG), kill_grace=0.5)
+    # probe first: on Windows communicate() reads in threads, so the probe would hit no_thread
+    _ = qsv.capabilities
     monkeypatch.setattr(_process, "IS_WINDOWS", True)
     monkeypatch.setattr(threading.Thread, "start", no_thread)
     try:
         with pytest.raises(RuntimeError):
-            Qsv(fake_qsv(IGNORE_STOP_AND_HANG), kill_grace=0.5).run(
-                "stats", pidfile, stdin=b"a,b\n"
-            )
+            qsv.run("stats", pidfile, stdin=b"a,b\n")
         assert _wait_reaped(_read_pid(pidfile)), "leader survived a failed feeder start"
     finally:
         _kill(_read_pid(pidfile))
