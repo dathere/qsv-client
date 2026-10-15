@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
 import os
 import shutil
+import threading
 import time
+import weakref
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
 from . import _process
-from .capabilities import Capabilities, from_capabilities_json, from_version_output, parse_version
+from .capabilities import Capabilities, from_capabilities_json, parse_version
 from .errors import (
     EXIT_TIMEOUT,
     SUCCESS_EXIT_CODES,
@@ -27,6 +30,9 @@ from .errors import (
 
 #: binaries tried, in order, when none is given and ``QSV_BIN`` is unset
 DEFAULT_BINARIES = ("qsv", "qsvmcp", "qsvdp", "qsvlite")
+
+#: oldest qsv this client supports: the first with ``--capabilities`` and ``QSV_ERROR_FORMAT``
+MIN_QSV_VERSION = "25.0.0"
 
 Arg = str | os.PathLike[str] | int | float
 
@@ -136,6 +142,8 @@ class _Base:
                 ``QSV_LLM_APIKEY`` / ``QSV_LLM_BASE_URL`` / ``QSV_LLM_MODEL`` environment
                 variables, so the key never appears in the process table.
             min_version: raise :class:`QsvVersionError` on first use if the binary is older.
+                The binary must be at least :data:`MIN_QSV_VERSION` (25.0.0) regardless;
+                this can only raise that floor.
             kill_grace: seconds to wait between the polite stop (SIGTERM, or
                 ``CTRL_BREAK_EVENT`` on Windows) and the forced kill on timeout or
                 cancellation, and the most spent collecting output after the kill.
@@ -167,8 +175,7 @@ class _Base:
         env.update(self._env)
         if extra:
             env.update(extra)
-        # the whole point: failures come back as one parseable line. Harmless on qsv versions
-        # that predate it (they ignore the variable and print text).
+        # the whole point: failures come back as one parseable line
         env["QSV_ERROR_FORMAT"] = "json"
         return env
 
@@ -180,9 +187,12 @@ class _Base:
         return argv
 
     def _check_min_version(self, caps: Capabilities) -> None:
-        if self.min_version and caps.version_tuple < parse_version(self.min_version):
+        required = MIN_QSV_VERSION
+        if self.min_version and parse_version(self.min_version) > parse_version(required):
+            required = self.min_version
+        if caps.version_tuple < parse_version(required):
             raise QsvVersionError(
-                f"{self.binary} is qsv {caps.version}; at least {self.min_version} is required"
+                f"{self.binary} is qsv {caps.version}; at least {required} is required"
             )
 
     def _finish(
@@ -240,29 +250,60 @@ def _open_stdout(
     return path, path.open("wb")
 
 
-def _caps_from_json(res: QsvResult) -> Capabilities | None:
-    """Capabilities from a ``--capabilities`` run, or None if it gave nothing usable."""
-    if res.exit_code != 0 or not res.stdout:
-        return None
+def _caps_from_probe(binary: str, res: QsvResult) -> Capabilities:
+    """Capabilities from a ``--capabilities`` run."""
+    if res.exit_code != 0:
+        # qsv before 25.0.0 rejects the flag as a usage error
+        raise QsvVersionError(
+            f"{binary} does not support --capabilities (exit code {res.exit_code}); "
+            f"qsv {MIN_QSV_VERSION} or later is required"
+        )
     try:
-        caps = from_capabilities_json(res.stdout)
+        caps = from_capabilities_json(res.stdout or "")
         parse_version(caps.version)
-    except (ValueError, TypeError, AttributeError):
-        # not JSON, JSON of an unexpected shape, or no usable version: fall back to --version
-        return None
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise QsvError(
+            f"could not determine the qsv version from --capabilities: {exc}",
+            exit_code=res.exit_code,
+            args=res.args,
+            stderr=res.stderr,
+        ) from exc
     return caps
 
 
-def _caps_from_version(ver: QsvResult, lst: QsvResult) -> Capabilities:
+# One --capabilities probe per binary per process, shared by every Qsv and AsyncQsv. The key
+# includes size and mtime so a binary upgraded in place is probed again. Only successful
+# probes are cached; each client still applies its own min_version.
+_CapsKey = tuple[str, int, int]
+_caps_cache: dict[_CapsKey, Capabilities] = {}
+_sync_probe_locks: dict[_CapsKey, threading.Lock] = {}
+# asyncio.Lock is bound to the loop it is first used on, so async locks are per loop
+_async_probe_locks: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[_CapsKey, asyncio.Lock]
+] = weakref.WeakKeyDictionary()
+_probe_locks_guard = threading.Lock()
+
+
+def _caps_key(binary: str) -> _CapsKey | None:
     try:
-        return from_version_output(ver.stdout or "", lst.stdout or "")
-    except ValueError as exc:
-        raise QsvError(
-            f"could not determine the qsv version: {exc}",
-            exit_code=ver.exit_code,
-            args=ver.args,
-            stderr=ver.stderr,
-        ) from exc
+        st = os.stat(binary)
+    except OSError:
+        return None
+    return (binary, st.st_size, st.st_mtime_ns)
+
+
+def _sync_probe_lock(key: _CapsKey) -> threading.Lock:
+    with _probe_locks_guard:
+        return _sync_probe_locks.setdefault(key, threading.Lock())
+
+
+def _async_probe_lock(key: _CapsKey) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    with _probe_locks_guard:
+        locks = _async_probe_locks.get(loop)
+        if locks is None:
+            locks = _async_probe_locks[loop] = {}
+        return locks.setdefault(key, asyncio.Lock())
 
 
 def _ensure_json_format(args: Sequence[Arg]) -> list[Arg]:
@@ -367,7 +408,11 @@ class Qsv(_Base):
 
     @property
     def capabilities(self) -> Capabilities:
-        """The binary's version, features and commands (cached after the first call)."""
+        """The binary's version, features and commands.
+
+        Probed once per binary per process and shared by all clients, so ``raw`` values that
+        depend on the environment (``max_jobs``) reflect the client that probed first.
+        """
         if self._capabilities is None:
             self._capabilities = self._probe()
         return self._capabilities
@@ -377,19 +422,25 @@ class Qsv(_Base):
         return self.capabilities.version
 
     def _probe(self) -> Capabilities:
-        res = self._run_unchecked("", ["--capabilities"], check=False, timeout=60)
-        caps = _caps_from_json(res)
-        if caps is None:
-            ver = self._run_unchecked("", ["--version"], timeout=60)
-            lst = self._run_unchecked("", ["--list"], check=False, timeout=60)
-            caps = _caps_from_version(ver, lst)
+        key = _caps_key(self.binary)
+        if key is None:
+            caps = self._probe_uncached()
+        else:
+            with _sync_probe_lock(key):
+                cached = _caps_cache.get(key)
+                if cached is None:
+                    cached = _caps_cache[key] = self._probe_uncached()
+                caps = cached
         # checked here, so it holds however the cache gets filled
         self._check_min_version(caps)
         return caps
 
+    def _probe_uncached(self) -> Capabilities:
+        res = self._run_unchecked("", ["--capabilities"], check=False, timeout=60)
+        return _caps_from_probe(self.binary, res)
+
     def _check_version_once(self) -> None:
-        if self.min_version:
-            _ = self.capabilities
+        _ = self.capabilities
 
     # -- conveniences -----------------------------------------------------------------------
 
@@ -494,7 +545,11 @@ class AsyncQsv(_Base):
         )
 
     async def capabilities(self) -> Capabilities:
-        """The binary's version, features and commands (cached after the first call)."""
+        """The binary's version, features and commands.
+
+        Probed once per binary per process and shared by all clients, so ``raw`` values that
+        depend on the environment (``max_jobs``) reflect the client that probed first.
+        """
         if self._capabilities is None:
             self._capabilities = await self._probe()
         return self._capabilities
@@ -503,18 +558,24 @@ class AsyncQsv(_Base):
         return (await self.capabilities()).version
 
     async def _probe(self) -> Capabilities:
-        res = await self._run_unchecked("", ["--capabilities"], check=False, timeout=60)
-        caps = _caps_from_json(res)
-        if caps is None:
-            ver = await self._run_unchecked("", ["--version"], timeout=60)
-            lst = await self._run_unchecked("", ["--list"], check=False, timeout=60)
-            caps = _caps_from_version(ver, lst)
+        key = _caps_key(self.binary)
+        if key is None:
+            caps = await self._probe_uncached()
+        else:
+            async with _async_probe_lock(key):
+                cached = _caps_cache.get(key)
+                if cached is None:
+                    cached = _caps_cache[key] = await self._probe_uncached()
+                caps = cached
         self._check_min_version(caps)
         return caps
 
+    async def _probe_uncached(self) -> Capabilities:
+        res = await self._run_unchecked("", ["--capabilities"], check=False, timeout=60)
+        return _caps_from_probe(self.binary, res)
+
     async def _check_version_once(self) -> None:
-        if self.min_version:
-            await self.capabilities()
+        await self.capabilities()
 
     async def count(self, path: Arg, *args: Arg, **kw: Any) -> int:
         out = (await self.run("count", path, *args, **kw))._text()

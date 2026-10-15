@@ -1,5 +1,4 @@
-"""Against a real qsv binary ($QSV_BIN or `qsv` on PATH). Assertions that depend on
-structured errors adapt to whether the binary supports QSV_ERROR_FORMAT=json."""
+"""Against a real qsv 25.0.0+ binary ($QSV_BIN or `qsv` on PATH)."""
 
 from __future__ import annotations
 
@@ -22,7 +21,8 @@ from qsv_client import (
 def test_capabilities(qsv: Qsv) -> None:
     caps = qsv.capabilities
     assert caps.binary in {"qsv", "qsvlite", "qsvdp", "qsvmcp"}
-    assert caps.version_tuple >= (20, 0, 0)
+    assert caps.version_tuple >= (25, 0, 0)
+    assert caps.supports_json_errors
     assert caps.has_command("count")
     assert caps.has_command("stats")
     assert qsv.version == caps.version
@@ -54,19 +54,15 @@ def test_csv_error(qsv: Qsv, csv_files: Path) -> None:
     with pytest.raises(QsvError) as exc:
         qsv.run("select", "a", csv_files / "ragged.csv")
     assert exc.value.exit_code == 1
-    if qsv.capabilities.supports_json_errors:
-        assert type(exc.value) is QsvCsvError
-        assert exc.value.structured
-        assert exc.value.command == "select"
-    else:
-        assert "found record with 1 fields" in exc.value.message
+    assert type(exc.value) is QsvCsvError
+    assert exc.value.structured
+    assert exc.value.command == "select"
 
 
 def test_io_error(qsv: Qsv, csv_files: Path) -> None:
     with pytest.raises(QsvError) as exc:
         qsv.count(csv_files / "missing.csv")
-    if qsv.capabilities.supports_json_errors:
-        assert type(exc.value) is QsvIOError
+    assert type(exc.value) is QsvIOError
 
 
 def test_usage_error(qsv: Qsv, csv_files: Path) -> None:
@@ -80,8 +76,7 @@ def test_no_match(qsv: Qsv, csv_files: Path) -> None:
     with pytest.raises(QsvError) as exc:
         qsv.run("search", "zzz", csv_files / "ok.csv")
     assert exc.value.exit_code == 1
-    if qsv.capabilities.supports_json_errors:
-        assert type(exc.value) is QsvNoMatch
+    assert type(exc.value) is QsvNoMatch
     # check=False hands the outcome back instead
     res = qsv.run("search", "zzz", csv_files / "ok.csv", check=False)
     assert not res.ok

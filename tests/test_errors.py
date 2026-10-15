@@ -22,7 +22,7 @@ def _line(kind: str, **extra: object) -> str:
         "message": f"{kind} happened",
         "exit_code": 1,
         "command": "select",
-        "qsv_version": "24.0.0",
+        "qsv_version": "25.0.0",
         **extra,
     }
     return json.dumps({"error": err})

@@ -598,42 +598,30 @@ async def test_async_relative_stdout_path_follows_cwd(
     assert res.csv_rows() == [{"a": "1", "b": "2"}]
 
 
-# --capabilities answers with JSON of the wrong shape; --version is a valid qsvlite line
+# --capabilities exits 0 but with JSON of the wrong shape, or with no JSON at all
 MALFORMED_CAPABILITIES = """
 import sys
 if sys.argv[1] == "--capabilities":
-    print('{"version": "24.0.0", "feature_versions": ["oops"]}')
-elif sys.argv[1] == "--version":
-    print("qsvlite 24.0.0-standard--4-4;1 GiB-0 B-2 GiB-4 GiB "
-          "(x86_64-unknown-linux-gnu compiled with Rust 1.99;x-y;z-2) compiled")
+    print('{"version": "25.0.0", "feature_versions": ["oops"]}')
 """
 
-UNRECOGNIZED_VERSION = """
+UNRECOGNIZED_CAPABILITIES = """
+# --capabilities
 print("not qsv at all")
 """
 
 
-def test_malformed_capabilities_falls_back_to_version(fake_qsv: Callable[[str], str]) -> None:
-    caps = Qsv(fake_qsv(MALFORMED_CAPABILITIES)).capabilities
-    assert (caps.binary, caps.version) == ("qsvlite", "24.0.0")
-
-
-async def test_async_malformed_capabilities_falls_back_to_version(
-    fake_qsv: Callable[[str], str],
-) -> None:
-    caps = await AsyncQsv(fake_qsv(MALFORMED_CAPABILITIES)).capabilities()
-    assert (caps.binary, caps.version) == ("qsvlite", "24.0.0")
-
-
-def test_unrecognized_version_raises_qsv_error(fake_qsv: Callable[[str], str]) -> None:
-    qsv = Qsv(fake_qsv(UNRECOGNIZED_VERSION), min_version="1.0.0")
+@pytest.mark.parametrize("body", [MALFORMED_CAPABILITIES, UNRECOGNIZED_CAPABILITIES])
+def test_unusable_capabilities_raises_qsv_error(fake_qsv: Callable[[str], str], body: str) -> None:
+    qsv = Qsv(fake_qsv(body))
     with pytest.raises(QsvError, match="could not determine the qsv version"):
         qsv.run("count", "x.csv")
 
 
-async def test_async_unrecognized_version_raises_qsv_error(
-    fake_qsv: Callable[[str], str],
+@pytest.mark.parametrize("body", [MALFORMED_CAPABILITIES, UNRECOGNIZED_CAPABILITIES])
+async def test_async_unusable_capabilities_raises_qsv_error(
+    fake_qsv: Callable[[str], str], body: str
 ) -> None:
-    qsv = AsyncQsv(fake_qsv(UNRECOGNIZED_VERSION), min_version="1.0.0")
+    qsv = AsyncQsv(fake_qsv(body))
     with pytest.raises(QsvError, match="could not determine the qsv version"):
         await qsv.run("count", "x.csv")

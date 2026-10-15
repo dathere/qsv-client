@@ -1,13 +1,14 @@
 """Typed exceptions for failed qsv runs.
 
-qsv releases after 24.0.0 support ``QSV_ERROR_FORMAT=json``, which ends a failed run with
-one JSON line on stderr::
+The client sets ``QSV_ERROR_FORMAT=json``, so a failed run ends with one JSON line on
+stderr::
 
     {"error": {"kind": "csv", "level": "error", "message": "...", "exit_code": 1,
-               "command": "select", "qsv_version": "24.0.0"}}
+               "command": "select", "qsv_version": "25.0.0"}}
 
-:func:`error_from_run` turns that line into the matching :class:`QsvError` subclass. For older
-qsv versions, which only print free text, it falls back to qsv's documented exit codes.
+:func:`error_from_run` turns that line into the matching :class:`QsvError` subclass. A run
+that dies without writing it (a panic, a signal, a crash) is classified by qsv's documented
+exit codes instead.
 """
 
 from __future__ import annotations
@@ -37,8 +38,8 @@ class QsvError(Exception):
     Attributes:
         kind: qsv's error category (``usage``, ``csv``, ``io``, ``no_match``, ``network``,
             ``out_of_memory``, ``encoding``, ``inference``, ``write``, ``other``), or
-            ``timeout`` for a run this client killed. ``unknown`` when an older qsv exited
-            with code 1 and printed no structured error.
+            ``timeout`` for a run this client killed. ``unknown`` when qsv exited with
+            code 1 without writing a structured error (e.g. after a panic).
         message: the error message, without qsv's text-mode prefix (e.g. ``csv error: ``).
         exit_code: the process exit code.
         command: the qsv subcommand, when known.
@@ -142,7 +143,7 @@ class QsvNotFound(Exception):
 
 
 class QsvVersionError(Exception):
-    """The qsv binary is older than the client was told to require."""
+    """The qsv binary is older than 25.0.0, or than the client's ``min_version``."""
 
 
 _KIND_TO_CLASS: dict[str, type[QsvError]] = {
@@ -215,7 +216,7 @@ def error_from_run(
             structured=True,
         )
 
-    # older qsv: free text. The exit code still separates the main categories.
+    # no JSON line (a panic, a signal, a crash): the exit code still separates the main categories
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     if not lines:
         message = f"qsv exited with code {exit_code}"
