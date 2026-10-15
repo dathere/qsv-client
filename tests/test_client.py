@@ -195,12 +195,11 @@ else:
 
 def _check_caps(caps: qsv_client.Capabilities) -> None:
     assert (caps.binary, caps.version, caps.version_tuple) == ("qsv", "25.1.0", (25, 1, 0))
-    assert caps.supports_json_errors
     assert caps.has_feature("polars") and not caps.has_feature("luau")
     assert caps.feature_versions == {"polars": "0.55.1"}
     assert caps.has_command("stats") and not caps.has_command("describegpt")
     assert caps.target == "x86_64-unknown-linux-gnu"
-    assert caps.raw is not None
+    assert caps.raw["error_formats"] == ["text", "json"]
 
 
 def test_capabilities_from_json_are_probed_once(
@@ -279,12 +278,10 @@ def test_cached_capabilities_are_private_to_each_client(
     binary = fake_qsv(CAPABILITIES)
     env = {"FAKE_CALLS": str(tmp_path / "calls.txt")}
     first = Qsv(binary, env=env).capabilities
-    assert first.raw is not None
     first.raw["commands"].append("hacked")
     first.raw["injected"] = True
     first.feature_versions["polars"] = "0.0.0"
     for caps in (Qsv(binary, env=env).capabilities, Qsv(binary, env=env).capabilities):
-        assert caps.raw is not None
         assert "hacked" not in caps.raw["commands"] and "injected" not in caps.raw
         assert caps.feature_versions == {"polars": "0.55.1"}
 
@@ -295,11 +292,10 @@ async def test_async_cached_capabilities_are_private_to_each_client(
     binary = fake_qsv(CAPABILITIES)
     env = {"FAKE_CALLS": str(tmp_path / "calls.txt")}
     first = await AsyncQsv(binary, env=env).capabilities()
-    assert first.raw is not None
     first.raw["injected"] = True
     first.feature_versions["polars"] = "0.0.0"
     caps = await AsyncQsv(binary, env=env).capabilities()
-    assert caps.raw is not None and "injected" not in caps.raw
+    assert "injected" not in caps.raw
     assert caps.feature_versions == {"polars": "0.55.1"}
 
 

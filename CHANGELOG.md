@@ -38,6 +38,10 @@ All notable changes to this project are documented here. The format follows
 - The fallback that parsed `--version` and `--list` when `--capabilities` was unavailable,
   including `qsv_client.capabilities.from_version_output`. If `--capabilities` succeeds but
   its output can't be used, `capabilities` raises `QsvError`.
+- `Capabilities.supports_json_errors` and `Capabilities.error_formats`: every supported qsv
+  reports JSON errors. The value is still in `raw["error_formats"]`.
+- `Capabilities.raw` is no longer optional; it is always the parsed `--capabilities` document.
+  `Capabilities` fields are now keyword-only.
 
 ## [0.3.0] - 2026-10-10
 

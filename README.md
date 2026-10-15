@@ -114,7 +114,7 @@ cancellation propagates, so expect up to a few `kill_grace` periods.
 qsv = Qsv(min_version="25.1.0")  # QsvVersionError on first use if older
 caps = qsv.capabilities
 caps.binary, caps.version, caps.features, caps.commands
-caps.has_feature("polars"), caps.has_command("describegpt"), caps.supports_json_errors
+caps.has_feature("polars"), caps.has_command("describegpt")
 ```
 
 Capabilities are probed once per binary per process and shared by all clients, so creating a

@@ -22,7 +22,7 @@ def test_capabilities(qsv: Qsv) -> None:
     caps = qsv.capabilities
     assert caps.binary in {"qsv", "qsvlite", "qsvdp", "qsvmcp"}
     assert caps.version_tuple >= (25, 0, 0)
-    assert caps.supports_json_errors
+    assert "json" in caps.raw["error_formats"]
     assert caps.has_command("count")
     assert caps.has_command("stats")
     assert qsv.version == caps.version
