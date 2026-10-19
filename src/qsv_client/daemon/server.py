@@ -55,6 +55,8 @@ _LOCAL_BODY_LIMIT = 64 * 1024 * 1024
 _BROWSER_BODY_LIMIT = 64 * 1024
 _MAX_ROWS = 500
 _HEAD_TIMEOUT = 10.0
+_FLUSH_TIMEOUT = 30.0
+"""Seconds to flush a response to a client before dropping the connection."""
 """Seconds a client gets to send its request head; an idle connection can't hold us forever."""
 
 
@@ -83,6 +85,7 @@ class Daemon:
         self._servers: list[asyncio.Server] = []
         self._owns_socket = False
         self._connections: set[asyncio.Task[None]] = set()
+        self._writers: set[asyncio.StreamWriter] = set()
         self._fetch_locks: dict[str, asyncio.Lock] = {}
         self._qsv = self._client()
 
@@ -164,6 +167,8 @@ class Daemon:
             server.close()
         # since Python 3.12 wait_closed() waits for open connections; end ours first (a
         # cancelled run kills its qsv tree like any other cancellation)
+        for writer in list(self._writers):
+            writer.transport.abort()  # drop unsent output: shutdown must not wait on a peer
         for task in list(self._connections):
             task.cancel()
         if self._connections:
@@ -203,6 +208,7 @@ class Daemon:
     async def _on_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, transport: str
     ) -> None:
+        self._writers.add(writer)
         task = asyncio.current_task()
         if task is not None:
             self._connections.add(task)
@@ -243,9 +249,13 @@ class Daemon:
             with contextlib.suppress(ConnectionError):
                 await write_response(writer, response)
         finally:
+            self._writers.discard(writer)
             writer.close()
-            with contextlib.suppress(ConnectionError):
-                await writer.wait_closed()
+            # close() flushes first: a peer that stopped reading would hold us here forever
+            try:
+                await asyncio.wait_for(writer.wait_closed(), _FLUSH_TIMEOUT)
+            except (asyncio.TimeoutError, ConnectionError):
+                writer.transport.abort()
 
     async def _until_disconnect(
         self, reader: asyncio.StreamReader, work: Awaitable[Response]

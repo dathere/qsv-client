@@ -696,3 +696,24 @@ def test_slow_request_head_times_out(
     reply = s.recv(4096)
     s.close()
     assert reply.startswith(b"HTTP/1.1 408")
+
+
+def test_shutdown_is_not_blocked_by_a_client_that_stops_reading(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon
+) -> None:
+    # 32 MiB of stdout: far more than the socket buffers hold, so the write blocks
+    d = start_daemon(_script(fake_qsv, 'sys.stdout.write("x" * (32 << 20))\n'))
+    body = json.dumps({"command": "count"}).encode()
+    s = socket.create_connection(("127.0.0.1", d.port))
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    s.sendall(
+        f"POST /v1/run HTTP/1.1\r\nHost: 127.0.0.1:{d.port}\r\n"
+        f"Authorization: Bearer {d.daemon.local_token}\r\n"
+        f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    s.recv(1024)  # the response has started; now stop reading
+    started = time.monotonic()
+    d.stop()
+    assert time.monotonic() - started < 10
+    s.close()
