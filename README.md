@@ -120,6 +120,27 @@ caps.has_feature("polars"), caps.has_command("describegpt")
 Capabilities are probed once per binary per process and shared by all clients, so creating a
 client per call costs nothing extra after the first.
 
+### The qsv-clientd daemon
+
+`qsv-clientd` (installed with the package) is a per-user daemon that runs qsv for local
+processes, through `DaemonClient` / `AsyncDaemonClient` (the same `run()` as `Qsv`), and for
+open **Data Schematics** from `qsv viz smart`. Once you approve a schematic with a pairing
+code, it can drill into rows, refresh stats, re-render itself and fetch the latest data.
+
+```bash
+qsv-clientd install                       # or: qsv-clientd serve
+qsv-clientd register data.csv --schematic data.html
+qsv-clientd approve K7Q-4MZ               # the code the schematic shows
+```
+
+```python
+from qsv_client.daemon import DaemonClient
+
+print(DaemonClient().run("count", "data.csv").stdout)
+```
+
+See [docs/DAEMON.md](docs/DAEMON.md) for the security model and protocol.
+
 ## Errors
 
 | Exception | qsv error kind | Typical exit code |
@@ -136,6 +157,10 @@ client per call costs nothing extra after the first.
 | `QsvTimeout` | `timeout` (killed by this client) | 124 |
 | `QsvVersionError` | `version` (binary older than 25.0.0, or than `min_version`) | |
 | `QsvError` | anything else; base class of all of the above | |
+
+`QsvDaemonError` (the daemon refused a request; `status` and `code` say why) and its subclass
+`QsvDaemonUnavailable` (no daemon is listening) come only from `DaemonClient`. They are not
+`QsvError`s: qsv itself did not fail.
 
 `QsvError.structured` is True when the error came from qsv's JSON error line. A run that
 dies without writing one (a panic, a signal) is classified by exit code instead: only the

@@ -14,7 +14,7 @@ exit codes instead.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 # qsv's exit codes (src/clitypes.rs `QsvExitCode`)
@@ -77,6 +77,18 @@ class QsvError(Exception):
     def __str__(self) -> str:
         where = f"qsv {self.command}" if self.command else "qsv"
         return f"{where} failed ({self.kind}, exit {self.exit_code}): {self.message}"
+
+    def to_dict(self) -> dict[str, Any]:
+        """The error as JSON-safe data; :func:`error_from_dict` turns it back into an error."""
+        return {
+            "kind": self.kind,
+            "message": self.message,
+            "exit_code": self.exit_code,
+            "command": self.command,
+            "args": list(self.args_run),
+            "stderr": self.stderr,
+            "structured": self.structured,
+        }
 
 
 class QsvUsageError(QsvError):
@@ -239,3 +251,45 @@ def error_from_run(
         message = lines[-1]
     cls = _EXIT_CODE_TO_CLASS.get(exit_code, QsvError)
     return cls(message, exit_code=exit_code, command=command, args=args, stderr=stderr)
+
+
+def error_from_dict(data: Mapping[str, Any]) -> QsvError:
+    """Rebuild an error from :meth:`QsvError.to_dict` output, as the same subclass."""
+    kind = data.get("kind")
+    kind = kind if isinstance(kind, str) else "unknown"
+    exit_code = data.get("exit_code")
+    command = data.get("command")
+    args = data.get("args")
+    stderr = data.get("stderr")
+    message = data.get("message")
+    return _KIND_TO_CLASS.get(kind, QsvError)(
+        message if isinstance(message, str) else "",
+        kind=kind,
+        exit_code=exit_code if isinstance(exit_code, int) else EXIT_BAD,
+        command=command if isinstance(command, str) else None,
+        args=[str(a) for a in args] if isinstance(args, list) else (),
+        stderr=stderr if isinstance(stderr, str) else "",
+        structured=data.get("structured") is True,
+    )
+
+
+class QsvDaemonError(Exception):
+    """The qsv-clientd daemon refused or could not handle a request (not a qsv failure).
+
+    Attributes:
+        status: the HTTP status the daemon answered with (0 when it could not be reached).
+        code: a short machine-readable reason, e.g. ``unauthorized`` or ``not_allowed``.
+    """
+
+    def __init__(self, message: str, *, status: int = 0, code: str = "daemon") -> None:
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.code = code
+
+
+class QsvDaemonUnavailable(QsvDaemonError):
+    """No qsv-clientd daemon is listening (not installed, not running, or wrong socket)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, status=0, code="unavailable")
