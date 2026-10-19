@@ -644,3 +644,28 @@ def test_cancelled_fetch_leaves_no_staging_files(
         assert [p.name for p in cache.iterdir()] == ["data.csv"]
     finally:
         server.close()
+
+
+def test_sigterm_shuts_down_cleanly(fake_qsv: Callable[[str], str]) -> None:
+    import signal
+    import subprocess
+
+    if sys.platform == "win32":
+        pytest.skip("POSIX signals")
+    home = Path(tempfile.mkdtemp(prefix="qcd"))
+    try:
+        env = {**os.environ, "QSV_CLIENTD_HOME": str(home), "QSV_BIN": _script(fake_qsv, ECHO)}
+        env.pop("QSV_CLIENTD_SOCKET", None)
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "qsv_client.daemon", "serve", "--port", "0"], env=env
+        )
+        run = home / "run"
+        deadline = time.monotonic() + 30
+        while not (run / "daemon.json").exists():
+            assert proc.poll() is None and time.monotonic() < deadline
+            time.sleep(0.05)
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(30) == 0
+        assert sorted(p.name for p in run.iterdir()) == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)

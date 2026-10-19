@@ -22,6 +22,7 @@ import logging
 import os
 import secrets
 import shutil
+import signal
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -168,8 +169,15 @@ class Daemon:
 
     async def serve_forever(self) -> None:
         await self.start()
+        stop = asyncio.Event()
+        if sys.platform != "win32":
+            # launchd and systemd stop services with SIGTERM; without a handler Python dies
+            # at once and leaves the socket, local-token and daemon.json behind
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGHUP):
+                loop.add_signal_handler(sig, stop.set)
         try:
-            await asyncio.Event().wait()
+            await stop.wait()
         finally:
             await self.close()
 
