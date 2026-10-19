@@ -101,6 +101,8 @@ def _run_body(
     env: Mapping[str, str] | None,
     cwd: str,
 ) -> dict[str, Any]:
+    # the daemon runs elsewhere: a relative cwd means relative to this process, as for Qsv
+    cwd = os.path.abspath(cwd)
     body: dict[str, Any] = {
         "command": command,
         "args": [os.fspath(a) if isinstance(a, os.PathLike) else str(a) for a in args],
@@ -348,9 +350,16 @@ class AsyncDaemonClient:
 
 
 def qsv_or_daemon(binary: str | None = None, **kwargs: Any) -> DaemonClient | Qsv:
-    """A :class:`DaemonClient` when qsv-clientd is running, else a local :class:`Qsv`."""
+    """A :class:`DaemonClient` when qsv-clientd is running, else a local :class:`Qsv`.
+
+    Only ``cwd`` carries over to the daemon. Any other ``Qsv`` option (a specific
+    ``binary``, ``timeout``, ``env``, LLM settings, ``min_version``...) is something the daemon
+    can't honor per client, so passing one always returns a local ``Qsv``.
+    """
+    if binary is not None or set(kwargs) - {"cwd"}:
+        return Qsv(binary, **kwargs)
     try:
-        client = DaemonClient()
+        client = DaemonClient(cwd=kwargs.get("cwd"))
     except QsvDaemonError:
         return Qsv(binary, **kwargs)
     return client if client.available() else Qsv(binary, **kwargs)

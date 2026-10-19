@@ -183,7 +183,9 @@ def main(argv: list[str] | None = None) -> int:
         if ns.cmd == "status":
             _print(client.status())
         elif ns.cmd == "run":
-            result = client.run(ns.command, *ns.args, check=False, text=False)
+            # like running qsv directly: redirected or piped input reaches the command
+            stdin = None if sys.stdin is None or sys.stdin.isatty() else sys.stdin.buffer.read()
+            result = client.run(ns.command, *ns.args, stdin=stdin, check=False, text=False)
             sys.stdout.buffer.write(result.stdout_bytes or b"")
             sys.stderr.write(result.stderr)
             return result.exit_code

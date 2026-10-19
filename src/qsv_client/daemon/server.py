@@ -78,6 +78,8 @@ class Daemon:
         self.port: int | None = None
         """The bound loopback port, once started."""
         self._servers: list[asyncio.Server] = []
+        self._owns_socket = False
+        self._fetch_locks: dict[str, asyncio.Lock] = {}
         self._qsv = self._client()
 
     # -- lifecycle -------------------------------------------------------------------------
@@ -86,6 +88,13 @@ class Daemon:
         caps = await self._qsv.capabilities()
         log.info("qsv-clientd %s using %s %s", __version__, caps.binary, caps.version)
         ensure_private_dir(self.home)
+        # bind everything before publishing the token: a second instance that fails to bind
+        # must not replace the running daemon's credentials
+        try:
+            await self._bind()
+        except BaseException:
+            await self._close_servers()
+            raise
         token_file = (
             local_token_path()
             if self._socket_path == self.config.socket_path()
@@ -93,6 +102,10 @@ class Daemon:
         )
         write_private_file(token_file, self.local_token.encode())
         self._token_file = token_file
+        info = {"pid": os.getpid(), "port": self.port, "socket": str(self._socket_path)}
+        write_private_file(token_file.parent / "daemon.json", json.dumps(info).encode())
+
+    async def _bind(self) -> None:
         if sys.platform != "win32":
             parent = self._socket_path.parent
             if parent == runtime_dir():
@@ -111,8 +124,9 @@ class Daemon:
                 )
             finally:
                 os.umask(old_umask)
-            self._socket_path.chmod(0o600)
+            self._owns_socket = True
             self._servers.append(server)
+            self._socket_path.chmod(0o600)
         # Windows has no Unix socket here, so local clients need loopback too
         if self._tcp_port is not None or sys.platform == "win32":
             server = await asyncio.start_server(
@@ -123,8 +137,6 @@ class Daemon:
             )
             self.port = server.sockets[0].getsockname()[1]
             self._servers.append(server)
-        info = {"pid": os.getpid(), "port": self.port, "socket": str(self._socket_path)}
-        write_private_file(token_file.parent / "daemon.json", json.dumps(info).encode())
 
     async def _remove_stale_socket(self) -> None:
         if sys.platform == "win32" or not self._socket_path.exists():
@@ -138,16 +150,21 @@ class Daemon:
         raise RuntimeError(f"another qsv-clientd is already listening on {self._socket_path}")
 
     async def close(self) -> None:
+        await self._close_servers()
+        with contextlib.suppress(AttributeError):
+            self._token_file.unlink(missing_ok=True)
+            (self._token_file.parent / "daemon.json").unlink(missing_ok=True)
+
+    async def _close_servers(self) -> None:
         for server in self._servers:
             server.close()
         for server in self._servers:
             await server.wait_closed()
         self._servers.clear()
-        if sys.platform != "win32":
+        # only our own socket: never one a running instance is still serving on
+        if self._owns_socket:
             self._socket_path.unlink(missing_ok=True)
-        with contextlib.suppress(AttributeError):
-            self._token_file.unlink(missing_ok=True)
-            (self._token_file.parent / "daemon.json").unlink(missing_ok=True)
+            self._owns_socket = False
 
     async def serve_forever(self) -> None:
         await self.start()
@@ -388,6 +405,8 @@ class Daemon:
                 and source.fingerprint is not None
                 and source.fingerprint.sha256 != fingerprint.sha256
                 and not body.get("force")
+                # a requested render replaces the stale schematic anyway
+                and not body.get("render")
             ):
                 raise HttpError(
                     409,
@@ -522,7 +541,8 @@ class Daemon:
                 ["slice", "--start", str(offset), "--len", str(limit), source],
                 stdout_path=out,
             )
-            rows = list(csv.reader(io.StringIO(out.read_text("utf-8", "replace"), newline="")))
+            text = self._capped_text(out)
+            rows = _parse_csv(text, csv.reader)
         headers, data = (rows[0], rows[1:]) if rows else ([], [])
         return Response.json({"headers": headers, "rows": data, "offset": offset})
 
@@ -536,8 +556,12 @@ class Daemon:
             "rows": int(count.strip() or 0),
         }
         if body.get("stats"):
-            stats = await self._browser_run(ds, ["stats", *NO_SIDE_FILES["stats"], ds.path])
-            out["stats"] = list(csv.DictReader(io.StringIO(stats, newline="")))
+            with tempfile.TemporaryDirectory(prefix="qsv-clientd-") as tmp:
+                stats_file = Path(tmp) / "stats.csv"
+                await self._browser_run(
+                    ds, ["stats", *NO_SIDE_FILES["stats"], ds.path], stdout_path=stats_file
+                )
+                out["stats"] = _parse_csv(self._capped_text(stats_file), csv.DictReader)
         return Response.json(out)
 
     async def _query(self, ds: Dataset, body: dict[str, Any], tier: Tier) -> Response:
@@ -627,6 +651,18 @@ class Daemon:
         finally:
             tmp.unlink(missing_ok=True)
 
+    def _capped_text(self, path: Path) -> str:
+        """A browser result file's text, refusing it before reading if it is over the cap."""
+        size = path.stat().st_size
+        if size > self.config.browser_max_output:
+            raise HttpError(
+                413,
+                "too_large",
+                f"result is {size} bytes, over the {self.config.browser_max_output}-byte limit; "
+                "ask for fewer rows",
+            )
+        return path.read_text("utf-8", "replace")
+
     async def _browser_run(
         self,
         ds: Dataset,
@@ -707,6 +743,15 @@ def _qsv_http_error(exc: QsvError, ds: Dataset) -> HttpError:
     err = HttpError(502, "qsv_error", _scrub(exc.message, ds))
     err.code = f"qsv_{exc.kind}"
     return err
+
+
+def _parse_csv(text: str, reader: Any) -> list[Any]:
+    # the text is already under browser_max_output, so no field can be longer than that
+    csv.field_size_limit(max(csv.field_size_limit(), len(text) + 1))
+    try:
+        return list(reader(io.StringIO(text, newline="")))
+    except csv.Error as exc:
+        raise HttpError(502, "bad_output", f"could not parse qsv's CSV output: {exc}") from None
 
 
 def _str_list(value: object, name: str) -> list[str]:

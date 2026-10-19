@@ -417,3 +417,180 @@ def test_client_uses_configured_socket(
     if sys.platform != "win32":
         assert DaemonClient()._target.socket_path == str(sock)
     assert DaemonClient().available()
+
+
+# -- regressions (review 5501) --------------------------------------------------------------
+
+OK_QSV = """
+if "--output" in sys.argv:
+    open(sys.argv[sys.argv.index("--output") + 1], "w").write("<html></html>")
+print("1")
+"""
+
+
+def test_second_daemon_keeps_the_first_ones_token(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon
+) -> None:
+    if sys.platform == "win32":
+        pytest.skip("Unix socket")
+    first = start_daemon(_script(fake_qsv, ECHO))
+    token_file = Path(os.environ["QSV_CLIENTD_HOME"]) / "run" / "local-token"
+    assert token_file.read_text() == first.daemon.local_token
+    second = DaemonThread(
+        Daemon(DaemonConfig(binary=first.daemon.binary), home=first.daemon.home, tcp_port=0)
+    )
+    with pytest.raises(RuntimeError, match="already listening"):
+        second.start()
+    assert token_file.read_text() == first.daemon.local_token
+    assert first.daemon._socket_path.exists()
+    assert DaemonClient().available()
+
+
+def test_rows_respect_the_output_cap_and_long_fields(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    big = "x" * (200 * 1024)
+    body = f"""
+if sys.argv[1] == "count":
+    print(1)
+    sys.exit(0)
+out = sys.argv[sys.argv.index("--output") + 1] if "--output" in sys.argv else None
+text = "name\\n{big}\\n"
+if out: open(out, "w").write(text)
+else: sys.stdout.write(text)
+"""
+    data = tmp_path / "d.csv"
+    data.write_text("name\n1\n")
+    d = start_daemon(_script(fake_qsv, body))
+    ds_id = _register(d, data)
+    token = d.pair(_sha(data))
+    ok = d.http("POST", f"/v1/datasets/{ds_id}/rows", {}, token=token)
+    assert ok.status == 200, ok.body[:200]
+    assert ok.json()["rows"] == [[big]]
+    small = start_daemon(_script(fake_qsv, body), browser_max_output=1024)
+    ds2 = _register(small, data)
+    token2 = small.pair(_sha(data))
+    capped = small.http("POST", f"/v1/datasets/{ds2}/rows", {}, token=token2)
+    assert capped.status == 413
+    stats = small.http("POST", f"/v1/datasets/{ds2}/refresh", {"stats": True}, token=token2)
+    assert stats.status == 413
+
+
+def test_viz_rerender_replaces_a_stale_schematic(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, data: Path, tmp_path: Path
+) -> None:
+    d = start_daemon(_script(fake_qsv, OK_QSV))
+    html = tmp_path / "s.html"
+    stale = {"fingerprint": {"algo": "sha256", "digest": "0" * 64, "bytes": 1}}
+    html.write_text(
+        f'<script type="application/json" id="qsv-schematic-source">{json.dumps(stale)}</script>'
+    )
+    reply = d.http(
+        "POST",
+        "/v1/datasets",
+        {"path": str(data), "schematic_path": str(html), "render": True},
+        origin=None,
+        token=d.daemon.local_token,
+    )
+    assert reply.status == 200, reply.body
+    assert html.read_text() == "<html></html>"
+
+
+def test_relative_cwd_is_relative_to_the_caller(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_daemon(_script(fake_qsv, ECHO))
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path)
+    payload = json.loads(DaemonClient(cwd="sub").run("count").stdout or "")
+    assert Path(payload["cwd"]).resolve() == (tmp_path / "sub").resolve()
+
+
+def test_qsv_or_daemon_never_drops_options(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    from qsv_client import Qsv
+    from qsv_client.daemon import qsv_or_daemon
+
+    binary = _script(fake_qsv, ECHO)
+    start_daemon(binary)
+    via_daemon = qsv_or_daemon(cwd=tmp_path)
+    assert isinstance(via_daemon, DaemonClient) and via_daemon.cwd == str(tmp_path)
+    assert isinstance(qsv_or_daemon(binary, timeout=5), Qsv)
+    assert isinstance(qsv_or_daemon(timeout=5, binary=binary), Qsv)
+
+
+def test_cli_run_forwards_stdin(fake_qsv: Callable[[str], str], start_daemon: StartDaemon) -> None:
+    import subprocess
+
+    start_daemon(_script(fake_qsv, ECHO))
+    proc = subprocess.run(
+        [sys.executable, "-m", "qsv_client.daemon", "run", "count"],
+        input=b"a\n1\n",
+        capture_output=True,
+        timeout=60,
+        check=True,
+    )
+    assert json.loads(proc.stdout)["stdin"] == "a\n1\n"
+
+
+class _Server:
+    """A local HTTP server serving one CSV, slowly enough for fetches to overlap."""
+
+    def __init__(self, body: bytes) -> None:
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                for i in range(0, len(body), 4096):
+                    self.wfile.write(body[i : i + 4096])
+                    time.sleep(0.002)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/data.csv"
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+
+
+def test_concurrent_fetches_and_replace_keeps_mode(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    body = b"name\n" + b"".join(b"row%d\n" % i for i in range(20000))
+    server = _Server(body)
+    try:
+        data = tmp_path / "d.csv"
+        data.write_text("name\nold\n")
+        data.chmod(0o600)
+        d = start_daemon(_script(fake_qsv, OK_QSV))
+        ds_id = _register(d, data, source_url=server.url, allow_replace=True)
+        token = d.pair(_sha(data))
+        with ThreadPoolExecutor(4) as pool:
+            replies = list(
+                pool.map(
+                    lambda _: d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token),
+                    range(4),
+                )
+            )
+        assert [r.status for r in replies] == [200] * 4, [r.body for r in replies]
+        assert data.read_bytes() == body
+        if sys.platform != "win32":
+            assert data.stat().st_mode & 0o777 == 0o600
+        leftovers = [p.name for p in data.parent.iterdir() if p.name.startswith(".qsv-clientd")]
+        assert leftovers == []
+    finally:
+        server.close()

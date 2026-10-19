@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import shutil
+import tempfile
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -45,38 +46,45 @@ async def fetch_latest(daemon: Daemon, ds: Dataset) -> dict[str, Any]:
     source = ds.source_url or ds.pid
     if not source:
         raise FetchError(409, "no_source", "no source URL or PID is registered for this dataset")
-    cache = ensure_private_dir(daemon.home / "cache" / ds.id)
-    incoming = cache / ("incoming" + _suffix(source))
-    url, via = await _resolve(source)
-    scheme = urllib.parse.urlsplit(url).scheme.lower()
-    caps = await daemon._qsv.capabilities()
-    if caps.has_command("get") and (scheme in _QSV_GET_SCHEMES or scheme in ("http", "https")):
-        name = f"qsv-clientd-{ds.id}.csv"
-        await daemon._browser_run(
-            ds, ["get", url, "--name", name], timeout=daemon.config.max_timeout
-        )
-        await daemon._browser_run(
-            ds,
-            ["get", "cache-fetch", name, "--output", str(incoming)],
-            timeout=daemon.config.max_timeout,
-        )
-    elif scheme in _QSV_GET_SCHEMES:
-        raise FetchError(501, "needs_qsv_get", f"{scheme}:// sources need qsv's `get` command")
-    elif scheme in ("http", "https"):
-        await asyncio.to_thread(_download, url, incoming)
-    else:
-        raise FetchError(422, "bad_source", f"unsupported source scheme {scheme!r}")
+    # one fetch per dataset at a time: they share the qsv cache entry and the target file
+    lock = daemon._fetch_locks.setdefault(ds.id, asyncio.Lock())
+    async with lock:
+        return await _fetch_locked(daemon, ds, source)
 
+
+async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str) -> dict[str, Any]:
+    cache = ensure_private_dir(daemon.home / "cache" / ds.id)
+    # a unique staging file: a download thread that outlives a cancelled request writes
+    # only to its own (by then unlinked) file, never to a later fetch's
+    incoming = _private_temp(cache, ".incoming" + _suffix(source))
     try:
+        url, via = await _resolve(source)
+        scheme = urllib.parse.urlsplit(url).scheme.lower()
+        caps = await daemon._qsv.capabilities()
+        if caps.has_command("get") and (scheme in _QSV_GET_SCHEMES or scheme in ("http", "https")):
+            name = f"qsv-clientd-{ds.id}.csv"
+            await daemon._browser_run(
+                ds, ["get", url, "--name", name], timeout=daemon.config.max_timeout
+            )
+            await daemon._browser_run(
+                ds,
+                ["get", "cache-fetch", name, "--output", str(incoming)],
+                timeout=daemon.config.max_timeout,
+            )
+        elif scheme in _QSV_GET_SCHEMES:
+            raise FetchError(501, "needs_qsv_get", f"{scheme}:// sources need qsv's `get` command")
+        elif scheme in ("http", "https"):
+            await asyncio.to_thread(_download, url, incoming)
+        else:
+            raise FetchError(422, "bad_source", f"unsupported source scheme {scheme!r}")
+
         # a page of HTML or a truncated file must not replace good data
         await daemon._browser_run(ds, ["count", str(incoming)])
         fp = await asyncio.to_thread(Fingerprint.of, incoming)
         changed = fp.sha256 != ds.sha256
         if ds.allow_replace:
             target = Path(ds.original_path or ds.path)
-            staged = target.with_name(f".{target.name}.qsv-clientd")
-            await asyncio.to_thread(shutil.copyfile, incoming, staged)
-            os.replace(staged, target)
+            await asyncio.to_thread(_replace_keeping_mode, incoming, target)
             ds.path = str(target)
         else:
             current = cache / ("data" + _suffix(source))
@@ -88,6 +96,24 @@ async def fetch_latest(daemon: Daemon, ds: Dataset) -> dict[str, Any]:
     finally:
         incoming.unlink(missing_ok=True)
     return {"changed": changed, "sha256": fp.sha256, "bytes": fp.size, "via": via}
+
+
+def _private_temp(directory: Path, suffix: str) -> Path:
+    fd, name = tempfile.mkstemp(prefix=".qsv-clientd-", suffix=suffix, dir=directory)
+    os.close(fd)
+    return Path(name)
+
+
+def _replace_keeping_mode(src: Path, target: Path) -> None:
+    """Atomically replace ``target`` with a copy of ``src``, keeping ``target``'s mode."""
+    staged = _private_temp(target.parent, ".tmp")  # 0600 until the mode is set
+    try:
+        shutil.copyfile(src, staged)
+        if target.exists():
+            staged.chmod(target.stat().st_mode & 0o777)
+        os.replace(staged, target)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def _suffix(source: str) -> str:
