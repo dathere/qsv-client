@@ -12,6 +12,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from daemon_helpers import DaemonThread
@@ -713,6 +714,37 @@ def test_shutdown_is_not_blocked_by_a_client_that_stops_reading(
         + body
     )
     s.recv(1024)  # the response has started; now stop reading
+    started = time.monotonic()
+    d.stop()
+    assert time.monotonic() - started < 10
+    s.close()
+
+
+def test_shutdown_aborts_a_connection_stuck_flushing_in_cleanup(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from qsv_client.daemon import server
+    from qsv_client.daemon._http import write_response as original
+
+    async def buffered(writer: Any, response: Any) -> None:
+        # let drain() return with the whole body still buffered, so the connection reaches its
+        # cleanup (close + wait_closed) while the flush is stalled on a peer that won't read
+        writer.transport.set_write_buffer_limits(high=1 << 30)
+        await original(writer, response)
+
+    monkeypatch.setattr(server, "write_response", buffered)
+    d = start_daemon(_script(fake_qsv, 'sys.stdout.write("x" * (32 << 20))\n'))
+    body = json.dumps({"command": "count"}).encode()
+    s = socket.create_connection(("127.0.0.1", d.port))
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    s.sendall(
+        f"POST /v1/run HTTP/1.1\r\nHost: 127.0.0.1:{d.port}\r\n"
+        f"Authorization: Bearer {d.daemon.local_token}\r\n"
+        f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    s.recv(1024)
+    time.sleep(1.0)  # the handler is now waiting in wait_closed()
     started = time.monotonic()
     d.stop()
     assert time.monotonic() - started < 10
