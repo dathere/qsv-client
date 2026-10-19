@@ -28,6 +28,11 @@ type-check it with `uv run mypy --platform win32` (the lint job runs both).
 - `errors.py`: the `QsvError` hierarchy and exit-code constants. `error_from_run` maps errors
   by JSON `kind` first, then by exit code.
 - `capabilities.py`: parses `qsv --capabilities`.
+- `daemon/`: `qsv-clientd`. `server.py` (routes, local vs browser tier), `_http.py` (minimal
+  HTTP/1.1), `allowlist.py` (what paired schematics may run), `pairing.py`, `registry.py`,
+  `fetch.py`, `client.py` (`DaemonClient`/`AsyncDaemonClient`, mirrored by hand), `__main__.py`
+  (CLI). Protocol and security model: `docs/DAEMON.md`. Browsers never supply paths or viz
+  args; anything a browser receives must not contain local paths.
 
 ## Invariants
 

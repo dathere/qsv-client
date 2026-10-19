@@ -9,6 +9,8 @@ from .capabilities import Capabilities
 from .client import DEFAULT_BINARIES, MIN_QSV_VERSION, AsyncQsv, Qsv, QsvResult, find_qsv
 from .errors import (
     QsvCsvError,
+    QsvDaemonError,
+    QsvDaemonUnavailable,
     QsvEncodingError,
     QsvError,
     QsvInferenceError,
@@ -32,6 +34,8 @@ __all__ = [
     "Capabilities",
     "Qsv",
     "QsvCsvError",
+    "QsvDaemonError",
+    "QsvDaemonUnavailable",
     "QsvEncodingError",
     "QsvError",
     "QsvIOError",

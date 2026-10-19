@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `qsv-clientd`, a per-user daemon that runs qsv for local processes and for Data
+  Schematics. Local processes connect over a Unix socket, or on Windows over loopback with a
+  per-user token. Data Schematics connect over loopback once paired with a code that you
+  approve. A paired schematic can drill into rows, refresh stats, re-render itself, run
+  allowlisted read-only queries and fetch the latest data. `DaemonClient` and
+  `AsyncDaemonClient` take the same `run()` arguments as `Qsv` and raise the same errors.
+  It uses only the standard library. See `docs/DAEMON.md`.
+- `QsvError.to_dict()` and `qsv_client.errors.error_from_dict()`.
+- `QsvDaemonError` and `QsvDaemonUnavailable`.
+
 ## [0.4.0] - 2026-10-15
 
 qsv 25.0.0 or later is now required. It is the first release whose binaries (`qsv`,
