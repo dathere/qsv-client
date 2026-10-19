@@ -594,3 +594,53 @@ def test_concurrent_fetches_and_replace_keeps_mode(
         assert leftovers == []
     finally:
         server.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_cwd_keeps_dotdot_after_symlinks(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_daemon(_script(fake_qsv, ECHO))
+    (tmp_path / "data" / "sub").mkdir(parents=True)
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "link").symlink_to(tmp_path / "data" / "sub")
+    monkeypatch.chdir(tmp_path / "work")
+    payload = json.loads(DaemonClient(cwd="link/..").run("count").stdout or "")
+    assert Path(payload["cwd"]).resolve() == (tmp_path / "data").resolve()
+
+
+def test_cancelled_fetch_leaves_no_staging_files(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    body = b"name\n" + b"".join(b"row%d\n" % i for i in range(60000))
+    server = _Server(body)
+    try:
+        data = tmp_path / "d.csv"
+        data.write_text("name\nold\n")
+        d = start_daemon(_script(fake_qsv, OK_QSV))
+        ds_id = _register(d, data, source_url=server.url)
+        token = d.pair(_sha(data))
+        req = json.dumps({}).encode()
+        s = socket.create_connection(("127.0.0.1", d.port))
+        s.sendall(
+            f"POST /v1/datasets/{ds_id}/fetch HTTP/1.1\r\nHost: 127.0.0.1:{d.port}\r\n"
+            f"Origin: null\r\nAuthorization: Bearer {token}\r\n"
+            f"Content-Length: {len(req)}\r\n\r\n".encode()
+            + req
+        )
+        time.sleep(0.2)  # mid-download
+        s.close()
+        cache = d.daemon.home / "cache" / ds_id
+        deadline = time.monotonic() + 30
+        while any(p.name.startswith(".qsv-clientd") for p in cache.iterdir()):
+            assert time.monotonic() < deadline, list(cache.iterdir())
+            time.sleep(0.1)
+        # the next fetch is not overtaken by the cancelled one
+        again = d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token)
+        assert again.status == 200, again.body
+        assert [p.name for p in cache.iterdir()] == ["data.csv"]
+    finally:
+        server.close()

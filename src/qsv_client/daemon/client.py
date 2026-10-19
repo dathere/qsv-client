@@ -101,8 +101,9 @@ def _run_body(
     env: Mapping[str, str] | None,
     cwd: str,
 ) -> dict[str, Any]:
-    # the daemon runs elsewhere: a relative cwd means relative to this process, as for Qsv
-    cwd = os.path.abspath(cwd)
+    # the daemon runs elsewhere: a relative cwd means relative to this process, as for Qsv.
+    # absolute() (unlike abspath) keeps "..", which the OS resolves after symlinks
+    cwd = str(Path(cwd).absolute())
     body: dict[str, Any] = {
         "command": command,
         "args": [os.fspath(a) if isinstance(a, os.PathLike) else str(a) for a in args],

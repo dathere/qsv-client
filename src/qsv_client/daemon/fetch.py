@@ -23,6 +23,7 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .._process import _finish_despite_cancel
 from .config import ensure_private_dir
 from .registry import Dataset, Fingerprint
 
@@ -54,8 +55,8 @@ async def fetch_latest(daemon: Daemon, ds: Dataset) -> dict[str, Any]:
 
 async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str) -> dict[str, Any]:
     cache = ensure_private_dir(daemon.home / "cache" / ds.id)
-    # a unique staging file: a download thread that outlives a cancelled request writes
-    # only to its own (by then unlinked) file, never to a later fetch's
+    # threads can't be cancelled, so a disconnect waits for them (_finish_despite_cancel)
+    # before the staging file is removed and the lock released
     incoming = _private_temp(cache, ".incoming" + _suffix(source))
     try:
         url, via = await _resolve(source)
@@ -74,7 +75,7 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str) -> dict[str, A
         elif scheme in _QSV_GET_SCHEMES:
             raise FetchError(501, "needs_qsv_get", f"{scheme}:// sources need qsv's `get` command")
         elif scheme in ("http", "https"):
-            await asyncio.to_thread(_download, url, incoming)
+            await _finish_despite_cancel(asyncio.to_thread(_download, url, incoming))
         else:
             raise FetchError(422, "bad_source", f"unsupported source scheme {scheme!r}")
 
@@ -84,7 +85,7 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str) -> dict[str, A
         changed = fp.sha256 != ds.sha256
         if ds.allow_replace:
             target = Path(ds.original_path or ds.path)
-            await asyncio.to_thread(_replace_keeping_mode, incoming, target)
+            await _finish_despite_cancel(asyncio.to_thread(_replace_keeping_mode, incoming, target))
             ds.path = str(target)
         else:
             current = cache / ("data" + _suffix(source))
