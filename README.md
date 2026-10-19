@@ -202,7 +202,7 @@ inside a sandbox. Timeouts, the process-tree kill, `stdin=`, JSON errors and the
 `--capabilities` check all work through it.
 
 ```python
-qsv = Qsv("/usr/local/bin/qsv-sandboxed", inherit_env=False)
+qsv = Qsv("/usr/local/bin/qsv-sandboxed", inherit_env=False, cwd="/srv/data/in")
 ```
 
 First, use the smallest binary that has the commands you need. `qsvlite` leaves out the
@@ -230,18 +230,23 @@ exec bwrap \
 - `--unshare-all` turns off network access. Add `--share-net` for commands that need it,
   such as `fetch` or `describegpt`.
 - qsv sees only the paths you bind. Bind them at the same path as on the host so the paths
-  you pass still work. If you use `cwd=`, bind that directory too.
+  you pass still work.
+- The working directory must be one of the bound paths, or bwrap fails at `--chdir` and
+  every run (including the `--capabilities` check) errors out. Without `cwd=`, that is
+  whatever directory your Python process is running in, so set `cwd=` as above.
 - qsv needs to write to `/tmp` (for `extsort` and other temp files), to the output
   directory, and to the input directory if `stats` should save its cache next to the input.
 - Keep `--die-with-parent`: when a timeout force-kills bwrap, the kernel then kills qsv too.
   Don't add `--new-session`. It moves qsv out of the process group the client kills, and qsv
   has no terminal that would need it.
 
-Other tools follow the same pattern: `firejail`, `systemd-run --user --pipe --wait` with
-`PrivateNetwork=` and `ProtectHome=`, or `sandbox-exec` with a profile on macOS.
+On macOS, `sandbox-exec` with a profile works the same way: it replaces itself with qsv, so
+qsv stays in the process group the client kills. Other tools, such as `firejail`, can work
+too. First check that killing the wrapper with SIGKILL also stops qsv.
 
-**Don't use `docker run` as the wrapper.** Killing the `docker` command doesn't stop the
-container, so qsv keeps running after a timeout. Run your whole application in the
+**Don't use `docker run` or `systemd-run` as the wrapper.** Both ask a separate manager
+process to start qsv, so qsv is not in the wrapper's process group. Killing the wrapper
+doesn't stop the container or service, and qsv keeps running after a timeout. Run your whole application in the
 container instead, with qsv in the same image. There the client's process-group kill works
 as usual, and you can add `--network none`, `--read-only`, `--cap-drop ALL`, a non-root user
 and resource limits. On Windows, use a container or VM in the same way.
