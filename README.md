@@ -194,6 +194,65 @@ A subprocess is not a sandbox. Keep these limits in mind:
   Where `PATH` or `$QSV_BIN` could be tampered with, pass an absolute path to a binary you
   installed and verified.
 
+### Running qsv in a sandbox
+
+The client runs `binary` with an argument list and talks to it over stdin, stdout and
+stderr. So you can sandbox qsv by pointing `binary=` at a wrapper script that starts qsv
+inside a sandbox. Timeouts, the process-tree kill, `stdin=`, JSON errors and the
+`--capabilities` check all work through it.
+
+```python
+qsv = Qsv("/usr/local/bin/qsv-sandboxed", inherit_env=False)
+```
+
+First, use the smallest binary that has the commands you need. `qsvlite` leaves out the
+commands that reach the network or run code (`fetch`, `fetchpost`, `luau`, `describegpt`,
+...), and `qsv.capabilities` lists what a binary has.
+
+On Linux, [bubblewrap](https://github.com/containers/bubblewrap) works well. Adjust the paths
+for your system:
+
+```sh
+#!/bin/sh
+# /usr/local/bin/qsv-sandboxed
+exec bwrap \
+  --die-with-parent \
+  --unshare-all \
+  --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 --symlink usr/bin /bin \
+  --ro-bind /opt/qsv/qsv /opt/qsv/qsv \
+  --proc /proc --dev /dev --tmpfs /tmp \
+  --ro-bind /srv/data/in /srv/data/in \
+  --bind /srv/data/out /srv/data/out \
+  --chdir "$PWD" \
+  /opt/qsv/qsv "$@"
+```
+
+- `--unshare-all` turns off network access. Add `--share-net` for commands that need it,
+  such as `fetch` or `describegpt`.
+- qsv sees only the paths you bind. Bind them at the same path as on the host so the paths
+  you pass still work. If you use `cwd=`, bind that directory too.
+- qsv needs to write to `/tmp` (for `extsort` and other temp files), to the output
+  directory, and to the input directory if `stats` should save its cache next to the input.
+- Keep `--die-with-parent`: when a timeout force-kills bwrap, the kernel then kills qsv too.
+  Don't add `--new-session`. It moves qsv out of the process group the client kills, and qsv
+  has no terminal that would need it.
+
+Other tools follow the same pattern: `firejail`, `systemd-run --user --pipe --wait` with
+`PrivateNetwork=` and `ProtectHome=`, or `sandbox-exec` with a profile on macOS.
+
+**Don't use `docker run` as the wrapper.** Killing the `docker` command doesn't stop the
+container, so qsv keeps running after a timeout. Run your whole application in the
+container instead, with qsv in the same image. There the client's process-group kill works
+as usual, and you can add `--network none`, `--read-only`, `--cap-drop ALL`, a non-root user
+and resource limits. On Windows, use a container or VM in the same way.
+
+For any wrapper:
+
+- Make the wrapper and the qsv binary owned by root and read-only. The `--capabilities`
+  check only confirms that the wrapper behaves like qsv.
+- Capabilities are cached per wrapper file, not per qsv binary. If you upgrade qsv while a
+  long-running process is using it, restart the process.
+
 ## Development
 
 ```bash
