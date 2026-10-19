@@ -609,6 +609,8 @@ class Daemon:
                 ds,
                 ["viz", "smart", *ds.viz_args, ds.path, "--output", str(tmp)],
                 timeout=self.config.max_timeout,
+                # the new page's bridge must probe this daemon, whatever port it is on
+                env={"QSV_CLIENTD_PORT": str(self.port)} if self.port else None,
             )
             html = tmp.read_bytes()
             source = SchematicSource.from_html(html.decode("utf-8", "replace"))
@@ -633,6 +635,7 @@ class Daemon:
         stdout_path: Path | None = None,
         no_match_ok: bool = False,
         timeout: float | None = None,
+        env: dict[str, str] | None = None,
     ) -> str:
         """Run a daemon-built argv for a dataset action; errors come back with paths scrubbed."""
         try:
@@ -642,6 +645,7 @@ class Daemon:
                     *argv[1:],
                     stdout_path=stdout_path,
                     timeout=timeout or self.config.browser_timeout,
+                    env=env,
                     check=False,
                 )
         except QsvError as exc:

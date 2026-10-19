@@ -26,7 +26,13 @@ from ..errors import (
     error_from_dict,
     error_from_run,
 )
-from .config import DEFAULT_PORT, default_socket_path, local_token_path, runtime_dir
+from .config import (
+    DEFAULT_PORT,
+    DaemonConfig,
+    default_socket_path,
+    local_token_path,
+    runtime_dir,
+)
 
 # the daemon bounds each run by its timeout; this covers the --capabilities probe and teardown
 _EXTRA_WAIT = 120.0
@@ -42,7 +48,7 @@ class _Target:
         self.port: int | None = None
         self.token = token
         if socket_path is not None or (port is None and sys.platform != "win32"):
-            self.socket_path = os.fspath(socket_path or default_socket_path())
+            self.socket_path = os.fspath(socket_path or _configured_socket())
             return
         self.port = port or _runtime_port() or DEFAULT_PORT
         if self.token is None:
@@ -66,6 +72,14 @@ class _Target:
         if self.port is not None and self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
+
+
+def _configured_socket() -> Path:
+    """The socket the daemon was configured with (daemon.json), else the default."""
+    try:
+        return DaemonConfig.load().socket_path()
+    except (OSError, ValueError, TypeError):
+        return default_socket_path()
 
 
 def _runtime_port() -> int | None:

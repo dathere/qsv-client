@@ -391,3 +391,29 @@ def test_cors_only_for_allowed_origins(
     assert "access-control-allow-origin" not in other.headers
     lna = d.http("OPTIONS", "/v1/pair", headers={"Access-Control-Request-Local-Network": "true"})
     assert lna.headers["access-control-allow-local-network"] == "true"
+
+
+def test_render_passes_the_daemon_port(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, data: Path, tmp_path: Path
+) -> None:
+    body = """
+out = sys.argv[sys.argv.index("--output") + 1]
+open(out, "w").write("<html>port=" + os.environ.get("QSV_CLIENTD_PORT", "") + "</html>")
+"""
+    d = start_daemon(_script(fake_qsv, body))
+    ds_id = _register(d, data, schematic_path=str(tmp_path / "s.html"))
+    token = d.pair(_sha(data))
+    page = d.http("POST", f"/v1/datasets/{ds_id}/render", {}, token=token)
+    assert page.body == f"<html>port={d.port}</html>".encode()
+
+
+def test_client_uses_configured_socket(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path(os.environ["QSV_CLIENTD_HOME"])
+    sock = home / "custom.sock"
+    (home / "daemon.json").write_text(json.dumps({"socket": str(sock)}))
+    start_daemon(_script(fake_qsv, ECHO), socket=str(sock))
+    if sys.platform != "win32":
+        assert DaemonClient()._target.socket_path == str(sock)
+    assert DaemonClient().available()

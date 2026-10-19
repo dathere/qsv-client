@@ -110,6 +110,9 @@ On that basis the browser tier:
 - **Answers CORS only for allowed origins.** Replies carry CORS headers only for origins in
   `browser_origins`, so other websites cannot read even `hello`.
 
+Tokens are kept in memory only, so restarting the daemon unpairs every open schematic; the
+page notices (401), forgets its token and offers to connect again.
+
 Known limitation: the pairing rate limit is global (origins can't be told apart when every
 `file://` page is `null`), so a page that floods `/v1/pair` can delay real pairing for about
 a minute. It cannot pair without your approval.

@@ -151,6 +151,9 @@ def _approve(client: DaemonClient, ns: argparse.Namespace) -> int:
     print(f"Pair code {p['code']} for {ds['title']!r} ({ds['path']})")
     if p["origin"] != "null":
         print(f"WARNING: the request came from {p['origin']!r}, not a local file.")
+    if not ns.yes and not sys.stdin.isatty():
+        print("no terminal to confirm on; re-run with --yes to approve", file=sys.stderr)
+        return 1
     if not (ns.yes or _confirm("Approve?")):
         print("not approved", file=sys.stderr)
         return 1
