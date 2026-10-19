@@ -160,6 +160,40 @@ On a timeout, cancellation or Ctrl-C, the client stops qsv and every process qsv
   `CTRL_BREAK_EVENT` to the run's process group, then calls `TerminateJobObject` after
   `kill_grace`.
 
+## Security
+
+qsv runs as a separate process, not inside Python. That gives you a few protections:
+
+- **Crashes and memory bugs stay in qsv.** qsv parses untrusted files. If a parser bug
+  crashes it or corrupts memory, that happens in qsv's own address space, not in your
+  interpreter's. Your process gets an exit code and a `QsvError`.
+- **Runaway work can be stopped.** A timeout kills qsv and every process it started (see
+  [Platform notes](#platform-notes)), so a hostile input that causes a hang doesn't tie up
+  your process.
+- **No shell.** Commands run as an argument list, never through a shell, so a filename like
+  `"x.csv; rm -rf ~"` is just a filename.
+- **You choose what qsv sees.** `inherit_env=False` starts qsv from an empty environment, so
+  it doesn't inherit unrelated secrets (cloud credentials, tokens) from your process. Pass
+  what it needs with `env=`.
+- **Secrets stay off the command line.** `llm_api_key` and the other LLM settings go in
+  environment variables, which `ps` doesn't show.
+
+A subprocess is not a sandbox. Keep these limits in mind:
+
+- qsv runs as your user and can read, write and reach the network wherever you can. To
+  confine it, run your process (or qsv) under a separate user, a container, or an OS sandbox.
+- `inherit_env` defaults to `True`: qsv gets your whole environment unless you turn it off.
+- Environment variables are hidden from `ps` but not from your user or root, who can read a
+  process's environment (for example `/proc/<pid>/environ` on Linux). Processes qsv starts
+  inherit them too.
+- Arguments are passed as-is. A value that comes from untrusted input and starts with `-`
+  is read as a qsv option, not a file name. Validate such values, or make paths start with
+  `./` or `/`.
+- The client runs whatever binary `binary=`, `$QSV_BIN` or `PATH` points to. The
+  `--capabilities` check confirms it behaves like a supported qsv, not that it's genuine.
+  Where `PATH` or `$QSV_BIN` could be tampered with, pass an absolute path to a binary you
+  installed and verified.
+
 ## Development
 
 ```bash
