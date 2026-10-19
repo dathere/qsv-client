@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+from ..client import find_qsv
+from .config import DaemonConfig
 
 LABEL = "com.dathere.qsv-clientd"
 
@@ -17,8 +21,27 @@ def _command() -> list[str]:
     return [exe, "serve"] if exe else [sys.executable, "-m", "qsv_client.daemon", "serve"]
 
 
-def launchd_plist(command: list[str]) -> str:
+def service_environment() -> dict[str, str]:
+    """What the service needs from this shell, which launchd/systemd won't otherwise give it.
+
+    Services don't read shell profiles (launchd's PATH is just /usr/bin:/bin:/usr/sbin:/sbin),
+    so qsv is resolved now, the way the daemon would (daemon.json ``binary``, ``$QSV_BIN``,
+    PATH), and pinned as QSV_BIN. Raises QsvNotFound if there is no qsv to pin. Other QSV_*
+    settings are deliberately not copied: the service file is world-readable and they can
+    hold secrets such as QSV_LLM_APIKEY.
+    """
+    env = {"QSV_BIN": find_qsv(DaemonConfig.load().binary)}
+    for name in ("QSV_CLIENTD_HOME", "QSV_CLIENTD_SOCKET"):
+        if os.environ.get(name):
+            env[name] = os.environ[name]
+    return env
+
+
+def launchd_plist(command: list[str], env: dict[str, str]) -> str:
     args = "\n".join(f"    <string>{escape(a)}</string>" for a in command)
+    env_items = "\n".join(
+        f"    <key>{escape(k)}</key><string>{escape(v)}</string>" for k, v in env.items()
+    )
     log = escape(str(Path.home() / "Library/Logs/qsv-clientd.log"))
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
@@ -30,6 +53,10 @@ def launchd_plist(command: list[str]) -> str:
   <array>
 {args}
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+{env_items}
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardErrorPath</key><string>{log}</string>
@@ -38,12 +65,18 @@ def launchd_plist(command: list[str]) -> str:
 """
 
 
-def systemd_unit(command: list[str]) -> str:
+def _systemd_quote(value: str) -> str:
+    # systemd unescapes C-style escapes in quoted values and expands % specifiers
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
+def systemd_unit(command: list[str], env: dict[str, str]) -> str:
+    environment = "".join(f"Environment={_systemd_quote(f'{k}={v}')}\n" for k, v in env.items())
     return f"""[Unit]
 Description=qsv-clientd (run qsv for local processes and Data Schematics)
 
 [Service]
-ExecStart={shlex.join(command)}
+{environment}ExecStart={shlex.join(command).replace("%", "%%")}
 Restart=on-failure
 
 [Install]
@@ -54,20 +87,21 @@ WantedBy=default.target
 def install() -> str:
     """Write and load the service definition; returns a description of what was done."""
     command = _command()
+    env = service_environment()
     if sys.platform == "darwin":
         path = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(launchd_plist(command))
+        path.write_text(launchd_plist(command, env))
         subprocess.run(["launchctl", "unload", str(path)], check=False, capture_output=True)
         subprocess.run(["launchctl", "load", "-w", str(path)], check=True)
-        return f"installed and started launchd agent {path}"
+        return f"installed and started launchd agent {path} (qsv: {env['QSV_BIN']})"
     if sys.platform.startswith("linux"):
         path = Path.home() / ".config" / "systemd" / "user" / "qsv-clientd.service"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(systemd_unit(command))
+        path.write_text(systemd_unit(command, env))
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
         subprocess.run(["systemctl", "--user", "enable", "--now", "qsv-clientd"], check=True)
-        return f"installed and started systemd user unit {path}"
+        return f"installed and started systemd user unit {path} (qsv: {env['QSV_BIN']})"
     task = subprocess.list2cmdline(command)
     return (
         "automatic install is not supported on this platform; to start qsv-clientd at logon run:\n"

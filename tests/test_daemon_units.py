@@ -228,3 +228,38 @@ def test_stats_never_writes_cache_files() -> None:
     assert build_query("stats", ["-E"], ALL) == ["stats", "-E", "--cache-threshold", "0"]
     with pytest.raises(NotAllowed):
         build_query("stats", ["--cache-threshold", "1"], ALL)
+
+
+# -- service definitions --------------------------------------------------------------------
+
+
+def test_service_pins_the_qsv_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import plistlib
+    import stat
+    import sys
+
+    from qsv_client import QsvNotFound
+    from qsv_client.daemon import service
+
+    if sys.platform == "win32":
+        pytest.skip("launchd/systemd")
+    qsv = tmp_path / "bin" / "qsv"
+    qsv.parent.mkdir()
+    qsv.write_text("#!/bin/sh\n")
+    qsv.chmod(qsv.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("QSV_CLIENTD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("QSV_BIN", raising=False)
+    monkeypatch.setenv("PATH", str(qsv.parent))
+    env = service.service_environment()
+    assert env == {"QSV_BIN": str(qsv), "QSV_CLIENTD_HOME": str(tmp_path / "home")}
+
+    plist = plistlib.loads(service.launchd_plist(["/x/qsv-clientd", "serve"], env).encode())
+    assert plist["EnvironmentVariables"]["QSV_BIN"] == str(qsv)
+    assert plist["ProgramArguments"] == ["/x/qsv-clientd", "serve"]
+
+    unit = service.systemd_unit(["/x/qsv-clientd", "serve"], {"QSV_BIN": '/a b/q"%sv'})
+    assert 'Environment="QSV_BIN=/a b/q\\"%%sv"\n' in unit
+
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    with pytest.raises(QsvNotFound):
+        service.service_environment()

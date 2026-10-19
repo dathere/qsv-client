@@ -25,6 +25,15 @@ qsv-clientd status
 
 On Windows, `install` prints the `schtasks` command to run.
 
+Services don't read your shell profile, so `install` finds qsv the way the daemon would
+(`binary` in `daemon.json`, then `$QSV_BIN`, then your PATH) and writes that absolute path
+into the service as `QSV_BIN`. It fails if no qsv is found. Run `install` again after
+moving qsv. Other `QSV_*` settings in your shell are not copied, because the service file
+is world-readable and they can hold secrets such as `QSV_LLM_APIKEY`. Set those in the
+service's environment yourself if runs through the daemon need them. A Windows scheduled
+task gets your user environment variables, as set with `setx`, not those of the current
+shell.
+
 Configuration is optional: `daemon.json` in the config directory
 (`~/.config/qsv-client/` on Linux, `~/Library/Application Support/qsv-client/` on macOS,
 `%APPDATA%\qsv-client\` on Windows). Keys: `binary`, `port` (default `14470`; `0` turns the
