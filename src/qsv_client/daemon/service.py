@@ -16,9 +16,12 @@ from .config import DaemonConfig
 LABEL = "com.dathere.qsv-clientd"
 
 
-def _command() -> list[str]:
+def _command(binary: str) -> list[str]:
     exe = shutil.which("qsv-clientd")
-    return [exe, "serve"] if exe else [sys.executable, "-m", "qsv_client.daemon", "serve"]
+    base = [exe] if exe else [sys.executable, "-m", "qsv_client.daemon"]
+    # --binary overrides daemon.json's `binary`, which could be a bare name the service's
+    # restricted PATH can't resolve (an explicit binary also outranks QSV_BIN)
+    return [*base, "serve", "--binary", binary]
 
 
 def service_environment() -> dict[str, str]:
@@ -33,7 +36,9 @@ def service_environment() -> dict[str, str]:
     env = {"QSV_BIN": find_qsv(DaemonConfig.load().binary)}
     for name in ("QSV_CLIENTD_HOME", "QSV_CLIENTD_SOCKET"):
         if os.environ.get(name):
-            env[name] = os.environ[name]
+            # absolute: the service has its own working directory. absolute(), not
+            # abspath, keeps ".." for the OS to resolve after symlinks
+            env[name] = str(Path(os.environ[name]).absolute())
     return env
 
 
@@ -86,8 +91,8 @@ WantedBy=default.target
 
 def install() -> str:
     """Write and load the service definition; returns a description of what was done."""
-    command = _command()
     env = service_environment()
+    command = _command(env["QSV_BIN"])
     if sys.platform == "darwin":
         path = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +105,9 @@ def install() -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(systemd_unit(command, env))
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-        subprocess.run(["systemctl", "--user", "enable", "--now", "qsv-clientd"], check=True)
+        subprocess.run(["systemctl", "--user", "enable", "qsv-clientd"], check=True)
+        # restart, not start: a reinstall must replace a running daemon's old settings
+        subprocess.run(["systemctl", "--user", "restart", "qsv-clientd"], check=True)
         return f"installed and started systemd user unit {path} (qsv: {env['QSV_BIN']})"
     task = subprocess.list2cmdline(command)
     return (

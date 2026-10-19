@@ -27,6 +27,7 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser("serve", help="run the daemon in the foreground")
     s.add_argument("--config", type=Path, help="config file (default: daemon.json)")
     s.add_argument("--port", type=int, help="loopback port for browsers (0 disables)")
+    s.add_argument("--binary", help="qsv binary to use (overrides daemon.json)")
     s.add_argument("-v", "--verbose", action="store_true")
 
     sub.add_parser("status", help="show what the running daemon is doing")
@@ -97,6 +98,8 @@ def _serve(ns: argparse.Namespace) -> int:
     config = DaemonConfig.load(ns.config)
     if ns.port is not None:
         config.port = ns.port
+    if ns.binary is not None:
+        config.binary = ns.binary
     daemon = Daemon(config)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(daemon.serve_forever())

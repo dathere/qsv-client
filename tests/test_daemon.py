@@ -669,3 +669,30 @@ def test_sigterm_shuts_down_cleanly(fake_qsv: Callable[[str], str]) -> None:
         assert sorted(p.name for p in run.iterdir()) == []
     finally:
         shutil.rmtree(home, ignore_errors=True)
+
+
+def test_shutdown_is_not_blocked_by_an_idle_connection(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon
+) -> None:
+    d = start_daemon(_script(fake_qsv, ECHO))
+    idle = socket.create_connection(("127.0.0.1", d.port))
+    idle.sendall(b"GET /v1/hel")  # never finishes its request head
+    time.sleep(0.2)
+    started = time.monotonic()
+    d.stop()
+    assert time.monotonic() - started < 5
+    idle.close()
+
+
+def test_slow_request_head_times_out(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from qsv_client.daemon import server
+
+    monkeypatch.setattr(server, "_HEAD_TIMEOUT", 0.3)
+    d = start_daemon(_script(fake_qsv, ECHO))
+    s = socket.create_connection(("127.0.0.1", d.port), timeout=10)
+    s.sendall(b"GET /v1/hello HTTP/1.1\r\n")
+    reply = s.recv(4096)
+    s.close()
+    assert reply.startswith(b"HTTP/1.1 408")

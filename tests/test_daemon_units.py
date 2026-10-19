@@ -263,3 +263,41 @@ def test_service_pins_the_qsv_binary(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     with pytest.raises(QsvNotFound):
         service.service_environment()
+
+
+def test_service_overrides_configured_binary_and_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import stat
+    import subprocess
+    import sys
+
+    from qsv_client.daemon import service
+
+    if sys.platform == "win32":
+        pytest.skip("launchd/systemd")
+    lite = tmp_path / "bin" / "qsvlite"
+    lite.parent.mkdir()
+    lite.write_text("#!/bin/sh\n")
+    lite.chmod(lite.stat().st_mode | stat.S_IXUSR)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "daemon.json").write_text('{"binary": "qsvlite"}')  # a bare name
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("QSV_CLIENTD_HOME", "home")  # relative
+    monkeypatch.setenv("PATH", str(lite.parent))
+    monkeypatch.delenv("QSV_CLIENTD_SOCKET", raising=False)
+    env = service.service_environment()
+    assert env["QSV_CLIENTD_HOME"] == str(tmp_path / "home")
+    command = service._command(env["QSV_BIN"])
+    assert command[-3:] == ["serve", "--binary", str(lite)]
+
+    # Linux: a reinstall restarts the running unit so it picks up the new settings
+    calls: list[list[str]] = []
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda args, **kw: calls.append(list(args)))
+    service.install()
+    assert ["systemctl", "--user", "restart", "qsv-clientd"] in calls
+    unit = (tmp_path / ".config/systemd/user/qsv-clientd.service").read_text()
+    assert f"--binary {lite}" in unit

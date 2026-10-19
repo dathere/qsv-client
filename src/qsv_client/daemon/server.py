@@ -54,6 +54,8 @@ Tier = Literal["local", "browser"]
 _LOCAL_BODY_LIMIT = 64 * 1024 * 1024
 _BROWSER_BODY_LIMIT = 64 * 1024
 _MAX_ROWS = 500
+_HEAD_TIMEOUT = 10.0
+"""Seconds a client gets to send its request head; an idle connection can't hold us forever."""
 
 
 class Daemon:
@@ -80,6 +82,7 @@ class Daemon:
         """The bound loopback port, once started."""
         self._servers: list[asyncio.Server] = []
         self._owns_socket = False
+        self._connections: set[asyncio.Task[None]] = set()
         self._fetch_locks: dict[str, asyncio.Lock] = {}
         self._qsv = self._client()
 
@@ -159,6 +162,12 @@ class Daemon:
     async def _close_servers(self) -> None:
         for server in self._servers:
             server.close()
+        # since Python 3.12 wait_closed() waits for open connections; end ours first (a
+        # cancelled run kills its qsv tree like any other cancellation)
+        for task in list(self._connections):
+            task.cancel()
+        if self._connections:
+            await asyncio.gather(*self._connections, return_exceptions=True)
         for server in self._servers:
             await server.wait_closed()
         self._servers.clear()
@@ -194,11 +203,18 @@ class Daemon:
     async def _on_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, transport: str
     ) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._connections.add(task)
+            task.add_done_callback(self._connections.discard)
         request: Request | None = None
         response: Response | None
         try:
             try:
-                request = await read_head(reader)
+                try:
+                    request = await asyncio.wait_for(read_head(reader), _HEAD_TIMEOUT)
+                except asyncio.TimeoutError:
+                    raise HttpError(408, "timeout", "request head not received in time") from None
                 tier = self._tier(request, transport)
                 limit = _LOCAL_BODY_LIMIT if tier == "local" else _BROWSER_BODY_LIMIT
                 await read_body(reader, request, limit)
