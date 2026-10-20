@@ -6,8 +6,10 @@ are redirected to it by a patched ``urllib.request.urlopen``.
 
 from __future__ import annotations
 
+import contextlib
 import http.server
 import json
+import socket
 import sys
 import tempfile
 import threading
@@ -516,3 +518,109 @@ async def test_qsv_get_runs_are_bounded_by_fetch_timeout(
     ds = _dataset(daemon, data, source_url="https://example.org/d.csv", allow_replace=True)
     await fetch.fetch_latest(daemon, ds)
     assert timeouts == {"https://example.org/d.csv": 42.0, "cache-fetch": 42.0}
+
+
+class _Raw:
+    """A loopback server that writes ``chunks`` of raw bytes, ``gap`` seconds apart."""
+
+    def __init__(self, chunks: list[bytes], gap: float) -> None:
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}/d.csv"
+
+        def serve() -> None:
+            with contextlib.suppress(OSError):
+                conn, _ = self.sock.accept()
+                with conn:
+                    conn.recv(65536)
+                    for chunk in chunks:
+                        conn.sendall(chunk)
+                        time.sleep(gap)
+
+        threading.Thread(target=serve, daemon=True).start()
+
+    def close(self) -> None:
+        self.sock.close()
+
+
+@pytest.fixture
+def raw() -> Iterator[Callable[[list[bytes], float], _Raw]]:
+    servers: list[_Raw] = []
+
+    def start(chunks: list[bytes], gap: float) -> _Raw:
+        servers.append(_Raw(chunks, gap))
+        return servers[-1]
+
+    yield start
+    for server in servers:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        # headers that never end: only the watchdog can stop urlopen here
+        [b"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nX-Pad: "] + [b"a"] * 300,
+        # a body that stops arriving: the socket times out after the deadline
+        [b"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\n\r\nname\n"] + [b""] * 300,
+    ],
+    ids=["trickled-headers", "stalled-body"],
+)
+async def test_any_slow_download_is_a_download_timeout(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    raw: Callable[[list[bytes], float], _Raw],
+    chunks: list[bytes],
+) -> None:
+    server = raw(chunks, 0.1)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _limited(fake_qsv(PLAIN_QSV), home, fetch_timeout=0.5)
+    ds = _dataset(daemon, data, source_url=server.url, allow_replace=True)
+    started = time.monotonic()
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert time.monotonic() - started < 10
+    assert (info.value.status, info.value.code) == (504, "download_timeout")
+    assert data.read_text() == "name\nold\n"
+    assert _staging_files(daemon, ds) == []
+
+
+async def test_a_malformed_response_is_a_download_failure(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    raw: Callable[[list[bytes], float], _Raw],
+) -> None:
+    # http.client raises BadStatusLine, an HTTPException, not an OSError
+    server = raw([b"NOT HTTP\r\n\r\n"], 0)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, source_url=server.url, allow_replace=True)
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (502, "download_failed")
+    assert data.read_text() == "name\nold\n"
+
+
+async def test_a_qsv_get_past_fetch_timeout_is_a_download_timeout(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path
+) -> None:
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    slow_get = GET_QSV.replace(
+        'if sys.argv[1:3] == ["get", "cache-fetch"]:',
+        'if sys.argv[1] == "get" and sys.argv[2] != "cache-fetch":\n'
+        "    import time; time.sleep(30)\n"
+        'elif sys.argv[1:3] == ["get", "cache-fetch"]:',
+    )
+    daemon = _limited(fake_qsv(f"LOG = {str(log)!r}\n" + slow_get), home, fetch_timeout=0.5)
+    ds = _dataset(daemon, data, source_url="https://example.org/d.csv", allow_replace=True)
+    started = time.monotonic()
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert time.monotonic() - started < 20
+    assert (info.value.status, info.value.code) == (504, "download_timeout")
+    assert data.read_text() == "name\nold\n"

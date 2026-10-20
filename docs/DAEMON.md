@@ -232,10 +232,12 @@ re-rendering. Flags whose value is a file keep only its basename and are listed 
   those.
 
 A download is limited to `fetch_max_bytes` (10 GiB by default) and `fetch_timeout` (30
-minutes). Over either, it is deleted and the fetch is refused (413 `too_large` or 504
-`download_timeout`), leaving your data as it was. The urllib fallback stops as soon as a
-download passes a limit. qsv's `get` downloads into its own cache, so there the size is
-checked once the download is done, and the time limit is the timeout of the `get` runs.
+minutes, for the whole download, headers included). Over either, the fetch is refused (413
+`too_large` or 504 `download_timeout`) and your data is left as it was. The urllib fallback
+stops as soon as a download passes a limit and deletes what it got. qsv's `get` downloads
+into qsv's own cache first, so there the size is checked once the download is done: the
+daemon's copy is deleted, but the one in qsv's cache stays until qsv evicts or replaces it.
+The time limit applies to each `get` run.
 
 The download is used only if it has every column the current data has; new columns are fine.
 That keeps an error page served as plain text from replacing your data. If columns were
