@@ -379,6 +379,12 @@ class Daemon:
             case ["datasets", dataset_id] if method == "GET":
                 ds = self._dataset_for(request, tier, dataset_id)
                 return Response.json(ds.public() if tier == "browser" else _private(ds))
+            case ["datasets", dataset_id, "disconnect"] if method == "POST":
+                # a page withdrawing its own token; its stored result goes with it
+                self._dataset_for(request, tier, dataset_id)
+                withdrawn = tier == "browser" and self.pairing.revoke(_bearer(request))
+                self.results.sweep(self.pairing.live_digests())
+                return Response.json({"revoked": int(withdrawn)})
             case ["datasets", dataset_id, action] if method == "POST":
                 ds = self._dataset_for(request, tier, dataset_id)
                 handler = self._dataset_actions.get(action)
@@ -905,8 +911,11 @@ def _result_key(request: Request, tier: Tier) -> str:
     """Whose stored result a request reads: its paired page's, or the local user's."""
     if tier != "browser":
         return LOCAL_KEY
-    token = request.headers.get("authorization", "").removeprefix("Bearer ")
-    return key_for_grant(token_digest(token))
+    return key_for_grant(token_digest(_bearer(request)))
+
+
+def _bearer(request: Request) -> str:
+    return request.headers.get("authorization", "").removeprefix("Bearer ")
 
 
 def _private(ds: Dataset) -> dict[str, Any]:

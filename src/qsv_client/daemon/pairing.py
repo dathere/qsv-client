@@ -135,6 +135,10 @@ class Pairing:
         self._expire()
         return set(self.grants)
 
+    def revoke(self, token: str) -> bool:
+        """Withdraw one token (a page disconnecting itself)."""
+        return self.grants.pop(token_digest(token), None) is not None
+
     def revoke_all(self, dataset_id: str | None = None) -> int:
         doomed = [
             k for k, g in self.grants.items() if dataset_id is None or g.dataset_id == dataset_id

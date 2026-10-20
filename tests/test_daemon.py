@@ -1408,3 +1408,33 @@ def test_fetch_cleanup_spares_data_named_like_a_sidecar(
         assert Path(d.daemon.registry.datasets[ds_id].path).is_file()
     finally:
         server.close()
+
+
+def test_disconnect_withdraws_only_that_page(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    data = _people(tmp_path / "data" / "people.csv", 300)
+    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000)
+    ds_id = _register(d, data)
+    results = d.daemon.home / "results"
+    leaving, staying = d.pair(_sha(data)), d.pair(_sha(data))
+    for token in (leaving, staying):
+        reply = d.http(
+            "POST", f"/v1/datasets/{ds_id}/query", {"command": "slice", "args": []}, token=token
+        )
+        assert reply.status == 200, reply.body
+    assert len(list(results.iterdir())) == 2
+
+    bye = d.http("POST", f"/v1/datasets/{ds_id}/disconnect", {}, token=leaving)
+    assert bye.status == 200 and bye.json() == {"revoked": 1}
+    assert len(list(results.iterdir())) == 1
+    assert d.http("GET", f"/v1/datasets/{ds_id}", token=leaving).status == 401
+    assert d.http("GET", f"/v1/datasets/{ds_id}", token=staying).status == 200
+    # a page can only withdraw itself: an unknown token is refused
+    assert d.http("POST", f"/v1/datasets/{ds_id}/disconnect", {}, token=leaving).status == 401
+    # the local tier has no token to withdraw
+    local = d.http(
+        "POST", f"/v1/datasets/{ds_id}/disconnect", {}, origin=None, token=d.daemon.local_token
+    )
+    assert local.json() == {"revoked": 0}
+    assert len(list(results.iterdir())) == 1

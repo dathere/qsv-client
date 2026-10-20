@@ -108,7 +108,7 @@ On that basis the browser tier:
 - **Doesn't reveal registrations.** The answer to a pairing request is the same whether or
   not the schematic is registered. `hello` says only `{"service":"qsv-clientd","api":1}`.
 - **Keeps tokens scoped and unstored.** A token is scoped to one dataset, expires, is handed
-  out once, and is stored only as a hash.
+  out once, and is stored only as a hash. A page's Disconnect withdraws its own token.
 - **Never takes a path from the page.** The daemon adds the registered file itself, and
   re-renders use only the viz arguments you registered.
 - **Uses a command allowlist.** Ad-hoc queries are limited to `count`, `headers`, `stats`,
@@ -168,6 +168,7 @@ bodies). Daemon refusals are `{"daemon_error": {"code", "message"}}` with a 4xx/
 | `POST /v1/datasets/<id>/page` | `{"result", "start"=0, "length"=100 (≤500), "search"?, "order"?: {"column", "desc"}}` → `{"headers","rows","start","total","filtered"}`; 410 `result_gone` if the result was replaced, 409 `result_stale` if the data changed |
 | `POST /v1/datasets/<id>/render` | `{}` → the new schematic HTML (`text/html`); a local caller gets `{"schematic_path","bytes"}` instead. It is also written over the registered schematic file |
 | `POST /v1/datasets/<id>/fetch` | `{}` → `{"changed","fingerprint","via"}`; follow with `render` |
+| `POST /v1/datasets/<id>/disconnect` | `{}` → `{"revoked": 1}`; withdraws the calling page's own token and deletes its stored result (`0` from a local caller, which has no token) |
 
 ### Stored results
 
@@ -180,8 +181,8 @@ build the searched and ordered view, rebuilt only when those change.
 
 Each paired page (and the local user) has at most one, in `results/` under the daemon's
 state directory, never beside your data. The next query replaces it, and it is removed when
-its token expires or is revoked, when the dataset is forgotten, and when the daemon stops or
-starts. A stored file over `browser_max_result` (default 1 GiB) is deleted and refused with
+its page disconnects, when its token expires or is revoked, when the dataset is forgotten,
+and when the daemon stops or starts. A stored file over `browser_max_result` (default 1 GiB) is deleted and refused with
 413.
 
 ### Local only
