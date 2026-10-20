@@ -11,6 +11,7 @@ uv sync                                  # setup
 uv run pytest                            # all tests; integration tests need $QSV_BIN or qsv on PATH
 QSV_BIN=/path/to/qsvlite uv run pytest -q tests/test_integration.py   # other binary variants
 uv run ruff format . && uv run ruff check . && uv run mypy            # must be clean before done
+uv run pytest --cov                      # with branch coverage (config in pyproject.toml)
 ```
 
 CI runs lint, format check, and mypy, plus tests on ubuntu/macos x Python 3.10–3.14 against
@@ -18,6 +19,8 @@ qsv, qsvlite, and qsvdp (Linux only).
 On Windows (Python 3.10–3.14) it runs the full suite against qsv, plus the integration tests
 against qsvlite. Windows teardown uses Job Objects via ctypes (`_ProcessTree` in `_process.py`);
 type-check it with `uv run mypy --platform win32` (the lint job runs both).
+Coverage from every test job is merged on Codecov (`codecov.yml`): the total may not drop
+below the base commit's, and new or changed lines need 100% coverage.
 
 ## Layout (`src/qsv_client/`)
 

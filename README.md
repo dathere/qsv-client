@@ -1,6 +1,7 @@
 # qsv-client
 
 [![PyPI](https://img.shields.io/pypi/v/qsv-client)](https://pypi.org/project/qsv-client/)
+[![codecov](https://codecov.io/gh/dathere/qsv-client/graph/badge.svg)](https://codecov.io/gh/dathere/qsv-client)
 
 Run the [qsv](https://github.com/dathere/qsv) CSV toolkit from Python, without the usual
 subprocess pitfalls:
@@ -290,7 +291,12 @@ uv sync
 uv run pytest                        # integration tests need qsv: QSV_BIN=/path/to/qsv
 uv run ruff format . && uv run ruff check .
 uv run mypy && uv run mypy --platform win32   # also type-checks the Windows-only code
+uv run pytest --cov                  # branch coverage report
 ```
+
+CI merges coverage from its Linux, macOS and Windows jobs on
+[Codecov](https://codecov.io/gh/dathere/qsv-client). A local run can't reach the merged figure,
+since each OS only runs its own platform-specific code.
 
 ## License
 
