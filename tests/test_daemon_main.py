@@ -335,6 +335,42 @@ def test_run_passes_through_output_and_exit_code(
     assert captured.err == "usage error\n"
 
 
+@pytest.mark.parametrize(
+    ("argv", "command", "args"),
+    [
+        # qsv needs the `--` to take a pattern that starts with '-'
+        (["run", "search", "--", "-x", "d.csv"], "search", ("--", "-x", "d.csv")),
+        (["run", "--stdin", "search", "--", "-x"], "search", ("--", "-x")),
+        # a leading `--` only ends qsv-clientd's own options
+        (["run", "--", "search", "-x"], "search", ("-x",)),
+    ],
+)
+def test_run_keeps_a_double_dash_for_qsv(
+    fake_client: Callable[..., FakeClient],
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    command: str,
+    args: tuple[str, ...],
+) -> None:
+    _no_tty(monkeypatch, b"")
+    fake = fake_client()
+    fake.run_result = _result()
+    assert cli.main(argv) == 0
+    assert fake.runs[0][:2] == (command, args)
+
+
+@pytest.mark.parametrize("argv", [["run"], ["run", "--"]])
+def test_run_needs_a_command(
+    fake_client: Callable[..., FakeClient], argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = fake_client()
+    with pytest.raises(SystemExit) as info:
+        cli.main(argv)
+    assert info.value.code == 2
+    assert "required: command" in capsys.readouterr().err
+    assert fake.runs == []
+
+
 def test_run_with_no_stdout(
     fake_client: Callable[..., FakeClient], capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -34,6 +34,8 @@ All notable changes to this project are documented here. The format follows
   contains spaces.
 - A Data Schematic query's option values must be strings or numbers, like its other
   arguments.
+- `qsv-clientd run search -- -x` passes the `--` on to qsv, so a pattern or argument that
+  starts with `-` works. argparse used to drop it.
 
 ## [0.4.0] - 2026-10-15
 
