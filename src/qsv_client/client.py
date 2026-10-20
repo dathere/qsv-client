@@ -433,6 +433,11 @@ class Qsv(_Base):
                 timeout=effective_timeout,
                 kill_grace=self.kill_grace,
             )
+        except FileNotFoundError as exc:
+            # also raised for a missing cwd; only a vanished binary is QsvNotFound
+            if os.path.exists(self.binary):
+                raise
+            raise QsvNotFound(f"qsv binary {self.binary} no longer exists") from exc
         finally:
             if fh is not None:
                 fh.close()
@@ -582,6 +587,11 @@ class AsyncQsv(_Base):
                 timeout=effective_timeout,
                 kill_grace=self.kill_grace,
             )
+        except FileNotFoundError as exc:
+            # also raised for a missing cwd; only a vanished binary is QsvNotFound
+            if os.path.exists(self.binary):
+                raise
+            raise QsvNotFound(f"qsv binary {self.binary} no longer exists") from exc
         finally:
             if fh is not None:
                 fh.close()

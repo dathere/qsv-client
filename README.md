@@ -171,7 +171,8 @@ failures are `QsvError` with kind `unknown`, and the message is taken from stder
 `QsvVersionError` is raised before the command runs; its `exit_code`, `args_run` and
 `stderr` describe the `--capabilities` check. If `--capabilities` succeeds but its output
 isn't recognized, `capabilities` (and the first `run`) raise a plain `QsvError`.
-`QsvNotFound` (no binary) is not a `QsvError`: it is raised when the client is created.
+`QsvNotFound` (no binary) is not a `QsvError`: it is raised when the client is created, or
+by a run if the binary has been removed since.
 
 ## Platform notes
 
