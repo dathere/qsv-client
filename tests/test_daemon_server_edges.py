@@ -502,11 +502,12 @@ time.sleep(60)
         d.stop()
         assert time.monotonic() - started < 15
         # the connection ends without a reply (EOF, or a reset): shutdown doesn't wait for it
+        # one recv: any byte of a reply fails, and only a reset with nothing read is accepted
         try:
-            reply = _read_all(s)
+            first = s.recv(65536)
         except ConnectionResetError:
-            reply = b""
-        assert reply == b""
+            first = b""
+        assert first == b"", first
     deadline = time.monotonic() + 20
     while _alive(pid):
         assert time.monotonic() < deadline, "qsv kept running after the daemon stopped"
