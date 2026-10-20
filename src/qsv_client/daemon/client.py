@@ -224,6 +224,8 @@ class DaemonClient:
             raise QsvDaemonUnavailable(f"qsv-clientd is not running at {t.describe()}") from exc
         except OSError as exc:
             raise QsvDaemonError(_os_error_message(t, exc)) from exc
+        except http.client.HTTPException as exc:
+            raise QsvDaemonError(f"talking to qsv-clientd failed: {exc}") from exc
         finally:
             conn.close()
         return _decode(status, data)

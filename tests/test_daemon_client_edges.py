@@ -241,13 +241,7 @@ def test_a_daemon_that_never_answers_times_out(
 @pytest.mark.parametrize(
     "cls",
     [
-        pytest.param(
-            DaemonClient,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="sync client lets http.client.HTTPException escape (not an OSError)",
-            ),
-        ),
+        DaemonClient,
         AsyncDaemonClient,
     ],
 )
