@@ -142,10 +142,11 @@ def _finish(data: dict[str, Any], *, command: str, check: bool, text: bool) -> Q
     if isinstance(data.get("os_error"), dict):
         err = data["os_error"]
         errno, strerror = err.get("errno"), err.get("strerror")
+        message = strerror if isinstance(strerror, str) else "unknown error"
         if isinstance(errno, int):
             # OSError(errno, ...) picks the subclass, e.g. PermissionError, as a local run would
-            raise OSError(errno, str(strerror), err.get("filename"))
-        raise OSError(str(strerror))
+            raise OSError(errno, message, err.get("filename"))
+        raise OSError(message)
     res = data["result"]
     argv = [str(a) for a in res["args"]]
     stderr = str(res["stderr"])

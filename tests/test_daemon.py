@@ -731,6 +731,9 @@ def test_concurrent_fetches_and_replace_keeps_mode(
 HEADER_QSV = """
 if sys.argv[1] == "slice":  # slice --len 0 <path>: the header row
     print(open(sys.argv[-1]).readline(), end="")
+elif sys.argv[1] == "count" and len({l.count(",") for l in open(sys.argv[-1])}) > 1:
+    sys.stderr.write("csv error: found record with 1 fields, but the previous record has 2\\n")
+    sys.exit(1)
 else:
     print("1")
 """
@@ -791,6 +794,47 @@ def test_fetch_keeps_data_when_columns_are_missing(
         assert data.read_text().startswith("who,")
     finally:
         renamed.close()
+
+
+def test_fetch_keeps_data_when_records_are_ragged(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    data = tmp_path / "d.csv"
+    data.write_text("name,team\nold,red\n")
+    ragged = _Server(b"name,team\nnew,blue\nbroken\n")  # matching header, bad record later
+    try:
+        d = start_daemon(_script(fake_qsv, HEADER_QSV))
+        ds_id = _register(d, data, source_url=ragged.url, allow_replace=True)
+        reply = d.http(
+            "POST",
+            f"/v1/datasets/{ds_id}/fetch",
+            {"force": True},  # force skips only the column check
+            origin=None,
+            token=d.daemon.local_token,
+        )
+        assert reply.status != 200, reply.body
+        assert data.read_text() == "name,team\nold,red\n"
+    finally:
+        ragged.close()
+
+
+def test_fetch_handles_a_long_header(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    long_name = "x" * 200_000  # over csv's default 128 KiB field limit
+    data = tmp_path / "d.csv"
+    data.write_text(f"name,{long_name}\nold,red\n")
+    body = f"name,{long_name}\nnew,blue\n".encode()
+    server = _Server(body)
+    try:
+        d = start_daemon(_script(fake_qsv, HEADER_QSV))
+        ds_id = _register(d, data, source_url=server.url, allow_replace=True)
+        token = d.pair(_sha(data))
+        reply = d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token)
+        assert reply.status == 200, reply.body[:500]
+        assert data.read_bytes() == body
+    finally:
+        server.close()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")

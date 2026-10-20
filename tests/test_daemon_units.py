@@ -36,6 +36,23 @@ def test_error_round_trips_through_dict(cls: type[QsvError]) -> None:
     assert back.to_dict() == err.to_dict()
 
 
+@pytest.mark.parametrize(
+    "exc",
+    [
+        PermissionError(13, "Permission denied", "/x/out.csv"),
+        OSError("could not start qsv (pid 7): resuming its thread failed"),  # no errno
+    ],
+)
+def test_os_error_round_trips(exc: OSError) -> None:
+    from qsv_client.daemon.client import _finish
+    from qsv_client.daemon.server import _os_error_dict
+
+    with pytest.raises(OSError) as raised:
+        _finish({"os_error": _os_error_dict(exc)}, command="count", check=True, text=True)
+    assert type(raised.value) is type(exc)
+    assert str(raised.value) == str(exc)
+
+
 def test_unknown_error_kind_keeps_kind() -> None:
     back = error_from_dict({"kind": "brand_new", "message": "m"})
     assert type(back) is QsvError
