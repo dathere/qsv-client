@@ -190,7 +190,7 @@ def test_local_status_listing_and_unknown_routes(
     assert status["datasets"] == 1 and status["pending_pairings"] == 0
     assert status["port"] == d.port
     if sys.platform != "win32":
-        assert status["socket"] == str(d.daemon._socket_path)
+        assert status["socket"] == str(d.daemon.socket_path)
 
     # the local user sees full records, paths included
     listing = _local(d, "GET", "/v1/datasets").json()
@@ -620,7 +620,7 @@ async def test_serve_forever_cleans_up_on_sigterm(
     while not daemon._started:
         assert time.monotonic() < deadline and not task.done()
         await asyncio.sleep(0.02)
-    sock_path = daemon._socket_path
+    sock_path = daemon.socket_path
     token_file = home / "run" / "local-token"
     assert sock_path.exists() and token_file.exists()
     os.kill(os.getpid(), signal.SIGTERM)

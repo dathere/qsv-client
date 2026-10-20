@@ -112,6 +112,11 @@ class Daemon:
 
     # -- lifecycle -------------------------------------------------------------------------
 
+    @property
+    def socket_path(self) -> Path:
+        """The Unix socket local clients connect to (unused on Windows)."""
+        return self._socket_path
+
     async def start(self) -> None:
         caps = await self._qsv.capabilities()
         log.info("qsv-clientd %s using %s %s", __version__, caps.binary, caps.version)

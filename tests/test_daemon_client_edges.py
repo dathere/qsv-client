@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import os
 import shutil
 import socket
 import sys
@@ -104,6 +105,16 @@ def test_tcp_without_a_token_file_is_unavailable(cls: type[Client], home: Path) 
 
 def test_runtime_port_is_the_running_daemons(daemon: DaemonThread) -> None:
     assert _runtime_port() == daemon.port
+
+
+def test_host_client_is_a_local_client(daemon: DaemonThread) -> None:
+    client = daemon.client()
+    if sys.platform == "win32":
+        assert client._target.port == daemon.port
+        assert client._target.token == daemon.daemon.local_token
+    else:
+        assert client._target.socket_path == str(daemon.daemon.socket_path)
+    assert client.status()["pid"] == os.getpid()
 
 
 @pytest.mark.parametrize("content", ["not json", "[8080]", '{"port": "8080"}', '{"pid": 1}'])
