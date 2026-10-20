@@ -35,13 +35,29 @@ class DaemonThread:
     def _main(self) -> None:
         asyncio.set_event_loop(self.loop)
         try:
-            self.loop.run_until_complete(self.daemon.start())
-        except BaseException as exc:
-            self._error = exc
-            self._ready.set()
-            return
-        self._ready.set()
-        self.loop.run_forever()
+            try:
+                self.loop.run_until_complete(self.daemon.start())
+            except BaseException as exc:
+                self._error = exc
+                return
+            finally:
+                self._ready.set()
+            self.loop.run_forever()
+        finally:
+            self._close_loop()
+
+    def _close_loop(self) -> None:
+        """Finish what is left on the loop, then close it (else: "unclosed event loop")."""
+        loop = self.loop
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.run_until_complete(loop.shutdown_default_executor())
+        asyncio.set_event_loop(None)
+        loop.close()
 
     def start(self) -> DaemonThread:
         self._thread.start()
@@ -51,6 +67,9 @@ class DaemonThread:
         return self
 
     def stop(self) -> None:
+        if self._thread.ident is None:  # never started: the loop never ran
+            self.loop.close()
+            return
         if self._error is None and self.loop.is_running():
             asyncio.run_coroutine_threadsafe(self.daemon.close(), self.loop).result(30)
             self.loop.call_soon_threadsafe(self.loop.stop)
