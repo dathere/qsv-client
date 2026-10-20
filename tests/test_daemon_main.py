@@ -648,6 +648,8 @@ def live_daemon(
     binary = fake_qsv(
         """
         sys.stdout.write("argv=" + " ".join(sys.argv[1:]) + "\\n")
+        # like the stdout prelude in fake_qsv: no "\\r\\n" on Windows
+        sys.stderr.reconfigure(newline="\\n")
         sys.stderr.write("note\\n")
         sys.exit(3 if "fail" in sys.argv else 0)
         """
