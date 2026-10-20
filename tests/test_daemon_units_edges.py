@@ -97,6 +97,13 @@ def test_option_without_a_value_is_refused(args: list[object]) -> None:
         build_query("frequency", args, ALL)
 
 
+@pytest.mark.parametrize("value", [["a"], {"a": 1}])
+def test_option_value_must_be_a_string_or_number(value: object) -> None:
+    # str() of a list would otherwise reach qsv as "['a']"
+    with pytest.raises(NotAllowed, match="strings or numbers"):
+        build_query("frequency", ["-s", value], ALL)
+
+
 def test_negative_numbers_are_values_not_flags() -> None:
     # slice counts a negative start from the end; search's regex may be a negative number
     assert build_query("slice", ["--start", "-5"], ALL) == ["slice", "--start", "-5"]

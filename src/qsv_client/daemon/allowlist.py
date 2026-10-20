@@ -106,6 +106,8 @@ def build_query(command: str, args: list[object], available: frozenset[str]) -> 
                     nxt = next(it, None)
                     if nxt is None or isinstance(nxt, bool):
                         raise NotAllowed(f"{name} needs a value")
+                    if not isinstance(nxt, str | int | float):
+                        raise NotAllowed("arguments must be strings or numbers")
                     value = str(nxt)
                 if value.startswith("-") and not _is_number(value):
                     raise NotAllowed(f"value for {name} may not start with '-'")
