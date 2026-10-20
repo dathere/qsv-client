@@ -10,11 +10,6 @@ coverage:
       default:
         target: 100%
 
-codecov:
-  notify:
-    # 10 POSIX + 5 Windows test jobs; wait for all before posting a status.
-    after_n_builds: 15
-
 comment:
   layout: "diff, files"
   require_changes: true

@@ -57,7 +57,8 @@ jobs:
       - uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
-          use_oidc: true
+          # fork PRs get no OIDC token; Codecov takes their uploads tokenless
+          use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
           fail_ci_if_error: false
 
   # Separate from `test` because Windows steps run in PowerShell and use the MSVC build.
@@ -100,5 +101,6 @@ jobs:
       - uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
-          use_oidc: true
+          # fork PRs get no OIDC token; Codecov takes their uploads tokenless
+          use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
           fail_ci_if_error: false

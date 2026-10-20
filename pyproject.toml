@@ -56,6 +56,8 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.coverage.run]
 source = ["qsv_client"]
 branch = true
+# some tests run qsv_client.daemon in a child Python process
+patch = ["subprocess"]
 # CI merges reports from Linux, macOS and Windows runners
 relative_files = true
 
