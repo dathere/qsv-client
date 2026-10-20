@@ -25,21 +25,28 @@ _SOURCE_RE = re.compile(
 # another file); registration rejects them so a re-render can only write the schematic
 _FORBIDDEN_VIZ_FLAGS = ("-o", "--output")
 
+FINGERPRINT_ALGOS = ("blake3", "sha256")
+
 
 @dataclass(frozen=True)
 class Fingerprint:
-    sha256: str
+    algo: str
+    """``blake3`` (computed by qsv) or ``sha256`` (the fallback when qsv lacks ``blake3``)."""
+    digest: str
     size: int
 
     @classmethod
-    def of(cls, path: Path) -> Fingerprint:
+    def sha256_of(cls, path: Path) -> Fingerprint:
         h = hashlib.sha256()
         size = 0
         with path.open("rb") as fh:
             while chunk := fh.read(1 << 20):
                 h.update(chunk)
                 size += len(chunk)
-        return cls(h.hexdigest(), size)
+        return cls("sha256", h.hexdigest(), size)
+
+    def public(self) -> dict[str, Any]:
+        return {"algo": self.algo, "digest": self.digest, "bytes": self.size}
 
 
 @dataclass(frozen=True)
@@ -60,11 +67,11 @@ class SchematicSource:
         fingerprint = None
         if (
             isinstance(fp, dict)
-            and fp.get("algo") == "sha256"
+            and fp.get("algo") in FINGERPRINT_ALGOS
             and isinstance(fp.get("digest"), str)
             and isinstance(fp.get("bytes"), int)
         ):
-            fingerprint = Fingerprint(fp["digest"].lower(), fp["bytes"])
+            fingerprint = Fingerprint(fp["algo"], fp["digest"].lower(), fp["bytes"])
         args = data.get("viz_args")
         return cls(
             schematic_uuid=_opt_str(data.get("schematic_uuid")),
@@ -106,8 +113,9 @@ class Dataset:
     id: str
     path: str
     """The file commands run on (a fetched copy in the daemon's cache after a fetch)."""
-    sha256: str
-    """Fingerprint of the data the current schematic was rendered from."""
+    algo: str
+    digest: str
+    """Fingerprint (with ``algo`` and ``size``) of the data the schematic was rendered from."""
     size: int
     viz_args: list[str] = field(default_factory=list)
     schematic_path: str | None = None
@@ -119,6 +127,14 @@ class Dataset:
     original_path: str | None = None
     """The user's file, when ``path`` points at a fetched copy instead."""
 
+    @property
+    def fingerprint(self) -> Fingerprint:
+        return Fingerprint(self.algo, self.digest, self.size)
+
+    @fingerprint.setter
+    def fingerprint(self, fp: Fingerprint) -> None:
+        self.algo, self.digest, self.size = fp.algo, fp.digest, fp.size
+
     def public(self) -> dict[str, Any]:
         """What a paired browser may see: no paths."""
         return {
@@ -127,8 +143,7 @@ class Dataset:
             "pid": self.pid,
             "can_fetch": bool(self.source_url or self.pid),
             "can_render": self.schematic_path is not None or bool(self.viz_args),
-            "sha256": self.sha256,
-            "bytes": self.size,
+            "fingerprint": self.fingerprint.public(),
         }
 
 
@@ -141,6 +156,9 @@ class Registry:
         if path.exists():
             raw = json.loads(path.read_text(encoding="utf-8"))
             for item in raw.get("datasets", []):
+                if "sha256" in item:  # written before fingerprints carried their algorithm
+                    item["digest"] = item.pop("sha256")
+                    item.setdefault("algo", "sha256")
                 ds = Dataset(**item)
                 self.datasets[ds.id] = ds
 
@@ -177,7 +195,8 @@ class Registry:
         ds = Dataset(
             id=old.id if old else uuid.uuid4().hex,
             path=resolved,
-            sha256=fingerprint.sha256,
+            algo=fingerprint.algo,
+            digest=fingerprint.digest,
             size=fingerprint.size,
             viz_args=validate_viz_args(viz_args or (old.viz_args if old else [])),
             schematic_path=schematic,
@@ -197,14 +216,14 @@ class Registry:
         self.save()
         return True
 
-    def match(self, schematic_uuid: str | None, sha256: str | None) -> Dataset | None:
+    def match(self, schematic_uuid: str | None, digest: str | None) -> Dataset | None:
         """The dataset a schematic belongs to: by its render uuid, else by data fingerprint."""
         if schematic_uuid:
             for ds in self.datasets.values():
                 if ds.schematic_uuid == schematic_uuid:
                     return ds
-        if sha256:
+        if digest:
             for ds in self.datasets.values():
-                if ds.sha256 == sha256.lower():
+                if ds.digest == digest.lower():
                     return ds
         return None

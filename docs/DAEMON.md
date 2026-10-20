@@ -141,19 +141,19 @@ bodies). Daemon refusals are `{"daemon_error": {"code", "message"}}` with a 4xx/
 | Route | Body → reply |
 |---|---|
 | `GET /v1/hello` | → `{"service":"qsv-clientd","api":1}` |
-| `POST /v1/pair` | `{"schematic_uuid"?, "sha256"?}` → `{"request_id","code","approve_with"}` |
+| `POST /v1/pair` | `{"schematic_uuid"?, "digest"?}` → `{"request_id","code","approve_with"}` |
 | `GET /v1/pair/<request_id>` | → `{"status":"pending"\|"denied"\|"unknown"}` or `{"status":"approved","token","expires_in","dataset"}` (the token is returned once) |
 
 ### Paired browser (`Authorization: Bearer <token>`) or local
 
 | Route | Body → reply |
 |---|---|
-| `GET /v1/datasets/<id>` | → `{"id","title","pid","can_fetch","can_render","sha256","bytes"}` |
+| `GET /v1/datasets/<id>` | → `{"id","title","pid","can_fetch","can_render","fingerprint"}` |
 | `POST /v1/datasets/<id>/rows` | `{"column"?, "value"?, "offset"=0, "limit"=100 (≤500)}` → `{"headers","rows","offset"}`; with `value`, the rows whose `column` equals it exactly |
-| `POST /v1/datasets/<id>/refresh` | `{"stats"?: bool}` → `{"changed","sha256","bytes","rows","stats"?}`; `changed` compares with the data the schematic was rendered from |
+| `POST /v1/datasets/<id>/refresh` | `{"stats"?: bool}` → `{"changed","fingerprint","rows","stats"?}`; `changed` compares with the data the schematic was rendered from |
 | `POST /v1/datasets/<id>/query` | `{"command","args"}` → `{"stdout","truncated","bytes"}` |
 | `POST /v1/datasets/<id>/render` | `{}` → the new schematic HTML (`text/html`). It is also written over the registered schematic file |
-| `POST /v1/datasets/<id>/fetch` | `{}` → `{"changed","sha256","bytes","via"}`; follow with `render` |
+| `POST /v1/datasets/<id>/fetch` | `{}` → `{"changed","fingerprint","via"}`; follow with `render` |
 
 ### Local only
 
@@ -172,14 +172,19 @@ a registered dataset by it:
 
 ```html
 <script type="application/json" id="qsv-schematic-source">{"schema":1,"qsv_version":"26.0.0",
-  "schematic_uuid":"…","fingerprint":{"algo":"sha256","digest":"…","bytes":123},
+  "schematic_uuid":"…","fingerprint":{"algo":"blake3","digest":"…","bytes":123},
   "rows":4,"viz_args":["--dict-info"],"redacted":[],"pid":"https://doi.org/…"}</script>
 ```
 
-The page pairs with `schematic_uuid`, falling back to `fingerprint.digest`. `viz_args` has
-the input and output paths removed; `register --schematic` offers it for re-rendering. Flags
-whose value is a file keep only its basename and are listed in `"redacted"`; registering
-then asks you to pass the full arguments after `--`.
+The page pairs with `schematic_uuid`, falling back to `fingerprint.digest`. A
+`fingerprint` is `{"algo","digest","bytes"}`. The daemon fingerprints data with BLAKE3,
+computed by `qsv blake3` (the standard library has no BLAKE3), or with SHA-256 when its qsv
+has no `blake3` command (qsvlite). A schematic rendered with `--no-daemon-bridge` has no
+fingerprint.
+
+`viz_args` has the input and output paths removed; `register --schematic` offers it for
+re-rendering. Flags whose value is a file keep only its basename and are listed in
+`"redacted"`; registering then asks you to pass the full arguments after `--`.
 
 ## Fetching the latest data
 

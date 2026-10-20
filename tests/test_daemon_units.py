@@ -151,7 +151,7 @@ def test_schematic_source_from_html(tmp_path: Path) -> None:
     src = SchematicSource.from_html(_schematic_html("ab" * 32, 9))
     assert src is not None
     assert src.schematic_uuid == "u-1"
-    assert src.fingerprint == Fingerprint("ab" * 32, 9)
+    assert src.fingerprint == Fingerprint("sha256", "ab" * 32, 9)
     assert src.viz_args == ("--dict-info",)
     assert src.pid == "https://doi.org/10.1234/abc"
     assert SchematicSource.from_html("<html>no source</html>") is None
@@ -161,7 +161,7 @@ def test_registry_persists_and_merges(tmp_path: Path) -> None:
     data = tmp_path / "d.csv"
     data.write_text("a\n1\n")
     reg = Registry(tmp_path / "datasets.json")
-    fp = Fingerprint.of(data)
+    fp = Fingerprint.sha256_of(data)
     ds = reg.add(data, fingerprint=fp, viz_args=["--dict-info"], source_url="https://x/d.csv")
     again = reg.add(data, fingerprint=fp, viz_args=[], title="Renamed")
     assert again.id == ds.id
@@ -169,7 +169,15 @@ def test_registry_persists_and_merges(tmp_path: Path) -> None:
     assert again.source_url == "https://x/d.csv"
     assert again.title == "Renamed"
     loaded = Registry(tmp_path / "datasets.json")
-    assert loaded.match(None, fp.sha256.upper()) == again
+    assert loaded.match(None, fp.digest.upper()) == again
+
+
+def test_registry_loads_sha256_only_entries(tmp_path: Path) -> None:
+    path = tmp_path / "datasets.json"
+    old = {"id": "d1", "path": "/x.csv", "sha256": "ab" * 32, "size": 3}
+    path.write_text(json.dumps({"version": 1, "datasets": [old]}))
+    ds = Registry(path).datasets["d1"]
+    assert ds.fingerprint == Fingerprint("sha256", "ab" * 32, 3)
 
 
 def test_registry_refuses_output_flag(tmp_path: Path) -> None:
@@ -178,7 +186,7 @@ def test_registry_refuses_output_flag(tmp_path: Path) -> None:
     reg = Registry(tmp_path / "datasets.json")
     for bad in (["-o", "x.html"], ["--output=x.html"], ["-ox.html"]):
         with pytest.raises(ValueError):
-            reg.add(data, fingerprint=Fingerprint.of(data), viz_args=bad)
+            reg.add(data, fingerprint=Fingerprint.sha256_of(data), viz_args=bad)
 
 
 # -- config ---------------------------------------------------------------------------------

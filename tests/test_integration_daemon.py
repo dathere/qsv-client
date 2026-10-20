@@ -46,7 +46,12 @@ def paired(daemon: DaemonThread, qsv: Qsv, tmp_path: Path) -> tuple[DaemonThread
         token=daemon.daemon.local_token,
     )
     ds_id: str = reply.json()["id"]
-    token = daemon.pair(hashlib.sha256(data.read_bytes()).hexdigest())
+    # BLAKE3 from qsv's `blake3` command, or SHA-256 when this qsv has none (qsvlite)
+    algo = "blake3" if qsv.capabilities.has_command("blake3") else "sha256"
+    assert reply.json()["algo"] == algo
+    if algo == "sha256":
+        assert reply.json()["digest"] == hashlib.sha256(data.read_bytes()).hexdigest()
+    token = daemon.pair(reply.json()["digest"])
     return daemon, ds_id, token, data
 
 

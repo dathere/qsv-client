@@ -88,9 +88,9 @@ class DaemonThread:
         finally:
             conn.close()
 
-    def pair(self, sha256: str) -> str:
+    def pair(self, digest: str) -> str:
         """Pair like a schematic would, approving as the local user; returns the token."""
-        req = self.http("POST", "/v1/pair", {"sha256": sha256}).json()
+        req = self.http("POST", "/v1/pair", {"digest": digest}).json()
         approved = self.http(
             "POST",
             f"/v1/pairings/{req['code']}/approve",

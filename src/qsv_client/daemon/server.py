@@ -429,25 +429,24 @@ class Daemon:
             raise HttpError(422, "not_allowed", str(exc)) from None
         schematic = body.get("schematic_path")
         schematic_path = _abs_path(schematic, "schematic_path") if schematic else None
-        fingerprint = await asyncio.to_thread(Fingerprint.of, path)
+        fingerprint = await self._fingerprint(path)
         source = None
         if schematic_path is not None and schematic_path.is_file():
             html = await asyncio.to_thread(schematic_path.read_text, "utf-8", "replace")
             source = SchematicSource.from_html(html)
-            if (
-                source is not None
-                and source.fingerprint is not None
-                and source.fingerprint.sha256 != fingerprint.sha256
-                and not body.get("force")
-                # a requested render replaces the stale schematic anyway
-                and not body.get("render")
-            ):
-                raise HttpError(
-                    409,
-                    "fingerprint_mismatch",
-                    "the schematic was rendered from different data than this file "
-                    "(re-render it, or pass force)",
-                )
+            page = source.fingerprint if source is not None else None
+            # a requested render replaces the stale schematic anyway
+            if page is not None and not body.get("force") and not body.get("render"):
+                current = fingerprint
+                if page.algo != current.algo:
+                    current = await self._fingerprint(path, page.algo)
+                if page.digest != current.digest:
+                    raise HttpError(
+                        409,
+                        "fingerprint_mismatch",
+                        "the schematic was rendered from different data than this file "
+                        "(re-render it, or pass force)",
+                    )
         ds = self.registry.add(
             path,
             fingerprint=fingerprint,
@@ -507,7 +506,7 @@ class Daemon:
         else:
             origin = "local"
         body = request.json()
-        ds = self.registry.match(_opt(body.get("schematic_uuid")), _opt(body.get("sha256")))
+        ds = self.registry.match(_opt(body.get("schematic_uuid")), _opt(body.get("digest")))
         # the same answer whether or not the schematic is registered, so a page can't probe
         # which datasets this user has; `qsv-clientd approve` explains a non-match
         pending = self.pairing.request(ds.id if ds else "", origin)
@@ -581,12 +580,11 @@ class Daemon:
         return Response.json({"headers": headers, "rows": data, "offset": offset})
 
     async def _refresh(self, ds: Dataset, body: dict[str, Any], tier: Tier) -> Response:
-        fp = await asyncio.to_thread(Fingerprint.of, Path(ds.path))
+        fp = await self._fingerprint(Path(ds.path), ds.algo, ds)
         count = await self._browser_run(ds, ["count", ds.path])
         out: dict[str, Any] = {
-            "changed": fp.sha256 != ds.sha256,
-            "sha256": fp.sha256,
-            "bytes": fp.size,
+            "changed": fp.digest != ds.digest,
+            "fingerprint": fp.public(),
             "rows": int(count.strip() or 0),
         }
         if body.get("stats"):
@@ -662,7 +660,7 @@ class Daemon:
         tmp = Path(tmp_name)
         try:
             # fingerprint first: the schematic describes the data as it was when rendering began
-            fp = await asyncio.to_thread(Fingerprint.of, Path(ds.path))
+            fp = await self._fingerprint(Path(ds.path), ds=ds)
             await self._browser_run(
                 ds,
                 ["viz", "smart", *ds.viz_args, ds.path, "--output", str(tmp)],
@@ -673,7 +671,7 @@ class Daemon:
             html = tmp.read_bytes()
             source = SchematicSource.from_html(html.decode("utf-8", "replace"))
             ds.schematic_uuid = source.schematic_uuid if source else None
-            ds.sha256, ds.size = fp.sha256, fp.size
+            ds.fingerprint = fp
             if ds.schematic_path:
                 target = Path(ds.schematic_path)
                 # mkstemp made it 0600; keep the schematic's existing mode (or a normal 0644)
@@ -697,9 +695,31 @@ class Daemon:
             )
         return path.read_text("utf-8", "replace")
 
+    async def _fingerprint(
+        self, path: Path, algo: str | None = None, ds: Dataset | None = None
+    ) -> Fingerprint:
+        """BLAKE3 of ``path`` by default, else ``algo``.
+
+        The standard library has no BLAKE3, so qsv's ``blake3`` command computes it
+        (memory-mapped, on all cores). Every qsv that renders schematics has the command; a qsv
+        without it (qsvlite) gets SHA-256 instead.
+        """
+        has_blake3 = (await self._qsv.capabilities()).has_command("blake3")
+        if algo is None:
+            algo = "blake3" if has_blake3 else "sha256"
+        elif algo == "blake3" and not has_blake3:
+            raise HttpError(501, "no_blake3", "this qsv has no `blake3` command (use qsv or qsvdp)")
+        if algo == "sha256":
+            return await asyncio.to_thread(Fingerprint.sha256_of, path)
+        size = path.stat().st_size
+        out = await self._browser_run(
+            ds, ["blake3", "--no-names", str(path)], timeout=self.config.max_timeout
+        )
+        return Fingerprint("blake3", out.strip().lower(), size)
+
     async def _browser_run(
         self,
-        ds: Dataset,
+        ds: Dataset | None,
         argv: list[str],
         *,
         stdout_path: Path | None = None,
@@ -765,15 +785,16 @@ def _private(ds: Dataset) -> dict[str, Any]:
     return asdict(ds)
 
 
-def _scrub(text: str, ds: Dataset) -> str:
-    label = ds.title or "dataset"
-    for path in filter(None, (ds.path, ds.original_path, ds.schematic_path)):
-        text = text.replace(path, label)
+def _scrub(text: str, ds: Dataset | None) -> str:
+    if ds is not None:
+        label = ds.title or "dataset"
+        for path in filter(None, (ds.path, ds.original_path, ds.schematic_path)):
+            text = text.replace(path, label)
     tmp = tempfile.gettempdir()
     return text.replace(tmp, "<tmp>") if tmp else text
 
 
-def _qsv_http_error(exc: QsvError, ds: Dataset) -> HttpError:
+def _qsv_http_error(exc: QsvError, ds: Dataset | None) -> HttpError:
     err = HttpError(502, "qsv_error", _scrub(exc.message, ds))
     err.code = f"qsv_{exc.kind}"
     return err

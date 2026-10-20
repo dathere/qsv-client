@@ -258,10 +258,10 @@ def test_only_allowed_origins_may_pair(
 ) -> None:
     d = start_daemon(_script(fake_qsv, ECHO))
     _register(d, data)
-    reply = d.http("POST", "/v1/pair", {"sha256": _sha(data)}, origin="https://evil.example")
+    reply = d.http("POST", "/v1/pair", {"digest": _sha(data)}, origin="https://evil.example")
     assert reply.status == 403
     off = start_daemon(_script(fake_qsv, ECHO), browser=False)
-    assert off.http("POST", "/v1/pair", {"sha256": _sha(data)}).status == 403
+    assert off.http("POST", "/v1/pair", {"digest": _sha(data)}).status == 403
 
 
 def test_pair_answer_does_not_reveal_registration(
@@ -269,8 +269,8 @@ def test_pair_answer_does_not_reveal_registration(
 ) -> None:
     d = start_daemon(_script(fake_qsv, ECHO))
     _register(d, data)
-    known = d.http("POST", "/v1/pair", {"sha256": _sha(data)}).json()
-    unknown = d.http("POST", "/v1/pair", {"sha256": "0" * 64}).json()
+    known = d.http("POST", "/v1/pair", {"digest": _sha(data)}).json()
+    unknown = d.http("POST", "/v1/pair", {"digest": "0" * 64}).json()
     assert set(known) == set(unknown)
     approve = d.http(
         "POST", f"/v1/pairings/{unknown['code']}/approve", origin=None, token=d.daemon.local_token
@@ -372,6 +372,77 @@ def test_registration_checks_schematic_fingerprint(
         "POST", f"/v1/pairings/{paired['code']}/approve", origin=None, token=d.daemon.local_token
     )
     assert approve.json()["dataset_id"] == ds_id
+
+
+B3_QSV = """
+import hashlib
+if sys.argv[1:] == ["--capabilities"]:
+    print('{"binary": "qsv", "version": "25.0.0", "error_formats": ["text", "json"],'
+          ' "commands": ["blake3", "count"]}')
+    sys.exit(0)
+if sys.argv[1] == "blake3":
+    assert sys.argv[2] == "--no-names", sys.argv
+    print(hashlib.blake2s(open(sys.argv[3], "rb").read()).hexdigest())  # stands in for BLAKE3
+elif sys.argv[1] == "count":
+    print(sum(1 for _ in open(sys.argv[-1])) - 1)
+"""
+
+
+def _b3(path: Path) -> str:
+    return hashlib.blake2s(path.read_bytes()).hexdigest()
+
+
+def _write_page(html: Path, fingerprint: dict[str, object]) -> None:
+    source = json.dumps({"schematic_uuid": "u-b3", "fingerprint": fingerprint})
+    html.write_text(f'<script type="application/json" id="qsv-schematic-source">{source}</script>')
+
+
+def test_fingerprints_with_qsv_blake3(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, data: Path, tmp_path: Path
+) -> None:
+    d = start_daemon(_script(fake_qsv, B3_QSV))
+    html = tmp_path / "s.html"
+    # a page fingerprinted with another algorithm is checked in that algorithm
+    _write_page(html, {"algo": "sha256", "digest": "0" * 64, "bytes": 1})
+    stale = d.http(
+        "POST",
+        "/v1/datasets",
+        {"path": str(data), "schematic_path": str(html)},
+        origin=None,
+        token=d.daemon.local_token,
+    )
+    assert stale.status == 409
+    _write_page(html, {"algo": "sha256", "digest": _sha(data), "bytes": 1})
+    ds_id = _register(d, data, schematic_path=str(html))
+
+    token = d.pair(_b3(data))
+    info = d.http("GET", f"/v1/datasets/{ds_id}", token=token).json()
+    size = data.stat().st_size
+    assert info["fingerprint"] == {"algo": "blake3", "digest": _b3(data), "bytes": size}
+    fresh = d.http("POST", f"/v1/datasets/{ds_id}/refresh", {}, token=token).json()
+    assert fresh["changed"] is False and fresh["fingerprint"] == info["fingerprint"]
+    with data.open("a") as fh:
+        fh.write("gamma,3\n")
+    edited = d.http("POST", f"/v1/datasets/{ds_id}/refresh", {}, token=token).json()
+    assert edited["changed"] is True and edited["fingerprint"]["digest"] == _b3(data)
+
+    # a qsv without `blake3` falls back to SHA-256, and can't check a BLAKE3 page
+    lite = start_daemon(_script(fake_qsv, ECHO))
+    _write_page(html, {"algo": "blake3", "digest": _b3(data), "bytes": 1})
+    unverifiable = lite.http(
+        "POST",
+        "/v1/datasets",
+        {"path": str(data), "schematic_path": str(html)},
+        origin=None,
+        token=lite.daemon.local_token,
+    )
+    assert unverifiable.status == 501, unverifiable.body
+    plain = tmp_path / "plain.csv"
+    plain.write_text("x\n1\n")
+    lite_id = _register(lite, plain)
+    lite_token = lite.pair(_sha(plain))
+    lite_info = lite.http("GET", f"/v1/datasets/{lite_id}", token=lite_token).json()
+    assert lite_info["fingerprint"]["algo"] == "sha256"
 
 
 def test_daemon_errors_raise_daemon_error(
