@@ -148,6 +148,18 @@ def test_pairing_codes_expire_and_rate_limit() -> None:
     assert p.request("ds", "null") is not None
 
 
+def test_pairing_expires_in() -> None:
+    clock = Clock()
+    p = Pairing(token_ttl=60.0, clock=clock)
+    pending = p.request("ds", "null")
+    assert pending is not None
+    assert p.expires_in(pending) == int(CODE_TTL)
+    clock.now += 120.5
+    assert p.expires_in(pending) == int(CODE_TTL) - 121
+    clock.now += CODE_TTL
+    assert p.expires_in(pending) == 0
+
+
 def test_denied_pairing_never_yields_a_token() -> None:
     p = Pairing(token_ttl=60.0)
     req = p.request("ds", "null")

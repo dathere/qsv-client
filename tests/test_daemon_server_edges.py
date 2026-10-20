@@ -274,6 +274,7 @@ def test_pairing_deny_poll_and_local_requests(
     local = _local(d, "POST", "/v1/pair", {"digest": _sha(data)}).json()
     pending = _local(d, "GET", "/v1/pairings").json()
     assert [(p["code"], p["origin"]) for p in pending] == [(local["code"], "local")]
+    assert 290 <= pending[0]["expires_in"] <= 300
 
     page = d.http("POST", "/v1/pair", {"digest": _sha(data)}).json()
     assert d.http("GET", f"/v1/pair/{page['request_id']}").json() == {"status": "pending"}

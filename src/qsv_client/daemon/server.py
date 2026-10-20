@@ -557,6 +557,7 @@ class Daemon:
                     "dataset": _private(ds) if ds else None,
                     "approved": p.token is not None,
                     "denied": p.denied,
+                    "expires_in": self.pairing.expires_in(p),
                 }
             )
         return out

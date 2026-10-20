@@ -25,6 +25,17 @@ qsv-clientd status
 
 On Windows, `install` prints the `schtasks` command to run.
 
+`serve` logs to stderr (`-v` adds INFO lines: pairing requests and decisions, datasets
+registered and forgotten, renders, fetches, and revoked tokens; tokens themselves are never
+logged). `--log-file PATH` also writes them to `PATH`, rotated at 5 MB with 3 old files
+kept. The launchd agent already sends stderr to `~/Library/Logs/qsv-clientd.log`, and
+systemd to the journal (`journalctl --user -u qsv-clientd`).
+
+To embed the daemon in another program (a GUI that needs its main thread, say), run it on a
+background thread with `qsv_client.daemon.host.DaemonHost(Daemon(config)).start()`; `stop()`
+closes it, and `client()` returns a `DaemonClient` for it. A host starts once: to restart,
+stop it and build a new `Daemon` and `DaemonHost`.
+
 Services don't read your shell profile, so `install` finds qsv the way the daemon would
 (`binary` in `daemon.json`, then `$QSV_BIN`, then your PATH) and writes that absolute path
 into the service as `QSV_BIN`. It fails if no qsv is found. Run `install` again after
@@ -136,6 +147,12 @@ On that basis the browser tier:
 Tokens are kept in memory only, so restarting the daemon unpairs every open schematic; the
 page notices (401), forgets its token and offers to connect again.
 
+Known limitation (Windows): a second daemon whose `port` is `0` can start beside a running
+one, since it binds a fresh loopback port and there is no socket to collide on, and then
+overwrites the first one's `local-token` and runtime `daemon.json`, cutting local clients
+off from the first. Run one daemon per user (with the default port, a second one fails to
+bind).
+
 Known limitation: the pairing rate limit is global (origins can't be told apart when every
 `file://` page is `null`), so a page that floods `/v1/pair` can delay real pairing for about
 a minute. It cannot pair without your approval.
@@ -196,7 +213,7 @@ size or modification time, as with an edit or a fetch with `--allow-replace`. A 
 | `GET /v1/status` | → daemon, qsv and job information |
 | `POST /v1/run` | `{"command","args","cwd"?,"env"?,"stdin_b64"?,"stdout_path"?,"timeout"?}` → `{"result":{"args","exit_code","stdout_b64","stderr","duration","stdout_path"}}` or `{"error": <QsvError.to_dict()>}` (timeouts, version errors) or `{"os_error": {"errno","strerror","filename"}}`. The run itself uses `check=False`; the client applies `check` |
 | `GET /v1/datasets`, `POST /v1/datasets`, `DELETE /v1/datasets/<id>` | list / register (`path`, `viz_args`, `schematic_path`, `title`, `pid`, `source_url`, `allow_replace`, `force`, `render`) / forget |
-| `GET /v1/pairings`, `POST /v1/pairings/<code>/approve\|deny` | pending pairings / decide |
+| `GET /v1/pairings`, `POST /v1/pairings/<code>/approve\|deny` | pending pairings (`code`, `origin`, `dataset`, `approved`, `denied`, `expires_in` seconds) / decide |
 | `POST /v1/tokens/revoke` | `{"dataset_id"?}` → `{"revoked": n}` |
 
 ### What a schematic embeds
