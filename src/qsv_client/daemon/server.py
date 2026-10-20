@@ -445,10 +445,7 @@ class Daemon:
         except QsvError as exc:
             return Response.json({"error": exc.to_dict()})
         except OSError as exc:  # e.g. an unwritable stdout_path or a missing cwd, as locally
-            filename = exc.filename if isinstance(exc.filename, str) else None
-            return Response.json(
-                {"os_error": {"errno": exc.errno, "strerror": exc.strerror, "filename": filename}}
-            )
+            return Response.json({"os_error": _os_error_dict(exc)})
         return Response.json({"result": _result_dict(result)})
 
     async def _register(self, body: dict[str, Any]) -> Response:
@@ -728,7 +725,9 @@ class Daemon:
                 f"result is {size} bytes, over the {self.config.browser_max_output}-byte limit; "
                 "ask for fewer rows",
             )
-        return path.read_text("utf-8", "replace")
+        # newline="": keep a CR inside a quoted field (read_text would turn CRLF into LF)
+        with path.open(encoding="utf-8", errors="replace", newline="") as fh:
+            return fh.read()
 
     async def _fingerprint(
         self, path: Path, algo: str | None = None, ds: Dataset | None = None
@@ -846,6 +845,15 @@ def _qsv_http_error(exc: QsvError, ds: Dataset | None) -> HttpError:
     err = HttpError(502, "qsv_error", _scrub(exc.message, ds))
     err.code = f"qsv_{exc.kind}"
     return err
+
+
+def _os_error_dict(exc: OSError) -> dict[str, Any]:
+    return {
+        "errno": exc.errno,
+        # an OSError made from just a message has no strerror; keep the message
+        "strerror": exc.strerror if exc.strerror is not None else str(exc),
+        "filename": exc.filename if isinstance(exc.filename, str) else None,
+    }
 
 
 def _parse_csv(text: str, reader: Any) -> list[Any]:

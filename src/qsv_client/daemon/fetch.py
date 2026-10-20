@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import io
 import json
 import os
 import shutil
@@ -82,8 +81,10 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -
         else:
             raise FetchError(422, "bad_source", f"unsupported source scheme {scheme!r}")
 
-        # An error page served as text/plain still "parses" as one-column CSV, so require every
-        # column the data has now (new ones are fine): the viz arguments may name any of them
+        # every record must parse: a truncated download or ragged rows must not replace good data
+        await daemon._browser_run(ds, ["count", str(incoming)])
+        # An error page served as text/plain still "parses" as one-column CSV, so also require
+        # every column the data has now (new ones are fine): the viz arguments may name any
         headers = await _headers(daemon, ds, incoming)
         current = Path(ds.path)
         if not force and current.is_file():
@@ -121,9 +122,14 @@ def _private_temp(directory: Path, suffix: str) -> Path:
 
 
 async def _headers(daemon: Daemon, ds: Dataset, path: Path) -> list[str]:
-    out = await daemon._browser_run(ds, ["slice", "--len", "0", str(path)])
-    rows = list(csv.reader(io.StringIO(out)))
-    return rows[0] if rows else []
+    from .server import _parse_csv  # server imports this module
+
+    with tempfile.TemporaryDirectory(prefix="qsv-clientd-") as tmp:
+        out = Path(tmp) / "headers.csv"
+        await daemon._browser_run(ds, ["slice", "--len", "0", str(path)], stdout_path=out)
+        # capped like any browser result, and parsed allowing fields over csv's default limit
+        rows = _parse_csv(daemon._capped_text(out), csv.reader)
+    return [str(h) for h in rows[0]] if rows else []
 
 
 def _replace_keeping_mode(src: Path, target: Path) -> None:
