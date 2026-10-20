@@ -249,13 +249,18 @@ class Daemon:
             with contextlib.suppress(ConnectionError):
                 await write_response(writer, response)
         finally:
-            self._writers.discard(writer)
             writer.close()
-            # close() flushes first: a peer that stopped reading would hold us here forever
+            # close() flushes first: a peer that stopped reading would hold us here forever.
+            # Stay in _writers until done, so a shutdown that starts meanwhile can abort us
             try:
                 await asyncio.wait_for(writer.wait_closed(), _FLUSH_TIMEOUT)
             except (asyncio.TimeoutError, ConnectionError):
                 writer.transport.abort()
+            except BaseException:  # cancelled by shutdown: don't leave the transport flushing
+                writer.transport.abort()
+                raise
+            finally:
+                self._writers.discard(writer)
 
     async def _until_disconnect(
         self, reader: asyncio.StreamReader, work: Awaitable[Response]
