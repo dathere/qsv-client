@@ -68,6 +68,9 @@ async def _head(raw: bytes) -> Request:
         (b"GET /v1/hello HTTP/1.1\r\nHost : x\r\n\r\n", 400, "malformed header"),
         (b"GET v1/hello HTTP/1.1\r\n\r\n", 400, "must be a path"),
     ],
+    # short ids: pytest puts the test id in PYTEST_CURRENT_TEST, and a 70 KB value is over
+    # Windows' environment variable limit, which kills the test process outright
+    ids=lambda v: v.decode()[:40] if isinstance(v, bytes) else None,
 )
 async def test_malformed_heads_are_refused(raw: bytes, status: int, message: str) -> None:
     with pytest.raises(HttpError, match=message) as info:
