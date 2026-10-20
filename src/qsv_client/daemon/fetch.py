@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from .._process import _finish_despite_cancel
 from .config import ensure_private_dir
-from .registry import Dataset, Fingerprint
+from .registry import Dataset
 
 if TYPE_CHECKING:
     from .server import Daemon
@@ -81,8 +81,8 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str) -> dict[str, A
 
         # a page of HTML or a truncated file must not replace good data
         await daemon._browser_run(ds, ["count", str(incoming)])
-        fp = await asyncio.to_thread(Fingerprint.of, incoming)
-        changed = fp.sha256 != ds.sha256
+        fp = await daemon._fingerprint(incoming, ds.algo, ds)
+        changed = fp.digest != ds.digest
         if ds.allow_replace:
             target = Path(ds.original_path or ds.path)
             await _finish_despite_cancel(asyncio.to_thread(_replace_keeping_mode, incoming, target))
@@ -96,7 +96,7 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str) -> dict[str, A
         daemon.registry.save()
     finally:
         incoming.unlink(missing_ok=True)
-    return {"changed": changed, "sha256": fp.sha256, "bytes": fp.size, "via": via}
+    return {"changed": changed, "fingerprint": fp.public(), "via": via}
 
 
 def _private_temp(directory: Path, suffix: str) -> Path:
