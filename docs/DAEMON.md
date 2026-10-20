@@ -39,7 +39,8 @@ Configuration is optional: `daemon.json` in the config directory
 `%APPDATA%\qsv-client\` on Windows). Keys: `binary`, `port` (default `14470`; `0` turns the
 browser listener off), `socket`, `max_jobs`, `max_timeout`, `inherit_env`, `kill_grace`,
 `browser`, `browser_origins` (default `["null"]`), `browser_timeout`, `browser_max_output`,
-`browser_max_result`, `browser_max_render`, `token_ttl`, `allow_fetch`. Unknown keys are an error.
+`browser_max_result`, `browser_max_render`, `token_ttl`, `allow_fetch`, `fetch_max_bytes`
+(default 10 GiB), `fetch_timeout` (default 1800s). Unknown keys are an error.
 `QSV_CLIENTD_HOME` puts every file under one directory (handy for tests). The socket path
 (`socket`, or `QSV_CLIENTD_SOCKET`) must fit a Unix socket address, about 104 bytes on macOS
 and 108 on Linux; the daemon refuses a longer one with an error naming both settings.
@@ -229,6 +230,12 @@ re-rendering. Flags whose value is a file keep only its basename and are listed 
 - **DOIs.** A DOI is resolved through DataCite content negotiation, looking for a
   `contentUrl`. Most DOIs resolve to a landing page instead, so register `--source-url` for
   those.
+
+A download is limited to `fetch_max_bytes` (10 GiB by default) and `fetch_timeout` (30
+minutes). Over either, it is deleted and the fetch is refused (413 `too_large` or 504
+`download_timeout`), leaving your data as it was. The urllib fallback stops as soon as a
+download passes a limit. qsv's `get` downloads into its own cache, so there the size is
+checked once the download is done, and the time limit is the timeout of the `get` runs.
 
 The download is used only if it has every column the current data has; new columns are fine.
 That keeps an error page served as plain text from replacing your data. If columns were

@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -65,20 +66,22 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -
         url, via = await _resolve(source)
         scheme = urllib.parse.urlsplit(url).scheme.lower()
         caps = await daemon._qsv.capabilities()
+        max_bytes, timeout = daemon.config.fetch_max_bytes, daemon.config.fetch_timeout
         if caps.has_command("get") and (scheme in _QSV_GET_SCHEMES or scheme in ("http", "https")):
             name = f"qsv-clientd-{ds.id}.csv"
+            await daemon._browser_run(ds, ["get", url, "--name", name], timeout=timeout)
             await daemon._browser_run(
-                ds, ["get", url, "--name", name], timeout=daemon.config.max_timeout
+                ds, ["get", "cache-fetch", name, "--output", str(incoming)], timeout=timeout
             )
-            await daemon._browser_run(
-                ds,
-                ["get", "cache-fetch", name, "--output", str(incoming)],
-                timeout=daemon.config.max_timeout,
-            )
+            # qsv downloads it, so the size can only be checked once it is here
+            if incoming.stat().st_size > max_bytes:
+                raise _too_large(max_bytes)
         elif scheme in _QSV_GET_SCHEMES:
             raise FetchError(501, "needs_qsv_get", f"{scheme}:// sources need qsv's `get` command")
         elif scheme in ("http", "https"):
-            await _finish_despite_cancel(asyncio.to_thread(_download, url, incoming))
+            await _finish_despite_cancel(
+                asyncio.to_thread(_download, url, incoming, max_bytes=max_bytes, timeout=timeout)
+            )
         else:
             raise FetchError(422, "bad_source", f"unsupported source scheme {scheme!r}")
 
@@ -208,17 +211,39 @@ def _datacite_content_url(doi: str) -> str | None:
     )
 
 
-def _download(url: str, dest: Path) -> None:
+def _download(url: str, dest: Path, *, max_bytes: int, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=min(_HTTP_TIMEOUT, timeout)) as resp:
             if resp.headers.get_content_type() == "text/html":
                 raise FetchError(422, "not_data", "the source URL serves a web page, not data")
+            length = resp.headers.get("Content-Length", "")
+            if length.isdigit() and int(length) > max_bytes:
+                raise _too_large(max_bytes)
+            # read1 returns whatever has arrived, so a server that trickles bytes can't hold a
+            # read open past the deadline (each read still waits up to the socket timeout)
+            read = getattr(resp, "read1", resp.read)
+            written = 0
             with dest.open("wb") as fh:
-                shutil.copyfileobj(resp, fh, 1 << 20)
+                while chunk := read(1 << 20):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise _too_large(max_bytes)
+                    if time.monotonic() > deadline:
+                        raise FetchError(
+                            504,
+                            "download_timeout",
+                            f"the download took longer than {timeout:g}s (fetch_timeout)",
+                        )
+                    fh.write(chunk)
     except FetchError:
         dest.unlink(missing_ok=True)
         raise
     except OSError as exc:
         dest.unlink(missing_ok=True)
         raise FetchError(502, "download_failed", f"download failed: {exc}") from None
+
+
+def _too_large(max_bytes: int) -> FetchError:
+    return FetchError(413, "too_large", f"the download is over {max_bytes} bytes (fetch_max_bytes)")
