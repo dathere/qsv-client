@@ -164,12 +164,20 @@ def test_macos_redraws_on_the_main_thread_without_a_dock_icon(
     helper.callAfter = queued.append  # type: ignore[attr-defined]
     tools = types.ModuleType("PyObjCTools")
     tools.AppHelper = helper  # type: ignore[attr-defined]
+    foundation = types.ModuleType("Foundation")
+    foundation.NSTimer = types.SimpleNamespace(  # type: ignore[attr-defined]
+        scheduledTimerWithTimeInterval_repeats_block_=lambda interval, repeats, block: calls.append(
+            ("timer", interval, repeats, block(None))
+        )
+    )
+    monkeypatch.setitem(sys.modules, "Foundation", foundation)
     monkeypatch.setitem(sys.modules, "AppKit", appkit)
     monkeypatch.setitem(sys.modules, "PyObjCTools", tools)
     monkeypatch.setitem(sys.modules, "PyObjCTools.AppHelper", helper)
 
     icon = _run(controller, "darwin", monkeypatch)
-    assert calls == [("policy", 1)]
+    # no Dock icon, and a timer so signal handlers get to run inside AppKit's loop
+    assert calls == [("policy", 1), ("timer", 0.5, True, None)]
     controller._set(mode=Mode.ERROR, error="boom")
     assert icon.menu_updates == 0  # queued for the main thread, not done here
     (redraw,) = queued
@@ -196,3 +204,7 @@ def test_state_changes_reach_a_running_icon(
         controller._set(mode=mode)
         assert icon.title == model.title(TrayState(mode))
     assert icon.menu_updates == 3
+
+
+def test_check_passes_with_the_extra(fake_pystray: types.ModuleType) -> None:
+    app.check()

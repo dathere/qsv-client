@@ -30,13 +30,17 @@ def _on_main_thread(fn: Callable[[], None]) -> None:
         fn()
 
 
-def _hide_dock_icon() -> None:
-    # a menu-bar-only app: no Dock icon, no app menu
+def _prepare_macos() -> None:
     import AppKit
+    import Foundation
 
+    # a menu-bar-only app: no Dock icon, no app menu
     AppKit.NSApplication.sharedApplication().setActivationPolicy_(
         AppKit.NSApplicationActivationPolicyAccessory
     )
+    # Python runs signal handlers between bytecodes on the main thread, which AppKit's run
+    # loop never gives it; without this timer SIGTERM (and Ctrl-C) would wait forever
+    Foundation.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(0.5, True, lambda timer: None)
 
 
 def _item(pystray: Any, spec: MenuSpec, controller: Controller) -> Any:
@@ -53,6 +57,13 @@ def _item(pystray: Any, spec: MenuSpec, controller: Controller) -> Any:
     )
 
 
+def check() -> None:
+    """Raise ImportError unless the tray extra (pystray and Pillow) is installed."""
+    import pystray  # noqa: F401
+
+    from . import icons  # noqa: F401
+
+
 def run(controller: Controller) -> None:
     """Show the tray icon and run the GUI loop on this (the main) thread until Quit."""
     import pystray
@@ -67,7 +78,7 @@ def run(controller: Controller) -> None:
         "qsv-clientd", icons.image(model.icon_state(state)), model.title(state), menu=menu
     )
     if sys.platform == "darwin":
-        _hide_dock_icon()
+        _prepare_macos()
 
     def redraw(state: TrayState) -> None:
         icon.icon = icons.image(model.icon_state(state))
