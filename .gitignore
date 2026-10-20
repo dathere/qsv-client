@@ -8,3 +8,7 @@ dist/
 qsv_r*.log
 # roborev snapshots
 /.roborev/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

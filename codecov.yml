@@ -1,0 +1,20 @@
+coverage:
+  status:
+    # The ratchet: fail if total coverage drops below the base commit's.
+    project:
+      default:
+        target: auto
+        threshold: 0.1%
+    # New and changed lines must be fully covered.
+    patch:
+      default:
+        target: 100%
+
+codecov:
+  notify:
+    # 10 POSIX + 5 Windows test jobs; wait for all before posting a status.
+    after_n_builds: 15
+
+comment:
+  layout: "diff, files"
+  require_changes: true
