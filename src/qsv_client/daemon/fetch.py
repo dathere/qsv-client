@@ -233,7 +233,7 @@ def _download(url: str, dest: Path, *, max_bytes: int, timeout: float) -> None:
             length = resp.headers.get("Content-Length", "")
             if length.isdigit() and int(length) > max_bytes:
                 raise _too_large(max_bytes)
-            # read1 returns whatever has arrived, so the deadline is checked as data comes
+            # read1 returns whatever has arrived, so the size is checked as data comes
             read = getattr(resp, "read1", resp.read)
             written = 0
             with dest.open("wb") as fh:
@@ -241,8 +241,6 @@ def _download(url: str, dest: Path, *, max_bytes: int, timeout: float) -> None:
                     written += len(chunk)
                     if written > max_bytes:
                         raise _too_large(max_bytes)
-                    if time.monotonic() > deadline:
-                        raise _timed_out(timeout)
                     fh.write(chunk)
         if watchdog.fired:  # the shut socket can read as a clean end of the data
             raise _timed_out(timeout)

@@ -7,6 +7,7 @@ are redirected to it by a patched ``urllib.request.urlopen``.
 from __future__ import annotations
 
 import contextlib
+import http.client
 import http.server
 import json
 import socket
@@ -14,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
@@ -23,6 +25,7 @@ from typing import Any
 import pytest
 
 from qsv_client.daemon import fetch
+from qsv_client.daemon._http import HttpError
 from qsv_client.daemon.config import DaemonConfig
 from qsv_client.daemon.fetch import FetchError
 from qsv_client.daemon.registry import Dataset, Fingerprint
@@ -631,3 +634,73 @@ async def test_a_qsv_get_past_fetch_timeout_is_a_download_timeout(
     assert time.monotonic() - started < 20
     assert (info.value.status, info.value.code) == (504, "download_timeout")
     assert data.read_text() == "name\nold\n"
+
+
+async def test_a_failed_qsv_get_is_reported_as_it_failed(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path
+) -> None:
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    failing_get = GET_QSV.replace(
+        'if sys.argv[1:3] == ["get", "cache-fetch"]:',
+        'if sys.argv[1] == "get" and sys.argv[2] != "cache-fetch":\n'
+        '    sys.stderr.write("get: 403 Forbidden\\n"); sys.exit(1)\n'
+        'elif sys.argv[1:3] == ["get", "cache-fetch"]:',
+    )
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + failing_get), home)
+    ds = _dataset(daemon, data, source_url="https://example.org/d.csv", allow_replace=True)
+    # not a timeout, so not turned into one
+    with pytest.raises(HttpError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert info.value.status == 502 and info.value.code != "download_timeout"
+    assert "403 Forbidden" in str(info.value)
+    assert data.read_text() == "name\nold\n"
+
+
+def test_the_watchdog_shuts_a_socket_connected_after_it_fired() -> None:
+    watchdog = fetch._Watchdog(0)
+    deadline = time.monotonic() + 5
+    while not watchdog.fired:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        conn = watchdog.watch(http.client.HTTPConnection)(
+            "127.0.0.1", server.getsockname()[1], timeout=5
+        )
+        conn.connect()
+        peer, _ = server.accept()
+        with peer:
+            assert conn.sock is not None
+            conn.sock.settimeout(2)
+            try:
+                got = conn.sock.recv(1)  # shut down: the end of the data at once
+            except TimeoutError:
+                pytest.fail("the socket was not shut")
+            except OSError:
+                got = b""  # Windows reports a shut-down socket as an error instead
+            assert got == b""
+        conn.close()
+
+
+def test_https_connections_go_through_the_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def do_open(self: Any, http_class: Any, req: Any, **kwargs: Any) -> Any:
+        seen["kwargs"] = kwargs
+        seen["conn"] = http_class(req.host, **kwargs)
+        raise urllib.error.URLError("stop before connecting")
+
+    monkeypatch.setattr(urllib.request.AbstractHTTPHandler, "do_open", do_open)
+    watchdog = fetch._Watchdog(60)
+    try:
+        with pytest.raises(urllib.error.URLError):
+            fetch._WatchedHTTPS(watchdog).https_open(
+                urllib.request.Request("https://example.org/d.csv")
+            )
+    finally:
+        watchdog.cancel()
+    # HTTPSHandler's own TLS arguments got through, and the connection is watched
+    assert isinstance(seen["conn"], http.client.HTTPSConnection)
+    assert "context" in seen["kwargs"]
+    assert "connect" in vars(seen["conn"])
