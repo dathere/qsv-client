@@ -6,22 +6,53 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-20
+
+This release adds `qsv-clientd`, a per-user daemon that runs qsv for your own processes and
+lets a Data Schematic from `qsv viz smart` work with its live data.
+
 ### Added
 
-- `qsv-clientd`, a per-user daemon that runs qsv for local processes and for Data
-  Schematics. Local processes connect over a Unix socket, or on Windows over loopback with a
-  per-user token. Data Schematics connect over loopback once paired with a code that you
-  approve. A paired schematic can drill into rows, refresh stats, re-render itself, run
-  allowlisted read-only queries and fetch the latest data. `DaemonClient` and
-  `AsyncDaemonClient` take the same `run()` arguments as `Qsv` and raise the same errors.
-  It uses only the standard library. See `docs/DAEMON.md`.
+- **`qsv-clientd`**, a per-user daemon that runs qsv for local processes and for Data
+  Schematics. It uses only the standard library. See `docs/DAEMON.md`.
+  ([#12](https://github.com/dathere/qsv-client/pull/12), [#13](https://github.com/dathere/qsv-client/pull/13), [#14](https://github.com/dathere/qsv-client/pull/14), [#15](https://github.com/dathere/qsv-client/pull/15), [#16](https://github.com/dathere/qsv-client/pull/16), [#18](https://github.com/dathere/qsv-client/pull/18), [#19](https://github.com/dathere/qsv-client/pull/19))
+  - **Local clients.** Local processes connect over a Unix socket, or on Windows over
+    loopback with a per-user token. `DaemonClient` and `AsyncDaemonClient` take the same
+    `run()` arguments as `Qsv` and raise the same errors, including `QsvTimeout` when no job
+    slot frees up within the timeout and the same `OSError` for an unwritable `stdout_path`.
+    `qsv-clientd run` forwards stdin only with `--stdin` or a `-` argument.
+  - **Live Data Schematics.** A schematic from a qsv newer than 26.0.0 offers to connect.
+    It pairs once you approve its code with `qsv-clientd approve`, which shows the dataset and
+    the request's origin. A paired schematic can drill into the rows behind a chart, refresh
+    its statistics, re-render itself, run allowlisted read-only queries and fetch the latest
+    data. Its Disconnect withdraws the token.
+  - **Large results are paged.** A query result over `browser_max_output` (4 MiB), and the
+    rows behind a chart, are kept by the daemon and read a page at a time. qsv runs each page,
+    search and column sort on the stored file, so every row is reachable.
+    `browser_max_result` (default 1 GiB) caps a stored result.
+  - **Fetching the latest data.** The daemon downloads from a registered source URL or PID,
+    with qsv's `get` where available. It uses the download only if every record parses and
+    every current column is still there; `qsv-clientd fetch --force` accepts renamed or
+    dropped columns. Unless the dataset was registered with `--allow-replace`, the download
+    is kept in the daemon's cache under your file's name and your file is left alone. The
+    schematic and `qsv-clientd datasets` show when the dataset reads that copy.
+  - **Fingerprints.** Data is fingerprinted with BLAKE3 through `qsv blake3`, or with
+    SHA-256 when the binary has no `blake3` (qsvlite).
+  - **Browser security.** The browser tier:
+    - checks `Host` and restricts and rate-limits pairing
+    - stores tokens only as hashes
+    - never takes a path from a page, and allowlists commands and their flags
+    - caps output and bounds connections
+    - removes local paths from error messages
 - `QsvError.to_dict()` and `qsv_client.errors.error_from_dict()`.
 - `QsvDaemonError` and `QsvDaemonUnavailable`.
 
 ### Changed
 
 - A `min_version` that is not a version (`"major.minor.patch"`) now raises `ValueError` when
-  `Qsv` or `AsyncQsv` is created, instead of on every run.
+  `Qsv` or `AsyncQsv` is created, instead of on every run. ([#15](https://github.com/dathere/qsv-client/pull/15))
+- The sdist also contains `docs/`, which holds the daemon's documentation.
+  ([#12](https://github.com/dathere/qsv-client/pull/12))
 
 ## [0.4.0] - 2026-10-15
 
@@ -160,7 +191,8 @@ First release. ([#1](https://github.com/dathere/qsv-client/pull/1))
   environment variables, so keys never appear on the command line.
 - Type hints (`py.typed`), no runtime dependencies, Python 3.10+.
 
-[Unreleased]: https://github.com/dathere/qsv-client/compare/0.4.0...HEAD
+[Unreleased]: https://github.com/dathere/qsv-client/compare/0.5.0...HEAD
+[0.5.0]: https://github.com/dathere/qsv-client/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/dathere/qsv-client/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/dathere/qsv-client/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/dathere/qsv-client/compare/0.1.0...0.2.0
