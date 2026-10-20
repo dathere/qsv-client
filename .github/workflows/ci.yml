@@ -55,6 +55,8 @@ jobs:
         run: QSV_BIN="$RUNNER_TEMP/qsv/qsvdp" uv run pytest -q --cov --cov-append tests/test_integration.py
       - run: uv run coverage xml
       - uses: codecov/codecov-action@v5
+        # an upload or OIDC-token hiccup must not fail the tests; fail_ci_if_error misses the latter
+        continue-on-error: true
         with:
           files: coverage.xml
           # fork PRs get no OIDC token; Codecov takes their uploads tokenless
@@ -99,6 +101,8 @@ jobs:
           uv run pytest -q --cov --cov-append tests/test_integration.py
       - run: uv run coverage xml
       - uses: codecov/codecov-action@v5
+        # an upload or OIDC-token hiccup must not fail the tests; fail_ci_if_error misses the latter
+        continue-on-error: true
         with:
           files: coverage.xml
           # fork PRs get no OIDC token; Codecov takes their uploads tokenless
