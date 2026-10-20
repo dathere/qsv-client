@@ -17,7 +17,12 @@ from qsv_client import (
     QsvVersionError,
 )
 from qsv_client.daemon._http import HttpError, read_body, read_head
-from qsv_client.daemon.allowlist import NotAllowed, build_query, exact_match_regex
+from qsv_client.daemon.allowlist import (
+    NotAllowed,
+    build_query,
+    contains_regex,
+    exact_match_regex,
+)
 from qsv_client.daemon.config import DaemonConfig
 from qsv_client.daemon.pairing import CODE_TTL, MAX_REQUESTS_PER_MINUTE, Pairing
 from qsv_client.daemon.registry import Fingerprint, Registry, SchematicSource
@@ -375,21 +380,11 @@ def test_service_overrides_configured_binary_and_paths(
     assert f"--binary {lite}" in unit
 
 
-@pytest.mark.parametrize(
-    ("text", "truncated", "rows"),
-    [
-        ("h\n1\n2\n", False, [["1"], ["2"]]),
-        ("h\n1\n", True, [["1"]]),  # cut exactly after a record: keep it
-        ("h\n1\r\n", True, [["1"]]),
-        ("h\n1\n2", True, [["1"]]),  # cut inside a record: drop it
-        ('h\n1\n"a\n', True, [["1"]]),  # the line break is inside an open quote
-        ('h\n1\n"a ""b"" c"\n', True, [["1"], ['a "b" c']]),  # escaped quotes pair up
-        ("h\n1\n2�", True, [["1"]]),  # a multibyte character cut in half
-    ],
-)
-def test_query_table_drops_only_a_partial_last_record(
-    text: str, truncated: bool, rows: list[list[str]]
-) -> None:
-    from qsv_client.daemon.server import _table
+def test_contains_regex_is_literal_and_never_a_flag() -> None:
+    import re
 
-    assert _table(text, truncated=truncated) == {"headers": ["h"], "rows": rows}
+    for value in ["-x", "a.b", "(1+1)", "$5 [x]", "~a&b#"]:
+        pattern = contains_regex(value)
+        assert not pattern.startswith("-")
+        assert re.search(pattern, f"before {value} after")
+        assert not re.search(pattern, value.replace(value[0], "z", 1) + "!" if value else "")

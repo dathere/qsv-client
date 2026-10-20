@@ -39,7 +39,7 @@ Configuration is optional: `daemon.json` in the config directory
 `%APPDATA%\qsv-client\` on Windows). Keys: `binary`, `port` (default `14470`; `0` turns the
 browser listener off), `socket`, `max_jobs`, `max_timeout`, `inherit_env`, `kill_grace`,
 `browser`, `browser_origins` (default `["null"]`), `browser_timeout`, `browser_max_output`,
-`browser_max_render`, `token_ttl`, `allow_fetch`. Unknown keys are an error.
+`browser_max_result`, `browser_max_render`, `token_ttl`, `allow_fetch`. Unknown keys are an error.
 `QSV_CLIENTD_HOME` puts every file under one directory (handy for tests). The socket path
 (`socket`, or `QSV_CLIENTD_SOCKET`) must fit a Unix socket address, about 104 bytes on macOS
 and 108 on Linux; the daemon refuses a longer one with an error naming both settings.
@@ -162,11 +162,27 @@ bodies). Daemon refusals are `{"daemon_error": {"code", "message"}}` with a 4xx/
 | Route | Body → reply |
 |---|---|
 | `GET /v1/datasets/<id>` | → `{"id","title","pid","can_fetch","can_render","fingerprint","fetched"}`; `fetched` is true while the dataset reads a fetched copy (see below) |
-| `POST /v1/datasets/<id>/rows` | `{"column"?, "value"?, "offset"=0, "limit"=100 (≤500)}` → `{"headers","rows","offset"}`; with `value`, the rows whose `column` equals it exactly |
+| `POST /v1/datasets/<id>/rows` | `{"column"?, "value"?, "offset"=0, "limit"=100 (≤500)}` → `{"headers","rows","offset","result"?}`; with `value`, the rows whose `column` equals it exactly, also kept as a stored result (below) |
 | `POST /v1/datasets/<id>/refresh` | `{"stats"?: bool}` → `{"changed","fingerprint","rows","stats"?}`; `changed` compares with the data the schematic was rendered from |
-| `POST /v1/datasets/<id>/query` | `{"command","args"}` → `{"stdout","truncated","bytes","headers"?,"rows"?}`; `headers` and `rows` are the parsed output of commands that print CSV (not `count`, `headers`, `table`, or `--json`/`--toon`), without the last, partial record when `truncated` |
+| `POST /v1/datasets/<id>/query` | `{"command","args"}` → `{"stdout","truncated","bytes","headers"?,"rows"?}`; `headers` and `rows` are the parsed output of commands that print CSV (not `count`, `headers`, `table`, or `--json`/`--toon`), without the last, partial record when `truncated`; CSV over `browser_max_output` is kept as a stored result instead: the reply has `"result"` and the first 100 rows, and `stdout` holds the capped text |
+| `POST /v1/datasets/<id>/page` | `{"result", "start"=0, "length"=100 (≤500), "search"?, "order"?: {"column", "desc"}}` → `{"headers","rows","start","total","filtered"}`; 410 `result_gone` if the result was replaced, 409 `result_stale` if the data changed |
 | `POST /v1/datasets/<id>/render` | `{}` → the new schematic HTML (`text/html`); a local caller gets `{"schematic_path","bytes"}` instead. It is also written over the registered schematic file |
 | `POST /v1/datasets/<id>/fetch` | `{}` → `{"changed","fingerprint","via"}`; follow with `render` |
+
+### Stored results
+
+A query result too big to send whole (CSV over `browser_max_output`), and every filtered
+drill-down, is kept on disk so the page can read any page of it. `result` is
+`{"id","total","headers"}`; `/page` reads `length` rows from `start`, after an optional
+`search` (case-insensitive, matching any column) and `order` (natural order on one 0-based
+column). qsv does the work on the stored file: `index` it, `slice` pages, `search` and `sort`
+build the searched and ordered view, rebuilt only when those change.
+
+Each paired page (and the local user) has at most one, in `results/` under the daemon's
+state directory, never beside your data. The next query replaces it, and it is removed when
+its token expires or is revoked, when the dataset is forgotten, and when the daemon stops or
+starts. A stored file over `browser_max_result` (default 1 GiB) is deleted and refused with
+413.
 
 ### Local only
 

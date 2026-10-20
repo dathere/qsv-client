@@ -138,3 +138,54 @@ def test_render(paired: tuple[DaemonThread, str, str, Path], qsv: Qsv, tmp_path:
     assert page.headers["content-type"].startswith("text/html")
     assert schematic.read_bytes() == page.body
     assert schematic.stat().st_mode & 0o777 == 0o644 or schematic.stat().st_mode & 0o044
+
+
+def test_large_query_pages_with_search_and_order(
+    qsv_bin: str, qsv: Qsv, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    missing = [
+        c for c in ("slice", "search", "sort", "count") if not qsv.capabilities.has_command(c)
+    ]
+    if missing:
+        pytest.skip(f"this qsv lacks {', '.join(missing)}")
+    home = Path(tempfile.mkdtemp(prefix="qcd"))
+    monkeypatch.setenv("QSV_CLIENTD_HOME", str(home))
+    monkeypatch.delenv("QSV_CLIENTD_SOCKET", raising=False)
+    config = DaemonConfig(binary=qsv_bin, browser_max_output=4000)
+    d = DaemonThread(Daemon(config, home=home, tcp_port=0)).start()
+    try:
+        data = tmp_path / "people.csv"
+        teams = ["red", "blue", "green"]
+        data.write_text(
+            "id,name,team\n" + "".join(f"{i},person{i},{teams[i % 3]}\n" for i in range(1, 301))
+        )
+        reply = d.http(
+            "POST", "/v1/datasets", {"path": str(data)}, origin=None, token=d.daemon.local_token
+        ).json()
+        ds_id, token = reply["id"], d.pair(reply["digest"])
+        query = d.http(
+            "POST", f"/v1/datasets/{ds_id}/query", {"command": "slice", "args": []}, token=token
+        ).json()
+        assert query["result"]["total"] == 300
+
+        def page(**body: object) -> dict[str, object]:
+            r = d.http(
+                "POST",
+                f"/v1/datasets/{ds_id}/page",
+                {"result": query["result"]["id"], **body},
+                token=token,
+            )
+            assert r.status == 200, r.body
+            out: dict[str, object] = r.json()
+            return out
+
+        assert page(start=295, length=10)["rows"] == [
+            [str(i), f"person{i}", teams[i % 3]] for i in range(296, 301)
+        ]
+        blue = page(length=3, search="BLUE", order={"column": 0, "desc": True})
+        assert blue["filtered"] == 100
+        assert blue["rows"] == [[str(i), f"person{i}", "blue"] for i in (298, 295, 292)]
+        assert page(search="-x")["filtered"] == 0
+    finally:
+        d.stop()
+        shutil.rmtree(home, ignore_errors=True)

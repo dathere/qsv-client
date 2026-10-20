@@ -27,7 +27,7 @@ def _code() -> str:
     return f"{raw[:3]}-{raw[3:]}"
 
 
-def _digest(token: str) -> str:
+def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
@@ -100,7 +100,7 @@ class Pairing:
             return None
         token = secrets.token_urlsafe(32)
         pending.token = token
-        self.grants[_digest(token)] = Grant(
+        self.grants[token_digest(token)] = Grant(
             pending.dataset_id, self._now() + self.token_ttl, pending.origin
         )
         return pending
@@ -128,7 +128,12 @@ class Pairing:
 
     def check(self, token: str) -> Grant | None:
         self._expire()
-        return self.grants.get(_digest(token))
+        return self.grants.get(token_digest(token))
+
+    def live_digests(self) -> set[str]:
+        """The digests of every unexpired token."""
+        self._expire()
+        return set(self.grants)
 
     def revoke_all(self, dataset_id: str | None = None) -> int:
         doomed = [

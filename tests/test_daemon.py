@@ -1117,22 +1117,225 @@ def test_query_returns_rows_for_csv_output(
     assert "rows" not in query("count")
 
 
-def test_truncated_query_drops_the_partial_row(
-    fake_qsv: Callable[[str], str],
-    start_daemon: StartDaemon,
-    data: Path,
-    monkeypatch: pytest.MonkeyPatch,
+# Like qsv on real CSV: enough of count, index, slice, search and sort for stored results
+CSV_QSV = r"""
+import csv, json, re
+def records(path):
+    with open(path, newline="") as fh:
+        return list(csv.reader(fh))
+def write(rows):
+    w = csv.writer(sys.stdout, lineterminator="\n")
+    w.writerows(rows)
+def opt(name, default=None):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+cmd, path = sys.argv[1], sys.argv[-1]
+if cmd == "count":
+    print(max(len(records(path)) - 1, 0))
+elif cmd == "index":
+    open(path + ".idx", "w").write("")
+elif cmd == "slice":
+    rows = records(path)
+    start = int(opt("--start", 0))
+    length = opt("--len")
+    body = rows[1:][start:] if length is None else rows[1:][start:start + int(length)]
+    write(rows[:1] + body)
+elif cmd == "search":
+    rows = records(path)
+    pattern = sys.argv[-2]
+    flags = re.IGNORECASE if "--ignore-case" in sys.argv or "-i" in sys.argv else 0
+    col = opt("--select")
+    idx = rows[0].index(col.strip('"')) if col else None
+    hits = [r for r in rows[1:]
+            if any(re.search(pattern, v, flags) for v in (r if idx is None else [r[idx]]))]
+    if not hits:
+        sys.stderr.write(json.dumps({"error": {"kind": "no_match", "message": "no match",
+                                               "exit_code": 1, "command": "search"}}) + "\n")
+        sys.exit(1)
+    write(rows[:1] + hits)
+elif cmd == "sort":
+    rows = records(path)
+    i = int(opt("--select")) - 1
+    natural = lambda v: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", v)]
+    write(rows[:1] + sorted(rows[1:], key=lambda r: natural(r[i]), reverse="--reverse" in sys.argv))
+else:
+    sys.exit(2)
+"""
+
+
+def _people(path: Path, n: int) -> Path:
+    path.parent.mkdir(exist_ok=True)
+    teams = ["red", "blue", "green"]
+    lines = ["id,name,team"] + [f"{i},person{i},{teams[i % 3]}" for i in range(1, n + 1)]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_large_query_is_paged_searched_and_ordered(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("FAKE_ROWS", "1000")
-    d = start_daemon(_script(fake_qsv, TABLE_QSV), browser_max_output=4000)
+    data = _people(tmp_path / "data" / "people.csv", 300)
+    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000)
     ds_id = _register(d, data)
     token = d.pair(_sha(data))
     reply = d.http(
         "POST", f"/v1/datasets/{ds_id}/query", {"command": "slice", "args": []}, token=token
     ).json()
     assert reply["truncated"] is True
-    assert 0 < len(reply["rows"]) < 1000
-    assert all(row == [f"row{i - 1}", "x" * 50] for i, row in enumerate(reply["rows"]) if i)
+    result = reply["result"]
+    assert result["total"] == 300 and result["headers"] == ["id", "name", "team"]
+    assert reply["rows"][0] == ["1", "person1", "blue"] and len(reply["rows"]) == 100
+
+    def page(**body: object) -> dict[str, Any]:
+        r = d.http(
+            "POST", f"/v1/datasets/{ds_id}/page", {"result": result["id"], **body}, token=token
+        )
+        assert r.status == 200, r.body
+        out: dict[str, Any] = r.json()
+        return out
+
+    last = page(start=290, length=20)
+    assert [r[0] for r in last["rows"]] == [str(i) for i in range(291, 301)]
+    assert (last["total"], last["filtered"]) == (300, 300)
+    # search is case-insensitive and across columns; order is natural, on the searched rows
+    blue = page(start=0, length=5, search="BLUE", order={"column": 0, "desc": True})
+    assert blue["filtered"] == 100
+    assert [r[0] for r in blue["rows"]] == ["298", "295", "292", "289", "286"]
+    # a value that starts with - is searched for, not read as a flag
+    assert page(search="-x")["filtered"] == 0
+    assert page(search="person3")["filtered"] == 12  # 3, 30-39, 300
+    # one stored result per page, in the daemon's own directory
+    results = d.daemon.home / "results"
+    assert len(list(results.iterdir())) == 1
+    assert sorted(p.name for p in data.parent.iterdir()) == ["people.csv"]
+
+
+def test_stored_results_are_replaced_capped_and_go_stale(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    data = _people(tmp_path / "data" / "people.csv", 300)
+    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000)
+    ds_id = _register(d, data)
+    token = d.pair(_sha(data))
+
+    def query() -> str:
+        reply = d.http(
+            "POST", f"/v1/datasets/{ds_id}/query", {"command": "slice", "args": []}, token=token
+        )
+        assert reply.status == 200, reply.body
+        rid: str = reply.json()["result"]["id"]
+        return rid
+
+    def page(rid: str) -> int:
+        return d.http("POST", f"/v1/datasets/{ds_id}/page", {"result": rid}, token=token).status
+
+    first = query()
+    second = query()
+    assert page(first) == 410  # replaced by the newer query
+    assert page(second) == 200
+    # the data changed (as after Fetch latest): the stored result is stale
+    ds = d.daemon.registry.datasets[ds_id]
+    ds.digest = "0" * 64
+    assert page(second) == 409
+
+    # over browser_max_result: refused, and nothing is left behind
+    small = start_daemon(
+        _script(fake_qsv, CSV_QSV), browser_max_output=4000, browser_max_result=1000
+    )
+    small_id = _register(small, data)
+    small_token = small.pair(_sha(data))
+    big = small.http(
+        "POST",
+        f"/v1/datasets/{small_id}/query",
+        {"command": "slice", "args": []},
+        token=small_token,
+    )
+    assert big.status == 413, big.body
+    assert not any((small.daemon.home / "results").rglob("*.csv"))
+
+
+def test_stored_results_are_removed_with_their_page(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    data = _people(tmp_path / "data" / "people.csv", 300)
+    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000)
+    ds_id = _register(d, data)
+    results = d.daemon.home / "results"
+
+    def store(token: str) -> None:
+        reply = d.http(
+            "POST", f"/v1/datasets/{ds_id}/query", {"command": "slice", "args": []}, token=token
+        )
+        assert reply.status == 200, reply.body
+
+    store(d.pair(_sha(data)))
+    store(d.pair(_sha(data)))
+    assert len(list(results.iterdir())) == 2  # one per paired page
+    revoked = d.http("POST", "/v1/tokens/revoke", {}, origin=None, token=d.daemon.local_token)
+    assert revoked.status == 200
+    assert list(results.iterdir()) == []
+    store(d.pair(_sha(data)))
+    forgot = d.http("DELETE", f"/v1/datasets/{ds_id}", origin=None, token=d.daemon.local_token)
+    assert forgot.status == 200
+    assert list(results.iterdir()) == []
+    # a result left on disk by an earlier run belongs to no page: cleared at startup
+    (results / "orphan").mkdir()
+    again = start_daemon(_script(fake_qsv, CSV_QSV))
+    assert again.daemon.home == d.daemon.home
+    assert not (results / "orphan").exists()
+
+
+def test_drill_down_pages_past_its_limit(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    data = _people(tmp_path / "data" / "people.csv", 1800)
+    d = start_daemon(_script(fake_qsv, CSV_QSV))
+    ds_id = _register(d, data)
+    token = d.pair(_sha(data))
+    reply = d.http(
+        "POST",
+        f"/v1/datasets/{ds_id}/rows",
+        {"column": "team", "value": "red", "limit": 500},
+        token=token,
+    ).json()
+    assert len(reply["rows"]) == 500 and reply["result"]["total"] == 600
+    rest = d.http(
+        "POST",
+        f"/v1/datasets/{ds_id}/page",
+        {"result": reply["result"]["id"], "start": 500, "length": 500},
+        token=token,
+    ).json()
+    assert len(rest["rows"]) == 100
+    assert all(r[2] == "red" for r in rest["rows"])
+
+
+def test_concurrent_pages_each_match_their_own_search(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    data = _people(tmp_path / "data" / "people.csv", 300)
+    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000)
+    ds_id = _register(d, data)
+    token = d.pair(_sha(data))
+    rid = d.http(
+        "POST", f"/v1/datasets/{ds_id}/query", {"command": "slice", "args": []}, token=token
+    ).json()["result"]["id"]
+    searches = ["red", "blue", "green", "person1", "red", ""] * 3
+
+    def page(term: str) -> tuple[str, dict[str, Any]]:
+        r = d.http(
+            "POST",
+            f"/v1/datasets/{ds_id}/page",
+            {"result": rid, "search": term, "length": 50},
+            token=token,
+        )
+        assert r.status == 200, r.body
+        return term, r.json()
+
+    with ThreadPoolExecutor(6) as pool:
+        for term, reply in pool.map(page, searches):
+            assert len(reply["rows"]) == min(50, reply["filtered"])
+            assert all(term in ",".join(row) for row in reply["rows"])
 
 
 def test_fetched_copy_keeps_the_file_name_and_is_reported(
