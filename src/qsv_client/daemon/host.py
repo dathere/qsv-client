@@ -17,7 +17,7 @@ from .server import Daemon
 
 _START_TIMEOUT = 60.0
 _STOP_TIMEOUT = 30.0
-"""Seconds to wait for the daemon to close, on top of its kill_grace."""
+"""Seconds to wait for the daemon to close, on top of twice its kill_grace."""
 
 
 class DaemonHost:
@@ -81,7 +81,8 @@ class DaemonHost:
         done = None
         if self._error is None and self.loop.is_running():
             done = asyncio.run_coroutine_threadsafe(self._shutdown(), self.loop)
-        timeout = _STOP_TIMEOUT + self.daemon.config.kill_grace
+        # killing a run's process tree can wait kill_grace after SIGTERM and again after SIGKILL
+        timeout = _STOP_TIMEOUT + 2 * self.daemon.config.kill_grace
         self._thread.join(timeout)
         if self._thread.is_alive():
             raise TimeoutError(f"qsv-clientd did not stop within {timeout:.0f}s")

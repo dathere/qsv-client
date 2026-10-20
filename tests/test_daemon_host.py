@@ -123,13 +123,13 @@ def test_stop_times_out_on_a_stuck_close(
     real_close = host.daemon.close
 
     async def slow_close() -> None:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.5)
         await real_close()
 
     monkeypatch.setattr(host.daemon, "close", slow_close)
     monkeypatch.setattr(host_mod, "_STOP_TIMEOUT", 0.0)
-    host.daemon.config.kill_grace = 0.05
-    with pytest.raises(TimeoutError, match="did not stop"):
+    host.daemon.config.kill_grace = 0.4  # waited twice: before and after SIGKILL
+    with pytest.raises(TimeoutError, match=r"did not stop within 1s"):
         host.stop()
     host._thread.join(30)  # the loop still stops once close() is done
     assert host.loop.is_closed()
