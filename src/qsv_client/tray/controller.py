@@ -159,18 +159,20 @@ class Controller:
             self._attached(client)
             return
         self._set(mode=Mode.STARTING, status=None, busy=None, error=None)
-        host = DaemonHost(self._make_daemon())
+        # kept before start(): a start that times out may still finish, and must be stopped
+        self._host = host = DaemonHost(self._make_daemon())
         host.start()
-        self._host = host
         self._client = host.client()
         self._set(mode=Mode.HOSTED, status=self._status(self._client), service=None)
         log.info("hosting qsv-clientd")
 
     def _stop_host(self) -> None:
-        host, self._host = self._host, None
+        host = self._host
         if host is not None:
             self._client = None
+            # forgotten only once stopped: after a stop that timed out, Retry and Quit try again
             host.stop()
+            self._host = None
             log.info("stopped the hosted qsv-clientd")
 
     def _stop(self) -> None:

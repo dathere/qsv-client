@@ -15,6 +15,7 @@ from daemon_helpers import DaemonThread
 
 from qsv_client.daemon.client import DaemonClient
 from qsv_client.daemon.config import DaemonConfig
+from qsv_client.daemon.host import DaemonHost
 from qsv_client.daemon.server import Daemon
 from qsv_client.errors import QsvDaemonUnavailable, QsvNotFound
 from qsv_client.tray import controller as controller_mod
@@ -300,6 +301,58 @@ def test_shutdown_logs_a_failed_stop(
     with caplog.at_level(logging.ERROR, logger="qsv_client.tray"):
         c.shutdown()
     assert "stopping qsv-clientd failed" in caplog.text
+
+
+class SlowHost(DaemonHost):
+    """A host whose first start (or stop) times out, though the daemon goes on running."""
+
+    start_times_out = False
+    stop_times_out = False
+
+    def start(self) -> DaemonHost:
+        super().start()
+        if SlowHost.start_times_out:
+            SlowHost.start_times_out = False
+            raise TimeoutError("qsv-clientd did not start within 60s")
+        return self
+
+    def stop(self) -> None:
+        if SlowHost.stop_times_out:
+            SlowHost.stop_times_out = False
+            raise TimeoutError("qsv-clientd did not stop within 40s")
+        super().stop()
+
+
+@pytest.fixture
+def slow_host(monkeypatch: pytest.MonkeyPatch) -> type[SlowHost]:
+    monkeypatch.setattr(controller_mod, "DaemonHost", SlowHost)
+    SlowHost.start_times_out = SlowHost.stop_times_out = False
+    return SlowHost
+
+
+def test_a_start_that_timed_out_is_still_stopped(
+    make_controller: MakeController, slow_host: type[SlowHost], home: Path
+) -> None:
+    slow_host.start_times_out = True
+    c = make_controller()
+    state = _do(c, model.START)
+    assert state.mode is Mode.ERROR and state.error == "qsv-clientd did not start within 60s"
+    assert c._host is not None  # it may come up yet: keep it to stop
+    assert _do(c, model.RETRY).mode is Mode.HOSTED
+    c.shutdown()
+    assert not (home / "run" / "local-token").exists()
+
+
+def test_a_stop_that_timed_out_is_tried_again(
+    make_controller: MakeController, slow_host: type[SlowHost], home: Path
+) -> None:
+    c = make_controller()
+    _do(c, model.START)
+    slow_host.stop_times_out = True
+    assert _do(c, model.STOP).mode is Mode.ERROR
+    assert c._host is not None and (home / "run" / "local-token").exists()
+    c.shutdown()
+    assert c._host is None and not (home / "run" / "local-token").exists()
 
 
 def test_the_default_daemon_reads_daemon_json(home: Path, fake_qsv: Callable[[str], str]) -> None:
