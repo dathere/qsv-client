@@ -1119,7 +1119,7 @@ def test_query_returns_rows_for_csv_output(
 
 # Like qsv on real CSV: enough of count, index, slice, search and sort for stored results
 CSV_QSV = r"""
-import csv, json, re
+import csv, json, re, time
 def records(path):
     with open(path, newline="") as fh:
         return list(csv.reader(fh))
@@ -1134,6 +1134,8 @@ if cmd == "count":
 elif cmd == "index":
     open(path + ".idx", "w").write("")
 elif cmd == "slice":
+    if os.environ.get("FAKE_SLOW") and "--start" not in sys.argv:  # the query, not a page
+        time.sleep(1.5)
     rows = records(path)
     start = int(opt("--start", 0))
     length = opt("--len")
@@ -1232,10 +1234,17 @@ def test_stored_results_are_replaced_capped_and_go_stale(
     second = query()
     assert page(first) == 410  # replaced by the newer query
     assert page(second) == 200
-    # the data changed (as after Fetch latest): the stored result is stale
-    ds = d.daemon.registry.datasets[ds_id]
-    ds.digest = "0" * 64
+    # the file changed in place (an edit, or a fetch with --allow-replace): the result is stale
+    with data.open("a") as fh:
+        fh.write("301,person301,red\n")
     assert page(second) == 409
+    # a query that stores nothing still replaces the previous result
+    third = query()
+    counted = d.http(
+        "POST", f"/v1/datasets/{ds_id}/query", {"command": "count", "args": []}, token=token
+    )
+    assert counted.status == 200, counted.body
+    assert page(third) == 410
 
     # over browser_max_result: refused, and nothing is left behind
     small = start_daemon(
@@ -1438,3 +1447,107 @@ def test_disconnect_withdraws_only_that_page(
     )
     assert local.json() == {"revoked": 0}
     assert len(list(results.iterdir())) == 1
+
+
+def test_first_page_over_the_cap_still_returns_the_result(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    data = tmp_path / "data" / "wide.csv"
+    data.parent.mkdir()
+    data.write_text("id,blob\n" + "".join(f"{i},{'x' * 400}\n" for i in range(300)))
+    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=8000)
+    ds_id = _register(d, data)
+    token = d.pair(_sha(data))
+    reply = d.http(
+        "POST", f"/v1/datasets/{ds_id}/query", {"command": "slice", "args": []}, token=token
+    )
+    assert reply.status == 200, reply.body
+    body = reply.json()
+    # 100 rows of 400 bytes don't fit 8000 bytes: no first page, but the result to page
+    assert "rows" not in body and body["result"]["total"] == 300
+    small = d.http(
+        "POST",
+        f"/v1/datasets/{ds_id}/page",
+        {"result": body["result"]["id"], "length": 10},
+        token=token,
+    )
+    assert small.status == 200 and len(small.json()["rows"]) == 10
+
+
+def test_no_result_is_kept_for_a_page_gone_while_its_query_ran(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setenv("FAKE_SLOW", "1")
+    data = _people(tmp_path / "data" / "people.csv", 300)
+    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000)
+    ds_id = _register(d, data)
+    results = d.daemon.home / "results"
+
+    def slow_query(token: str, origin: str | None = "null") -> int:
+        return d.http(
+            "POST",
+            f"/v1/datasets/{ds_id}/query",
+            {"command": "slice", "args": []},
+            origin=origin,
+            token=token,
+        ).status
+
+    with ThreadPoolExecutor(1) as pool:
+        # the page disconnects while its query runs
+        token = d.pair(_sha(data))
+        running = pool.submit(slow_query, token)
+        time.sleep(0.5)
+        assert d.http("POST", f"/v1/datasets/{ds_id}/disconnect", {}, token=token).status == 200
+        assert running.result() == 410
+        assert list(results.iterdir()) == []
+        # the dataset is forgotten while a local query runs
+        running = pool.submit(slow_query, d.daemon.local_token, None)
+        time.sleep(0.5)
+        forgot = d.http("DELETE", f"/v1/datasets/{ds_id}", origin=None, token=d.daemon.local_token)
+        assert forgot.status == 200
+        assert running.result() == 410
+        assert list(results.iterdir()) == []
+
+
+def test_expired_tokens_results_are_swept(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from qsv_client.daemon import server
+
+    data = _people(tmp_path / "data" / "people.csv", 300)
+    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000, token_ttl=1.0)
+    ds_id = _register(d, data)
+    results = d.daemon.home / "results"
+    token = d.pair(_sha(data))
+    reply = d.http(
+        "POST", f"/v1/datasets/{ds_id}/query", {"command": "slice", "args": []}, token=token
+    )
+    assert reply.status == 200, reply.body
+    # any request sweeps, even one whose token has expired
+    time.sleep(1.2)
+    assert d.http("GET", "/v1/hello").status == 200
+    assert list(results.iterdir()) == []
+
+    # and so does the daemon when no request comes
+    monkeypatch.setattr(server, "_SWEEP_EVERY", 0.2)
+    idle = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000, token_ttl=1.0)
+    idle_id = _register(idle, data)
+    token = idle.pair(_sha(data))
+    reply = idle.http(
+        "POST", f"/v1/datasets/{idle_id}/query", {"command": "slice", "args": []}, token=token
+    )
+    assert reply.status == 200, reply.body
+    idle_results = idle.daemon.home / "results"
+    assert len(list(idle_results.iterdir())) == 1
+    deadline = time.monotonic() + 5
+    while list(idle_results.iterdir()):
+        assert time.monotonic() < deadline, "the idle sweep never ran"
+        time.sleep(0.1)

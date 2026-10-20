@@ -56,7 +56,7 @@ from .config import (
 )
 from .pairing import Pairing, token_digest
 from .registry import Dataset, Fingerprint, Registry, SchematicSource, validate_viz_args
-from .results import LOCAL_KEY, ResultStore, key_for_grant
+from .results import LOCAL_KEY, ResultStore, Stored, key_for_grant
 
 log = logging.getLogger("qsv_client.daemon")
 
@@ -65,6 +65,7 @@ _LOCAL_BODY_LIMIT = 64 * 1024 * 1024
 _BROWSER_BODY_LIMIT = 64 * 1024
 _MAX_ROWS = 500
 _PAGE_ROWS = 100  # a stored result's first page, and /page's default length
+_SWEEP_EVERY = 300.0  # seconds between sweeps of expired tokens' stored results
 _HEAD_TIMEOUT = 10.0
 """Seconds a client gets to send its request head; an idle connection can't hold us forever."""
 _BODY_TIMEOUT = 60.0
@@ -106,6 +107,7 @@ class Daemon:
         self._fetch_locks: dict[str, asyncio.Lock] = {}
         self.results = ResultStore(self)
         self._started = False
+        self._sweeper: asyncio.Task[None] | None = None
         self._qsv = self._client()
 
     # -- lifecycle -------------------------------------------------------------------------
@@ -125,6 +127,7 @@ class Daemon:
         # once bound: a second instance must not touch the running daemon's results.
         self.results.clear()
         self._started = True
+        self._sweeper = asyncio.create_task(self._sweep_forever())
         token_file = (
             local_token_path()
             if self._socket_path == self.config.socket_path()
@@ -134,6 +137,12 @@ class Daemon:
         self._token_file = token_file
         info = {"pid": os.getpid(), "port": self.port, "socket": str(self._socket_path)}
         write_private_file(token_file.parent / "daemon.json", json.dumps(info).encode())
+
+    async def _sweep_forever(self) -> None:
+        """Remove expired tokens' results even while no request arrives to trigger it."""
+        while True:
+            await asyncio.sleep(_SWEEP_EVERY)
+            self.results.sweep(self.pairing.live_digests())
 
     async def _bind(self) -> None:
         if sys.platform != "win32":
@@ -185,6 +194,8 @@ class Daemon:
         raise RuntimeError(f"another qsv-clientd is already listening on {self._socket_path}")
 
     async def close(self) -> None:
+        if self._sweeper is not None:
+            self._sweeper.cancel()
         await self._close_servers()
         if self._started:
             self.results.clear()
@@ -369,6 +380,8 @@ class Daemon:
             raise HttpError(404, "not_found", "unknown route")
         route = parts[1:]
         method = request.method
+        # results of expired or revoked tokens: before authorizing, which their pages now fail
+        self.results.sweep(self.pairing.live_digests())
         match route:
             case ["hello"] if method == "GET":
                 return Response.json({"service": "qsv-clientd", "api": API_VERSION})
@@ -390,7 +403,6 @@ class Daemon:
                 handler = self._dataset_actions.get(action)
                 if handler is None:
                     raise HttpError(404, "not_found", f"unknown dataset action {action!r}")
-                self.results.sweep(self.pairing.live_digests())
                 return await handler(self, ds, request.json(), tier, _result_key(request, tier))
         if tier != "local":
             raise HttpError(401, "unauthorized", "this route is only for local clients")
@@ -633,17 +645,16 @@ class Daemon:
 
             # kept, so the page can read the matches a page at a time without searching again
             stored = await self.results.create(key, ds, matches)
-            page = await self.results.page(
-                key, ds, stored.id, start=offset, length=limit, search="", order=None
-            )
+            first = await self._first_page(key, ds, stored, offset, limit)
             return Response.json(
                 {
                     "headers": stored.headers,
-                    "rows": page["rows"],
+                    "rows": first.get("rows", []),
                     "offset": offset,
                     "result": stored.public(),
                 }
             )
+        self.results.discard(key)
         with tempfile.TemporaryDirectory(prefix="qsv-clientd-") as tmp:
             out = Path(tmp) / "slice.csv"
             await self._browser_run(
@@ -695,13 +706,28 @@ class Daemon:
             if is_csv and truncated:
                 # too big to send whole: keep it, and let the page read it a page at a time
                 stored = await self.results.adopt(key, ds, out)
-                first = await self.results.page(
-                    key, ds, stored.id, start=0, length=_PAGE_ROWS, search="", order=None
-                )
-                reply.update(headers=stored.headers, rows=first["rows"], result=stored.public())
-            elif is_csv:
-                reply.update(_table(text))
+                reply["result"] = stored.public()
+                reply.update(await self._first_page(key, ds, stored, 0, _PAGE_ROWS))
+            else:
+                self.results.discard(key)
+                if is_csv:
+                    reply.update(_table(text))
         return Response.json(reply)
+
+    async def _first_page(
+        self, key: str, ds: Dataset, stored: Stored, start: int, length: int
+    ) -> dict[str, Any]:
+        """A stored result's first page, or none when it is over the response cap: the reply
+        still carries the result, so the page can ask for smaller pages."""
+        try:
+            page = await self.results.page(
+                key, ds, stored.id, start=start, length=length, search="", order=None
+            )
+        except HttpError as exc:
+            if exc.code != "too_large":
+                raise
+            return {}
+        return {"headers": stored.headers, "rows": page["rows"]}
 
     async def _page(self, ds: Dataset, body: dict[str, Any], tier: Tier, key: str) -> Response:
         start = _int(body.get("start", 0), "start", 0, 2**62)

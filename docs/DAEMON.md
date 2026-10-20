@@ -164,7 +164,7 @@ bodies). Daemon refusals are `{"daemon_error": {"code", "message"}}` with a 4xx/
 | `GET /v1/datasets/<id>` | → `{"id","title","pid","can_fetch","can_render","fingerprint","fetched"}`; `fetched` is true while the dataset reads a fetched copy (see below) |
 | `POST /v1/datasets/<id>/rows` | `{"column"?, "value"?, "offset"=0, "limit"=100 (≤500)}` → `{"headers","rows","offset","result"?}`; with `value`, the rows whose `column` equals it exactly, also kept as a stored result (below) |
 | `POST /v1/datasets/<id>/refresh` | `{"stats"?: bool}` → `{"changed","fingerprint","rows","stats"?}`; `changed` compares with the data the schematic was rendered from |
-| `POST /v1/datasets/<id>/query` | `{"command","args"}` → `{"stdout","truncated","bytes","headers"?,"rows"?}`; `headers` and `rows` are the parsed output of commands that print CSV (not `count`, `headers`, `table`, or `--json`/`--toon`), without the last, partial record when `truncated`; CSV over `browser_max_output` is kept as a stored result instead: the reply has `"result"` and the first 100 rows, and `stdout` holds the capped text |
+| `POST /v1/datasets/<id>/query` | `{"command","args"}` → `{"stdout","truncated","bytes","headers"?,"rows"?}`; `headers` and `rows` are the parsed output of commands that print CSV (not `count`, `headers`, `table`, or `--json`/`--toon`), without the last, partial record when `truncated`; CSV over `browser_max_output` is kept as a stored result instead: the reply has `"result"` and, when they fit the cap, the first 100 rows, and `stdout` holds the capped text |
 | `POST /v1/datasets/<id>/page` | `{"result", "start"=0, "length"=100 (≤500), "search"?, "order"?: {"column", "desc"}}` → `{"headers","rows","start","total","filtered"}`; 410 `result_gone` if the result was replaced, 409 `result_stale` if the data changed |
 | `POST /v1/datasets/<id>/render` | `{}` → the new schematic HTML (`text/html`); a local caller gets `{"schematic_path","bytes"}` instead. It is also written over the registered schematic file |
 | `POST /v1/datasets/<id>/fetch` | `{}` → `{"changed","fingerprint","via"}`; follow with `render` |
@@ -180,9 +180,12 @@ column). qsv does the work on the stored file: `index` it, `slice` pages, `searc
 build the searched and ordered view, rebuilt only when those change.
 
 Each paired page (and the local user) has at most one, in `results/` under the daemon's
-state directory, never beside your data. The next query replaces it, and it is removed when
-its page disconnects, when its token expires or is revoked, when the dataset is forgotten,
-and when the daemon stops or starts. A stored file over `browser_max_result` (default 1 GiB) is deleted and refused with
+state directory, never beside your data. The next query or drill-down replaces it, even one that
+stores nothing. It is removed when its page disconnects or its token is revoked, within five
+minutes of the token expiring, when the dataset is forgotten, and when the daemon stops or
+starts. A result whose page disconnected, or whose dataset was forgotten, while qsv was
+still producing it is discarded (410). It goes stale (409) when the file it came from changes
+size or modification time, as with an edit or a fetch with `--allow-replace`. A stored file over `browser_max_result` (default 1 GiB) is deleted and refused with
 413.
 
 ### Local only

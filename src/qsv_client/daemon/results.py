@@ -53,7 +53,7 @@ class Stored:
     key: str
     dataset_id: str
     data_path: str  # the dataset file it was computed from
-    digest: str
+    data_version: tuple[int, int] | None  # its size and mtime then
     directory: Path
     headers: list[str]
     total: int
@@ -96,6 +96,10 @@ class ResultStore:
         for key in [k for k, r in self._results.items() if r.dataset_id == dataset_id]:
             self._drop(key)
 
+    def discard(self, key: str) -> None:
+        """Forget ``key``'s result: its next query stored nothing to replace it with."""
+        self._drop(key)
+
     def _drop(self, key: str) -> None:
         stored = self._results.pop(key, None)
         if stored is not None:
@@ -115,7 +119,8 @@ class ResultStore:
                 key=key,
                 dataset_id=ds.id,
                 data_path=ds.path,
-                digest=ds.digest,
+                # before qsv reads it, so a change while it runs makes the result stale too
+                data_version=_version(ds.path),
                 directory=directory,
                 headers=[],
                 total=0,
@@ -129,8 +134,18 @@ class ResultStore:
             except BaseException:
                 shutil.rmtree(directory, ignore_errors=True)
                 raise
+            if not self._publishable(key, ds):
+                # the page disconnected, or the dataset was forgotten, while qsv ran
+                shutil.rmtree(directory, ignore_errors=True)
+                raise HttpError(410, "result_gone", "the page disconnected while this ran")
             self._results[key] = stored
             return stored
+
+    def _publishable(self, key: str, ds: Dataset) -> bool:
+        if self._daemon.registry.datasets.get(ds.id) is None:
+            return False
+        live = {key_for_grant(d) for d in self._daemon.pairing.live_digests()}
+        return key == LOCAL_KEY or key in live
 
     async def adopt(self, key: str, ds: Dataset, path: Path) -> Stored:
         """Store a CSV file qsv already wrote (it is moved, not copied when on one disk)."""
@@ -157,7 +172,7 @@ class ResultStore:
             stored = self._results.get(key)
             if stored is None or result_id != stored.id or stored.dataset_id != ds.id:
                 raise HttpError(410, "result_gone", "that result was replaced; run the query again")
-            if (stored.data_path, stored.digest) != (ds.path, ds.digest):
+            if (stored.data_path, stored.data_version) != (ds.path, _version(ds.path)):
                 raise HttpError(409, "result_stale", "the data changed; run the query again")
             if order is not None and not 0 <= order[0] < len(stored.headers):
                 raise HttpError(422, "bad_request", "order column is out of range")
@@ -262,3 +277,12 @@ class ResultStore:
         finally:
             page.unlink(missing_ok=True)
         return records if with_headers else records[1:]
+
+
+def _version(path: str) -> tuple[int, int] | None:
+    """What changes when a file is rewritten in place (a fetch with --allow-replace, an edit)."""
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
