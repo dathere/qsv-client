@@ -56,6 +56,18 @@ def default_socket_path() -> Path:
     return Path(os.environ.get("QSV_CLIENTD_SOCKET") or runtime_dir() / "qsvd.sock")
 
 
+def socket_path_error(path: str | os.PathLike[str], exc: OSError) -> str | None:
+    """The message for a socket path too long for AF_UNIX (about 104 bytes on macOS, 108 on
+    Linux), or None when ``exc`` is some other error. CPython reports it without an errno."""
+    if exc.errno is not None or "path too long" not in str(exc):
+        return None
+    return (
+        f"the socket path {os.fspath(path)} is too long for a Unix socket "
+        f"({len(os.fsencode(path))} bytes); set QSV_CLIENTD_SOCKET, or `socket` in "
+        "daemon.json, to a shorter path"
+    )
+
+
 def local_token_path() -> Path:
     return runtime_dir() / "local-token"
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -905,7 +906,7 @@ def test_cancelled_fetch_leaves_no_staging_files(
         # the next fetch is not overtaken by the cancelled one
         again = d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token)
         assert again.status == 200, again.body
-        assert [p.name for p in cache.iterdir()] == ["data.csv"]
+        assert [p.name for p in cache.iterdir()] == ["d.csv"]
     finally:
         server.close()
 
@@ -1052,3 +1053,131 @@ def test_shutdown_aborts_a_connection_stuck_flushing_in_cleanup(
     d.stop()
     assert time.monotonic() - started < 10
     s.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix socket")
+def test_socket_path_too_long_is_a_clear_error(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    long_path = tmp_path / ("x" * 120) / "qsvd.sock"
+    daemon = Daemon(
+        DaemonConfig(binary=_script(fake_qsv, ECHO)),
+        home=tmp_path,
+        tcp_port=0,
+        socket_path=long_path,
+    )
+    with pytest.raises(ValueError, match=r"too long for a Unix socket.*QSV_CLIENTD_SOCKET"):
+        DaemonThread(daemon).start()
+    with pytest.raises(QsvDaemonError, match="QSV_CLIENTD_SOCKET"):
+        DaemonClient(socket_path=long_path).status()
+    with pytest.raises(QsvDaemonError, match="QSV_CLIENTD_SOCKET"):
+        asyncio.run(AsyncDaemonClient(socket_path=long_path).status())
+
+
+# CSV on stdout like qsv: a quoted field with a line break, and many rows to truncate
+TABLE_QSV = """
+import csv, io
+if sys.argv[1] == "count":
+    print(3)
+    sys.exit(0)
+buf = io.StringIO()
+w = csv.writer(buf, lineterminator="\\n")
+w.writerow(["field", "note"])
+w.writerow(["a", "two\\nlines"])
+for i in range(int(os.environ.get("FAKE_ROWS", "1"))):
+    w.writerow([f"row{i}", "x" * 50])
+sys.stdout.write(buf.getvalue())
+"""
+
+
+def test_query_returns_rows_for_csv_output(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, data: Path
+) -> None:
+    d = start_daemon(_script(fake_qsv, TABLE_QSV))
+    ds_id = _register(d, data)
+    token = d.pair(_sha(data))
+
+    def query(command: str, *args: str) -> dict[str, Any]:
+        reply = d.http(
+            "POST",
+            f"/v1/datasets/{ds_id}/query",
+            {"command": command, "args": list(args)},
+            token=token,
+        )
+        assert reply.status == 200, reply.body
+        out: dict[str, Any] = reply.json()
+        return out
+
+    freq = query("frequency", "-s", "name")
+    assert freq["headers"] == ["field", "note"]
+    assert freq["rows"] == [["a", "two\nlines"], ["row0", "x" * 50]]
+    assert freq["stdout"].startswith("field,note\n")  # still there for older pages
+    # not CSV: no table
+    assert "rows" not in query("frequency", "--json")
+    assert "rows" not in query("count")
+
+
+def test_truncated_query_drops_the_partial_row(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    data: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FAKE_ROWS", "1000")
+    d = start_daemon(_script(fake_qsv, TABLE_QSV), browser_max_output=4000)
+    ds_id = _register(d, data)
+    token = d.pair(_sha(data))
+    reply = d.http(
+        "POST", f"/v1/datasets/{ds_id}/query", {"command": "slice", "args": []}, token=token
+    ).json()
+    assert reply["truncated"] is True
+    assert 0 < len(reply["rows"]) < 1000
+    assert all(row == [f"row{i - 1}", "x" * 50] for i, row in enumerate(reply["rows"]) if i)
+
+
+def test_fetched_copy_keeps_the_file_name_and_is_reported(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    import subprocess
+
+    data = tmp_path / "people.csv"
+    data.write_text("name,team\nold,red\n")
+    server = _Server(b"name,team\nnew,blue\n")
+    try:
+        d = start_daemon(_script(fake_qsv, HEADER_QSV))
+        ds_id = _register(d, data, source_url=server.url)
+        token = d.pair(_sha(data))
+        info = d.http("GET", f"/v1/datasets/{ds_id}", token=token).json()
+        assert info["fetched"] is False
+        assert d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token).status == 200
+        cache = d.daemon.home / "cache" / ds_id
+        # named like the user's file: viz titles the schematic after it
+        assert [p.name for p in cache.iterdir()] == ["people.csv"]
+        assert d.http("GET", f"/v1/datasets/{ds_id}", token=token).json()["fetched"] is True
+
+        # a copy fetched before this fix was named data.csv; the next fetch cleans it up
+        ds = d.daemon.registry.datasets[ds_id]
+        (cache / "people.csv").rename(cache / "data.csv")
+        (cache / "data.stats.csv").write_text("")
+        ds.path = str(cache / "data.csv")
+        assert d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token).status == 200
+        assert [p.name for p in cache.iterdir()] == ["people.csv"]
+
+        # approval says which copy is read, and where the request came from
+        code = d.http("POST", "/v1/pair", {"digest": ds.digest}).json()["code"]
+        proc = subprocess.run(
+            [sys.executable, "-m", "qsv_client.daemon", "approve", code, "--yes"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        assert f"the fetched copy of {data.resolve()}" in proc.stdout
+        assert "Origin: null" in proc.stdout
+
+        # registering the file again switches back to it
+        _register(d, data)
+        assert d.http("GET", f"/v1/datasets/{ds_id}", token=token).json()["fetched"] is False
+        assert d.daemon.registry.datasets[ds_id].path == str(data.resolve())
+    finally:
+        server.close()

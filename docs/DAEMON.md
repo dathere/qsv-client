@@ -40,7 +40,9 @@ Configuration is optional: `daemon.json` in the config directory
 browser listener off), `socket`, `max_jobs`, `max_timeout`, `inherit_env`, `kill_grace`,
 `browser`, `browser_origins` (default `["null"]`), `browser_timeout`, `browser_max_output`,
 `browser_max_render`, `token_ttl`, `allow_fetch`. Unknown keys are an error.
-`QSV_CLIENTD_HOME` puts every file under one directory (handy for tests).
+`QSV_CLIENTD_HOME` puts every file under one directory (handy for tests). The socket path
+(`socket`, or `QSV_CLIENTD_SOCKET`) must fit a Unix socket address, about 104 bytes on macOS
+and 108 on Linux; the daemon refuses a longer one with an error naming both settings.
 
 ## Local clients
 
@@ -77,7 +79,8 @@ qsv-clientd viz data.csv -o data.html -- --dict-info
 
 Open `data.html`. When it finds the daemon it offers to connect and shows a code such as
 `K7Q-4MZ`; run `qsv-clientd approve K7Q-4MZ`, which tells you which dataset and which
-origin the request came from. The page then holds a token for that one dataset for 8 hours
+origin the request came from (`null` for a page opened from a file, but also for a sandboxed
+frame on any website, so approve only codes you asked for). The page then holds a token for that one dataset for 8 hours
 (`token_ttl`). `qsv-clientd revoke` withdraws every token. `qsv-clientd forget <id>`
 unregisters a dataset.
 
@@ -158,10 +161,10 @@ bodies). Daemon refusals are `{"daemon_error": {"code", "message"}}` with a 4xx/
 
 | Route | Body → reply |
 |---|---|
-| `GET /v1/datasets/<id>` | → `{"id","title","pid","can_fetch","can_render","fingerprint"}` |
+| `GET /v1/datasets/<id>` | → `{"id","title","pid","can_fetch","can_render","fingerprint","fetched"}`; `fetched` is true while the dataset reads a fetched copy (see below) |
 | `POST /v1/datasets/<id>/rows` | `{"column"?, "value"?, "offset"=0, "limit"=100 (≤500)}` → `{"headers","rows","offset"}`; with `value`, the rows whose `column` equals it exactly |
 | `POST /v1/datasets/<id>/refresh` | `{"stats"?: bool}` → `{"changed","fingerprint","rows","stats"?}`; `changed` compares with the data the schematic was rendered from |
-| `POST /v1/datasets/<id>/query` | `{"command","args"}` → `{"stdout","truncated","bytes"}` |
+| `POST /v1/datasets/<id>/query` | `{"command","args"}` → `{"stdout","truncated","bytes","headers"?,"rows"?}`; `headers` and `rows` are the parsed output of commands that print CSV (not `count`, `headers`, `table`, or `--json`/`--toon`), without the last, partial record when `truncated` |
 | `POST /v1/datasets/<id>/render` | `{}` → the new schematic HTML (`text/html`); a local caller gets `{"schematic_path","bytes"}` instead. It is also written over the registered schematic file |
 | `POST /v1/datasets/<id>/fetch` | `{}` → `{"changed","fingerprint","via"}`; follow with `render` |
 
@@ -209,6 +212,11 @@ re-rendering. Flags whose value is a file keep only its basename and are listed 
 
 The download is used only if it has every column the current data has; new columns are fine.
 That keeps an error page served as plain text from replacing your data. If columns were
-renamed or dropped on purpose, run `qsv-clientd fetch <id> --force` (a page can't). The
-download is kept in the daemon's cache and does not overwrite your file, unless you
-registered with `--allow-replace`.
+renamed or dropped on purpose, run `qsv-clientd fetch <id> --force` (a page can't).
+
+With `--allow-replace`, the download replaces your file. Without it, your file is left alone
+and the dataset switches to the downloaded copy, kept in the daemon's cache under your file's
+name: from then on refresh, rows, queries and re-renders read that copy, so later edits to
+your file don't show. The page shows when it is reading a fetched copy, and `qsv-clientd
+datasets` lists both `path` (the copy) and `original_path` (your file). To go back to your
+file, run `qsv-clientd register <file>` again, then re-render.

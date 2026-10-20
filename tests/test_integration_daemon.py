@@ -113,6 +113,9 @@ def test_query(paired: tuple[DaemonThread, str, str, Path]) -> None:
     )
     assert reply.status == 200, reply.body
     assert "red" in reply.json()["stdout"]
+    # frequency prints CSV, so the page also gets it as a table
+    assert "value" in reply.json()["headers"]
+    assert any("red" in row for row in reply.json()["rows"])
     # frequency would otherwise leave stats cache files beside the data
     assert sorted(p.name for p in data.parent.iterdir()) == [data.name]
 

@@ -23,6 +23,11 @@ NO_SIDE_FILES: dict[str, tuple[str, ...]] = {
 QUERY_ENV = {"QSV_STATSCACHE_MODE": "none"}
 """Env for browser queries: "smart" commands such as frequency otherwise run stats and leave
 its cache files beside the input."""
+CSV_OUTPUT = frozenset(
+    {"stats", "frequency", "slice", "search", "select", "sort", "dedup", "sample"}
+)
+"""Query commands whose stdout is CSV, unless a flag in ``NON_CSV_FLAGS`` is given."""
+NON_CSV_FLAGS = frozenset({"--json", "--toon"})
 
 
 @dataclass(frozen=True)
