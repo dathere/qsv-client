@@ -82,7 +82,7 @@ files = ["src", "tests"]
 
 # pystray has no type information; both may be absent when the tray extra isn't installed
 [[tool.mypy.overrides]]
-module = ["pystray", "pystray.*", "PIL", "PIL.*", "AppKit", "Foundation", "PyObjCTools", "PyObjCTools.*"]
+module = ["pystray", "pystray.*", "PIL", "PIL.*", "AppKit", "PyObjCTools", "PyObjCTools.*", "gi", "gi.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

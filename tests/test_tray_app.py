@@ -147,7 +147,7 @@ def test_the_menu_follows_the_state(
     assert controller.submitted[-1] == model.RESTART  # Quit isn't a worker action
 
 
-def test_macos_redraws_on_the_main_thread_without_a_dock_icon(
+def test_macos_redraws_and_handles_signals_on_the_main_thread(
     fake_pystray: types.ModuleType, controller: FakeController, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[Any] = []
@@ -162,27 +162,64 @@ def test_macos_redraws_on_the_main_thread_without_a_dock_icon(
     helper = types.ModuleType("PyObjCTools.AppHelper")
     queued: list[Callable[[], None]] = []
     helper.callAfter = queued.append  # type: ignore[attr-defined]
+    mach = types.ModuleType("PyObjCTools.MachSignals")
+    mach_handlers: dict[int, Callable[[int], None]] = {}
+    mach.signal = mach_handlers.__setitem__  # type: ignore[attr-defined]
     tools = types.ModuleType("PyObjCTools")
     tools.AppHelper = helper  # type: ignore[attr-defined]
-    foundation = types.ModuleType("Foundation")
-    foundation.NSTimer = types.SimpleNamespace(  # type: ignore[attr-defined]
-        scheduledTimerWithTimeInterval_repeats_block_=lambda interval, repeats, block: calls.append(
-            ("timer", interval, repeats, block(None))
-        )
-    )
-    monkeypatch.setitem(sys.modules, "Foundation", foundation)
+    tools.MachSignals = mach  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "AppKit", appkit)
     monkeypatch.setitem(sys.modules, "PyObjCTools", tools)
     monkeypatch.setitem(sys.modules, "PyObjCTools.AppHelper", helper)
+    monkeypatch.setitem(sys.modules, "PyObjCTools.MachSignals", mach)
 
     icon = _run(controller, "darwin", monkeypatch)
-    # no Dock icon, and a timer so signal handlers get to run inside AppKit's loop
-    assert calls == [("policy", 1), ("timer", 0.5, True, None)]
+    assert calls == [("policy", 1)]  # no Dock icon
+    assert fake_pystray.handlers == {}  # Python's handlers never run inside AppKit's loop
+    # signals are registered on the main thread, after pystray installed its SIGINT handler
+    install = queued.pop(0)
+    install()
+    assert set(mach_handlers) == {signal.SIGINT, signal.SIGTERM}
     controller._set(mode=Mode.ERROR, error="boom")
     assert icon.menu_updates == 0  # queued for the main thread, not done here
     (redraw,) = queued
     redraw()
     assert icon.icon is icons.image("error") and icon.menu_updates == 1
+    mach_handlers[signal.SIGINT](signal.SIGINT)
+    assert icon.stopped
+
+
+class FakeGtkIcon(FakeIcon):
+    pass
+
+
+FakeGtkIcon.__module__ = "pystray._gtk"
+
+
+def test_gtk_handles_signals_through_glib(
+    fake_pystray: types.ModuleType, controller: FakeController, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources: dict[int, Callable[[], bool]] = {}
+    glib = types.SimpleNamespace(
+        PRIORITY_DEFAULT=0,
+        unix_signal_add=lambda priority, sig, handler: sources.__setitem__(sig, handler),
+    )
+    repository = types.ModuleType("gi.repository")
+    repository.GLib = glib  # type: ignore[attr-defined]
+    gi = types.ModuleType("gi")
+    gi.repository = repository  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", repository)
+    fake_pystray.Icon = FakeGtkIcon  # type: ignore[attr-defined]
+
+    icon = _run(controller, "linux", monkeypatch)
+    # pystray resets SIGINT to SIG_DFL before its loop: Python's handlers would be bypassed
+    assert fake_pystray.handlers == {}
+    assert set(sources) == {signal.SIGINT, signal.SIGTERM}
+    assert sources[signal.SIGTERM]() is False  # a one-shot source
+    assert icon.stopped
+    controller._set(mode=Mode.HOSTED)
+    assert icon.menu_updates == 1  # pystray's GTK backend hands it to the GTK loop itself
 
 
 def test_a_desktop_without_menus_is_explained(
@@ -196,14 +233,75 @@ def test_a_desktop_without_menus_is_explained(
     assert "tray icons without menus" in caplog.text
 
 
-def test_state_changes_reach_a_running_icon(
-    fake_pystray: types.ModuleType, controller: FakeController, monkeypatch: pytest.MonkeyPatch
+WM_NOTIFY, WM_LBUTTONUP, WM_RBUTTONUP = 0x40B, 0x202, 0x205
+
+
+@pytest.fixture
+def fake_win32(monkeypatch: pytest.MonkeyPatch) -> None:
+    win32 = types.ModuleType("pystray._util.win32")
+    win32.WM_NOTIFY = WM_NOTIFY  # type: ignore[attr-defined]
+    win32.WM_RBUTTONUP = WM_RBUTTONUP  # type: ignore[attr-defined]
+    util = types.ModuleType("pystray._util")
+    util.win32 = win32  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "pystray._util", util)
+    monkeypatch.setitem(sys.modules, "pystray._util.win32", win32)
+
+
+def test_windows_rebuilds_the_menu_on_the_gui_thread_before_it_opens(
+    fake_pystray: types.ModuleType,
+    fake_win32: None,
+    controller: FakeController,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    notified: list[int] = []
+    monkeypatch.setattr(
+        FakeIcon,
+        "_message_handlers",
+        {WM_NOTIFY: lambda wparam, lparam: notified.append(lparam)},
+        raising=False,
+    )
     icon = _run(controller, "win32", monkeypatch)
-    for mode in (Mode.STARTING, Mode.HOSTED, Mode.STOPPED):
+    assert set(fake_pystray.handlers) == {signal.SIGINT, signal.SIGTERM}
+    for mode in (Mode.STARTING, Mode.HOSTED):
         controller._set(mode=mode)
         assert icon.title == model.title(TrayState(mode))
-    assert icon.menu_updates == 3
+    assert icon.menu_updates == 0  # never from the worker thread
+    handle = icon._message_handlers[WM_NOTIFY]  # type: ignore[attr-defined]
+    handle(0, WM_LBUTTONUP)
+    assert icon.menu_updates == 0  # a left click opens no menu
+    handle(0, WM_RBUTTONUP)
+    assert icon.menu_updates == 1  # rebuilt once, just before the popup
+    handle(0, WM_RBUTTONUP)
+    assert icon.menu_updates == 1  # nothing changed since
+    assert notified == [WM_LBUTTONUP, WM_RBUTTONUP, WM_RBUTTONUP]  # pystray still handles it
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("short", "short"),
+        ("x" * 127, "x" * 127),
+        ("x" * 200, "x" * 126 + "…"),
+        ("😀" * 100, "😀" * 63 + "…"),  # each emoji is two UTF-16 code units
+    ],
+)
+def test_windows_tooltips_fit(text: str, expected: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert app._tooltip(text) == expected
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert app._tooltip(text) == text
+
+
+def test_a_long_error_fits_the_windows_tooltip(
+    fake_pystray: types.ModuleType,
+    fake_win32: None,
+    controller: FakeController,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FakeIcon, "_message_handlers", {WM_NOTIFY: print}, raising=False)
+    icon = _run(controller, "win32", monkeypatch)
+    controller._set(mode=Mode.ERROR, error="qsv not found: " + "C:\\a\\long\\path;" * 20)
+    assert len(icon.title) == 127 and icon.title.endswith("…")
 
 
 def test_check_passes_with_the_extra(fake_pystray: types.ModuleType) -> None:
