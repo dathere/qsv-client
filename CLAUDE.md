@@ -33,9 +33,10 @@ below the base commit's, and new or changed lines need 100% coverage.
 - `capabilities.py`: parses `qsv --capabilities`.
 - `daemon/`: `qsv-clientd`. `server.py` (routes, local vs browser tier), `_http.py` (minimal
   HTTP/1.1), `allowlist.py` (what paired schematics may run), `pairing.py`, `registry.py`,
-  `fetch.py`, `client.py` (`DaemonClient`/`AsyncDaemonClient`, mirrored by hand), `__main__.py`
-  (CLI). Protocol and security model: `docs/DAEMON.md`. Browsers never supply paths or viz
-  args; anything a browser receives must not contain local paths.
+  `fetch.py`, `client.py` (`DaemonClient`/`AsyncDaemonClient`, mirrored by hand), `host.py`
+  (`DaemonHost`: the daemon on a background thread), `logs.py`, `__main__.py` (CLI).
+  Protocol and security model: `docs/DAEMON.md`. Browsers never supply paths or viz args;
+  anything a browser receives must not contain local paths.
 
 ## Invariants
 

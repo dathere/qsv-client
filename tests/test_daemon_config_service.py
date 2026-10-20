@@ -96,6 +96,20 @@ def test_home_override_wins_everywhere(
         assert config.runtime_dir() == tmp_path / "one" / "run"
 
 
+def test_log_path(user_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    # a subdirectory: the launchd service already logs to ~/Library/Logs/qsv-clientd.log
+    assert config.log_path() == user_home / "Library" / "Logs" / "qsv-client" / "qsv-clientd.log"
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert config.log_path() == config.state_dir() / "qsv-clientd.log"
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert config.log_path() == config.state_dir() / "qsv-clientd.log"
+    monkeypatch.setenv("QSV_CLIENTD_HOME", str(tmp_path / "one"))
+    for platform in ("win32", "darwin", "linux"):
+        monkeypatch.setattr(sys, "platform", platform)
+        assert config.log_path() == tmp_path / "one" / "qsv-clientd.log"
+
+
 def test_socket_path_error_only_for_long_paths() -> None:
     long = "/tmp/" + "x" * 200
     assert config.socket_path_error(long, OSError("AF_UNIX path too long")) is not None
@@ -275,6 +289,79 @@ def test_uninstall_elsewhere_prints_the_task_command(
     monkeypatch.setattr(sys, "platform", "win32")
     assert service.uninstall() == "remove the task with: schtasks /Delete /TN qsv-clientd"
     assert calls.argv == []
+
+
+def test_launchd_plist_options(user_home: Path) -> None:
+    import plistlib
+
+    plist = plistlib.loads(
+        service.launchd_plist(
+            ["/bin/tray"],
+            {},
+            label="com.example.<tray>",
+            keep_alive=False,
+            log=user_home / "tray & co.log",
+        ).encode()
+    )
+    assert plist["Label"] == "com.example.<tray>"
+    assert plist["KeepAlive"] is False and plist["RunAtLoad"] is True
+    assert plist["StandardErrorPath"] == str(user_home / "tray & co.log")
+
+
+@pytest.mark.parametrize(
+    ("platform", "kind"), [("darwin", "launchd"), ("linux", "systemd"), ("win32", None)]
+)
+def test_service_installed(
+    user_home: Path, monkeypatch: pytest.MonkeyPatch, platform: str, kind: str | None
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    assert service.service_installed() is None
+    for path in (
+        user_home / "Library" / "LaunchAgents" / f"{service.LABEL}.plist",
+        user_home / ".config" / "systemd" / "user" / "qsv-clientd.service",
+    ):
+        path.parent.mkdir(parents=True)
+        path.write_text("")
+    assert service.service_installed() == kind
+
+
+def test_stop_service(calls: _Calls, user_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plist_path = user_home / "Library" / "LaunchAgents" / f"{service.LABEL}.plist"
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert service.stop_service() == f"stopped launchd agent {plist_path}"
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert service.stop_service() == "stopped systemd user unit qsv-clientd"
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert service.stop_service() == "no service to stop on this platform"
+    # unload, not kill: launchd's KeepAlive would relaunch a killed daemon
+    assert calls.argv == [
+        ["launchctl", "unload", str(plist_path)],
+        ["systemctl", "--user", "stop", "qsv-clientd"],
+    ]
+    assert all(k["check"] is False for k in calls.kwargs)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "detail"),
+    [
+        ("", "Failed to connect to bus\n", ": Failed to connect to bus"),
+        ("said so", "", ": said so"),
+        ("", "", ""),
+    ],
+)
+def test_stop_service_reports_a_failure(
+    user_home: Path, monkeypatch: pytest.MonkeyPatch, stdout: str, stderr: str, detail: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, stdout, stderr),
+    )
+    message = f"systemctl --user stop qsv-clientd failed (exit code 1){detail}"
+    with pytest.raises(RuntimeError) as info:
+        service.stop_service()
+    assert str(info.value) == message
 
 
 def test_service_environment_copies_only_daemon_locations(

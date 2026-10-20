@@ -94,6 +94,10 @@ class Pairing:
             wanted = f"{wanted[:3]}-{wanted[3:]}"
         return next((p for p in self.pending.values() if p.code == wanted), None)
 
+    def expires_in(self, pending: PendingPair) -> int:
+        """Whole seconds until ``pending``'s code expires (0 once it has)."""
+        return max(0, int(CODE_TTL - (self._now() - pending.created)))
+
     def approve(self, code: str) -> PendingPair | None:
         pending = self.find_code(code)
         if pending is None or pending.token is not None or pending.denied:

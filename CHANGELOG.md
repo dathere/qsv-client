@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format follows
   It uses only the standard library. See `docs/DAEMON.md`.
 - `qsv-clientd` settings `fetch_max_bytes` (default 10 GiB) and `fetch_timeout` (default 30
   minutes), which limit how much a fetch may download and for how long.
+- `qsv-clientd serve --log-file PATH` writes the log to a file too (rotated at 5 MB, 3 kept),
+  and `-v` logs pairing requests and decisions, datasets registered and forgotten, renders,
+  fetches and revoked tokens. Tokens are never logged.
+- `qsv_client.daemon.host.DaemonHost` runs the daemon on a background thread, for programs
+  that need the main thread themselves.
+- `GET /v1/pairings` items include `expires_in`, the seconds left before the code expires.
 - `QsvError.to_dict()` and `qsv_client.errors.error_from_dict()`.
 - `QsvDaemonError` and `QsvDaemonUnavailable`.
 

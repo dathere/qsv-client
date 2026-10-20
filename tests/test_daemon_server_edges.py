@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shutil
 import socket
@@ -81,6 +82,34 @@ def _register(d: DaemonThread, path: Path, **extra: object) -> str:
 def _code(reply: Reply) -> str:
     code: str = reply.json()["daemon_error"]["code"]
     return code
+
+
+def test_info_log_lines_never_hold_tokens(
+    start_daemon: StartDaemon,
+    fake_qsv: Callable[[str], str],
+    data: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="qsv_client.daemon")
+    d = start_daemon(fake_qsv(""))
+    dataset_id = _register(d, data)
+    token = d.pair(_sha(data))
+    denied = d.http("POST", "/v1/pair", {"digest": "0" * 64}).json()["code"]
+    assert _local(d, "POST", f"/v1/pairings/{denied}/deny").status == 200
+    assert _local(d, "POST", "/v1/tokens/revoke", {}).json() == {"revoked": 1}
+    assert _local(d, "DELETE", f"/v1/datasets/{dataset_id}").status == 200
+    text = caplog.text
+    for line in (
+        f"dataset registered: {dataset_id} ({data})",
+        f"origin null, dataset {dataset_id}",
+        "pairing approved: code ",
+        f"pairing requested: code {denied}, origin null, dataset None",
+        f"pairing denied: code {denied}, origin null",
+        "tokens revoked: 1 (dataset all)",
+        f"dataset forgotten: {dataset_id} (0 tokens revoked)",
+    ):
+        assert line in text
+    assert token not in text and d.daemon.local_token not in text
 
 
 def _assert_refused(reply: Reply, status: int, code: str, *private: Path) -> None:
@@ -190,7 +219,7 @@ def test_local_status_listing_and_unknown_routes(
     assert status["datasets"] == 1 and status["pending_pairings"] == 0
     assert status["port"] == d.port
     if sys.platform != "win32":
-        assert status["socket"] == str(d.daemon._socket_path)
+        assert status["socket"] == str(d.daemon.socket_path)
 
     # the local user sees full records, paths included
     listing = _local(d, "GET", "/v1/datasets").json()
@@ -245,6 +274,7 @@ def test_pairing_deny_poll_and_local_requests(
     local = _local(d, "POST", "/v1/pair", {"digest": _sha(data)}).json()
     pending = _local(d, "GET", "/v1/pairings").json()
     assert [(p["code"], p["origin"]) for p in pending] == [(local["code"], "local")]
+    assert 290 <= pending[0]["expires_in"] <= 300
 
     page = d.http("POST", "/v1/pair", {"digest": _sha(data)}).json()
     assert d.http("GET", f"/v1/pair/{page['request_id']}").json() == {"status": "pending"}
@@ -620,7 +650,7 @@ async def test_serve_forever_cleans_up_on_sigterm(
     while not daemon._started:
         assert time.monotonic() < deadline and not task.done()
         await asyncio.sleep(0.02)
-    sock_path = daemon._socket_path
+    sock_path = daemon.socket_path
     token_file = home / "run" / "local-token"
     assert sock_path.exists() and token_file.exists()
     os.kill(os.getpid(), signal.SIGTERM)

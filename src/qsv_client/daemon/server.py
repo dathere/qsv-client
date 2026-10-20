@@ -112,6 +112,11 @@ class Daemon:
 
     # -- lifecycle -------------------------------------------------------------------------
 
+    @property
+    def socket_path(self) -> Path:
+        """The Unix socket local clients connect to (unused on Windows)."""
+        return self._socket_path
+
     async def start(self) -> None:
         caps = await self._qsv.capabilities()
         log.info("qsv-clientd %s using %s %s", __version__, caps.binary, caps.version)
@@ -421,6 +426,7 @@ class Daemon:
                 self.results.remove_dataset(dataset_id)
                 if not removed:
                     raise HttpError(404, "not_found", "no such dataset")
+                log.info("dataset forgotten: %s (%d tokens revoked)", dataset_id, revoked)
                 return Response.json({"removed": dataset_id, "revoked": revoked})
             case ["pairings"] if method == "GET":
                 return Response.json(self._pending())
@@ -428,8 +434,10 @@ class Daemon:
                 return self._decide(code, verb)
             case ["tokens", "revoke"] if method == "POST":
                 target = request.json().get("dataset_id")
-                revoked = self.pairing.revoke_all(target if isinstance(target, str) else None)
+                dataset = target if isinstance(target, str) else None
+                revoked = self.pairing.revoke_all(dataset)
                 self.results.sweep(self.pairing.live_digests())
+                log.info("tokens revoked: %d (dataset %s)", revoked, dataset or "all")
                 return Response.json({"revoked": revoked})
         raise HttpError(404, "not_found", "unknown route")
 
@@ -533,6 +541,7 @@ class Daemon:
             source_url=_opt(body.get("source_url")),
             allow_replace=body.get("allow_replace") is True,
         )
+        log.info("dataset registered: %s (%s)", ds.id, ds.path)
         if body.get("render"):
             await self._render_to_disk(ds)
         return Response.json(_private(ds))
@@ -548,6 +557,7 @@ class Daemon:
                     "dataset": _private(ds) if ds else None,
                     "approved": p.token is not None,
                     "denied": p.denied,
+                    "expires_in": self.pairing.expires_in(p),
                 }
             )
         return out
@@ -558,6 +568,7 @@ class Daemon:
             raise HttpError(404, "not_found", "no pending pairing with that code (expired?)")
         if verb == "deny":
             self.pairing.deny(code)
+            log.info("pairing denied: code %s, origin %s", pending.code, pending.origin)
             return Response.json({"denied": pending.code})
         if not pending.dataset_id or pending.dataset_id not in self.registry.datasets:
             raise HttpError(
@@ -567,6 +578,12 @@ class Daemon:
                 "(qsv-clientd register <data> --schematic <html>) and pair again",
             )
         self.pairing.approve(code)
+        log.info(
+            "pairing approved: code %s, origin %s, dataset %s",
+            pending.code,
+            pending.origin,
+            pending.dataset_id,
+        )
         return Response.json({"approved": pending.code, "dataset_id": pending.dataset_id})
 
     # -- pairing (any tier) ----------------------------------------------------------------
@@ -587,6 +604,12 @@ class Daemon:
         pending = self.pairing.request(ds.id if ds else "", origin)
         if pending is None:
             raise HttpError(429, "rate_limited", "too many pairing requests; try again shortly")
+        log.info(
+            "pairing requested: code %s, origin %s, dataset %s",
+            pending.code,
+            origin,
+            pending.dataset_id or None,
+        )
         return Response.json(
             {
                 "request_id": pending.request_id,
@@ -768,10 +791,13 @@ class Daemon:
             raise HttpError(403, "disabled", "fetching is turned off")
         # only the user may accept data whose columns changed; a page can't ask for that
         force = tier == "local" and body.get("force") is True
+        log.info("fetch started: dataset %s (%s)", ds.id, tier)
         try:
             result = await fetch.fetch_latest(self, ds, force=force)
         except fetch.FetchError as exc:
+            log.info("fetch failed: dataset %s: %s", ds.id, exc)
             raise HttpError(exc.status, exc.code, _scrub(str(exc), ds)) from None
+        log.info("fetch finished: dataset %s", ds.id)
         return Response.json(result)
 
     _dataset_actions: ClassVar[
@@ -791,6 +817,7 @@ class Daemon:
         """Re-run ``qsv viz smart`` with the registered arguments; returns the new HTML."""
         if ds.schematic_path is None and not ds.viz_args:
             raise HttpError(409, "cannot_render", "no schematic or viz arguments registered")
+        log.info("render started: dataset %s", ds.id)
         target_dir = Path(ds.schematic_path).parent if ds.schematic_path else Path(self.home)
         ensure_private_dir(self.home)
         fd, tmp_name = tempfile.mkstemp(prefix=".qsv-clientd-", suffix=".html", dir=target_dir)
@@ -817,6 +844,7 @@ class Daemon:
                 tmp.chmod(mode)
                 os.replace(tmp, target)
             self.registry.save()
+            log.info("render finished: dataset %s (%d bytes)", ds.id, len(html))
             return html
         finally:
             tmp.unlink(missing_ok=True)

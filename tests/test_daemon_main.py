@@ -22,8 +22,8 @@ from daemon_helpers import DaemonThread
 
 from qsv_client import QsvResult
 from qsv_client.daemon import __main__ as cli
+from qsv_client.daemon import logs, service
 from qsv_client.daemon import server as server_mod
-from qsv_client.daemon import service
 from qsv_client.daemon.config import DaemonConfig
 from qsv_client.daemon.server import Daemon
 from qsv_client.errors import QsvDaemonError, QsvDaemonUnavailable, QsvError
@@ -172,7 +172,11 @@ def fake_daemon(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[dict[st
     monkeypatch.setattr(server_mod, "Daemon", FakeDaemon)
     monkeypatch.setenv("QSV_CLIENTD_HOME", str(tmp_path / "home"))
     logging_calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(logging, "basicConfig", lambda **kw: logging_calls.append(kw))
+    monkeypatch.setattr(
+        logs,
+        "configure_logging",
+        lambda level, file=None: logging_calls.append({"level": level, "file": file}),
+    )
     return logging_calls
 
 
@@ -181,7 +185,12 @@ def test_serve_uses_config_defaults(fake_daemon: list[dict[str, Any]]) -> None:
     (daemon,) = FakeDaemon.instances
     assert daemon.served
     assert daemon.config == DaemonConfig()
-    assert fake_daemon[0]["level"] == logging.WARNING
+    assert fake_daemon == [{"level": logging.WARNING, "file": None}]
+
+
+def test_serve_logs_to_a_file(fake_daemon: list[dict[str, Any]], tmp_path: Path) -> None:
+    assert cli.main(["serve", "--log-file", str(tmp_path / "d.log"), "-v"]) == 0
+    assert fake_daemon == [{"level": logging.INFO, "file": tmp_path / "d.log"}]
 
 
 def test_serve_flags_override_the_config_file(
