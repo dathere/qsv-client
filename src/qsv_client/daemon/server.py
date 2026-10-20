@@ -874,8 +874,12 @@ def _table(text: str, *, truncated: bool) -> dict[str, Any]:
         records = _parse_csv(text, csv.reader)
     except HttpError:
         return {}
-    if truncated and records:
-        records.pop()  # cut off mid-record; csv closes a dangling quote at the end
+    # A cut is between records only after a line break outside quotes, where the quotes so far
+    # pair up ("" escapes come in pairs). Otherwise the last record is partial: csv closes a
+    # dangling quote at the end.
+    cut_mid_record = not text.endswith(("\n", "\r")) or text.count('"') % 2 == 1
+    if truncated and records and cut_mid_record:
+        records.pop()
     if not records:
         return {}
     return {"headers": records[0], "rows": records[1:]}

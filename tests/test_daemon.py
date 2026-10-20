@@ -1181,3 +1181,27 @@ def test_fetched_copy_keeps_the_file_name_and_is_reported(
         assert d.daemon.registry.datasets[ds_id].path == str(data.resolve())
     finally:
         server.close()
+
+
+def test_fetch_cleanup_spares_data_named_like_a_sidecar(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    data = tmp_path / "data.stats.csv"
+    data.write_text("name,team\nold,red\n")
+    server = _Server(b"name,team\nnew,blue\n")
+    try:
+        d = start_daemon(_script(fake_qsv, HEADER_QSV))
+        ds_id = _register(d, data, source_url=server.url)
+        token = d.pair(_sha(data))
+        assert d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token).status == 200
+        cache = d.daemon.home / "cache" / ds_id
+        # as fetched before the copy kept the file's name: data.csv, whose stats sidecar
+        # pattern data.stats.csv* also matches the new copy's name
+        ds = d.daemon.registry.datasets[ds_id]
+        (cache / "data.stats.csv").rename(cache / "data.csv")
+        ds.path = str(cache / "data.csv")
+        assert d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token).status == 200
+        assert [p.name for p in cache.iterdir()] == ["data.stats.csv"]
+        assert Path(d.daemon.registry.datasets[ds_id].path).is_file()
+    finally:
+        server.close()

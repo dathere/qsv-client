@@ -113,7 +113,8 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -
             if previous != current and previous.parent == cache:
                 previous.unlink(missing_ok=True)
                 for sidecar in cache.glob(f"{glob.escape(previous.stem)}.stats.csv*"):
-                    sidecar.unlink(missing_ok=True)
+                    if sidecar != current:  # the data itself may be named data.stats.csv
+                        sidecar.unlink(missing_ok=True)
             if ds.original_path is None:
                 ds.original_path = ds.path
             ds.path = str(current)
