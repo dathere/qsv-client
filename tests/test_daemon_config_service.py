@@ -213,6 +213,19 @@ def test_install_elsewhere_prints_the_task_command(
     )
 
 
+def test_task_command_escapes_quoted_paths(
+    calls: _Calls, user_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        service, "service_environment", lambda: {"QSV_BIN": r"C:\Program Files\qsv\qsv.exe"}
+    )
+    # a quote nested in /TR "..." must be \" or it ends the /TR value early
+    assert service.install().endswith(
+        '/TR "/opt/bin/qsv-clientd serve --binary \\"C:\\Program Files\\qsv\\qsv.exe\\""'
+    )
+
+
 def test_install_without_the_entry_point_runs_the_module(
     calls: _Calls, monkeypatch: pytest.MonkeyPatch
 ) -> None:
