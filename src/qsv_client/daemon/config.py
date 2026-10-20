@@ -135,6 +135,10 @@ class DaemonConfig:
     token_ttl: float = 8 * 3600.0
     allow_fetch: bool = True
     """Let paired schematics ask the daemon to download the latest data (Phase D)."""
+    fetch_max_bytes: int = 10 << 30
+    """Largest download a fetch accepts; a bigger one is refused and deleted."""
+    fetch_timeout: float = 1800.0
+    """Upper bound, in seconds, on downloading one fetch."""
 
     @classmethod
     def load(cls, path: Path | None = None) -> DaemonConfig:

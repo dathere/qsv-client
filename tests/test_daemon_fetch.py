@@ -6,11 +6,16 @@ are redirected to it by a patched ``urllib.request.urlopen``.
 
 from __future__ import annotations
 
+import contextlib
+import http.client
 import http.server
 import json
+import socket
 import sys
 import tempfile
 import threading
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
@@ -20,6 +25,7 @@ from typing import Any
 import pytest
 
 from qsv_client.daemon import fetch
+from qsv_client.daemon._http import HttpError
 from qsv_client.daemon.config import DaemonConfig
 from qsv_client.daemon.fetch import FetchError
 from qsv_client.daemon.registry import Dataset, Fingerprint
@@ -360,3 +366,340 @@ def test_replace_creates_a_missing_target_privately(tmp_path: Path) -> None:
 )
 def test_suffix_follows_the_url_path(source: str, suffix: str) -> None:
     assert fetch._suffix(source) == suffix
+
+
+# -- download limits: fetch_max_bytes and fetch_timeout ----------------------------------------
+
+
+class _Stream:
+    """A loopback server sending ``chunks`` of a CSV, ``gap`` seconds apart.
+
+    With ``declare`` set it sends that as Content-Length; otherwise none, so only the bytes
+    that arrive can show the size (HTTP/1.0: the body ends when the connection closes).
+    """
+
+    def __init__(self, chunks: list[bytes], *, gap: float = 0.0, declare: int | None = None):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv")
+                if declare is not None:
+                    self.send_header("Content-Length", str(declare))
+                self.end_headers()
+                try:
+                    for chunk in chunks:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                        time.sleep(gap)
+                except OSError:
+                    pass  # the client gave up, as it should
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd.daemon_threads = True
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/d.csv"
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+@pytest.fixture
+def stream() -> Iterator[Callable[..., _Stream]]:
+    servers: list[_Stream] = []
+
+    def start(chunks: list[bytes], **kwargs: Any) -> _Stream:
+        servers.append(_Stream(chunks, **kwargs))
+        return servers[-1]
+
+    yield start
+    for server in servers:
+        server.close()
+
+
+def _limited(binary: str, home: Path, **limits: Any) -> Daemon:
+    return Daemon(DaemonConfig(binary=binary, **limits), home=home, tcp_port=0)
+
+
+BIG = [b"name\n"] + [b"x" * 99 + b"\n"] * 20  # 2005 bytes
+
+
+@pytest.mark.parametrize("declare", [len(b"".join(BIG)), None], ids=["declared", "streamed"])
+async def test_a_download_over_fetch_max_bytes_is_refused(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    stream: Callable[..., _Stream],
+    declare: int | None,
+) -> None:
+    server = stream(BIG, declare=declare)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _limited(fake_qsv(PLAIN_QSV), home, fetch_max_bytes=1000)
+    ds = _dataset(daemon, data, source_url=server.url, allow_replace=True)
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (413, "too_large")
+    assert "1000 bytes (fetch_max_bytes)" in str(info.value)
+    assert data.read_text() == "name\nold\n"
+    assert _staging_files(daemon, ds) == []
+
+
+async def test_a_download_of_exactly_fetch_max_bytes_is_used(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, stream: Callable[..., _Stream]
+) -> None:
+    body = b"name\nnew\n"
+    server = stream([body])
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _limited(fake_qsv(PLAIN_QSV), home, fetch_max_bytes=len(body))
+    ds = _dataset(daemon, data, source_url=server.url, allow_replace=True)
+    assert (await fetch.fetch_latest(daemon, ds))["changed"] is True
+    assert data.read_bytes() == body
+
+
+async def test_a_trickling_download_stops_at_fetch_timeout(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, stream: Callable[..., _Stream]
+) -> None:
+    # a byte every 0.1s: each read succeeds well inside the socket timeout, so only the
+    # overall deadline can stop it
+    server = stream([b"name\n"] + [b"x"] * 300, gap=0.1)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _limited(fake_qsv(PLAIN_QSV), home, fetch_timeout=0.5)
+    ds = _dataset(daemon, data, source_url=server.url, allow_replace=True)
+    started = time.monotonic()
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert time.monotonic() - started < 10
+    assert (info.value.status, info.value.code) == (504, "download_timeout")
+    assert "0.5s (fetch_timeout)" in str(info.value)
+    assert data.read_text() == "name\nold\n"
+    assert _staging_files(daemon, ds) == []
+
+
+async def test_qsv_get_download_over_fetch_max_bytes_is_refused(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path
+) -> None:
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    # GET_QSV's cache-fetch writes "name\nfetched\n" (13 bytes)
+    daemon = _limited(fake_qsv(f"LOG = {str(log)!r}\n" + GET_QSV), home, fetch_max_bytes=12)
+    ds = _dataset(daemon, data, source_url="https://example.org/d.csv", allow_replace=True)
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (413, "too_large")
+    assert data.read_text() == "name\nold\n"
+    assert _staging_files(daemon, ds) == []
+    # refused before qsv ever counted it
+    assert [json.loads(line)[0] for line in log.read_text().splitlines()] == ["get", "get"]
+
+
+async def test_qsv_get_runs_are_bounded_by_fetch_timeout(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _limited(fake_qsv(f"LOG = {str(log)!r}\n" + GET_QSV), home, fetch_timeout=42.0)
+    real = daemon._browser_run
+    timeouts: dict[str, float | None] = {}
+
+    async def spy(ds: Dataset, args: list[str], **kwargs: Any) -> Any:
+        if args[0] == "get":
+            timeouts[args[1]] = kwargs.get("timeout")
+        return await real(ds, args, **kwargs)
+
+    monkeypatch.setattr(daemon, "_browser_run", spy)
+    ds = _dataset(daemon, data, source_url="https://example.org/d.csv", allow_replace=True)
+    await fetch.fetch_latest(daemon, ds)
+    assert timeouts == {"https://example.org/d.csv": 42.0, "cache-fetch": 42.0}
+
+
+class _Raw:
+    """A loopback server that writes ``chunks`` of raw bytes, ``gap`` seconds apart."""
+
+    def __init__(self, chunks: list[bytes], gap: float) -> None:
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}/d.csv"
+
+        def serve() -> None:
+            with contextlib.suppress(OSError):
+                conn, _ = self.sock.accept()
+                with conn:
+                    conn.recv(65536)
+                    for chunk in chunks:
+                        conn.sendall(chunk)
+                        time.sleep(gap)
+
+        threading.Thread(target=serve, daemon=True).start()
+
+    def close(self) -> None:
+        self.sock.close()
+
+
+@pytest.fixture
+def raw() -> Iterator[Callable[[list[bytes], float], _Raw]]:
+    servers: list[_Raw] = []
+
+    def start(chunks: list[bytes], gap: float) -> _Raw:
+        servers.append(_Raw(chunks, gap))
+        return servers[-1]
+
+    yield start
+    for server in servers:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        # headers that never end: only the watchdog can stop urlopen here
+        [b"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nX-Pad: "] + [b"a"] * 300,
+        # a body that stops arriving: the socket times out after the deadline
+        [b"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\n\r\nname\n"] + [b""] * 300,
+        # a chunk-size line that never ends: read1 blocks inside the body, after urllib has
+        # let go of the connection's socket
+        [
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nTransfer-Encoding: chunked\r\n\r\n"
+            b"5\r\nname\n\r\n"
+        ]
+        + [b"0"] * 300,
+    ],
+    ids=["trickled-headers", "stalled-body", "trickled-chunk-size"],
+)
+async def test_any_slow_download_is_a_download_timeout(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    raw: Callable[[list[bytes], float], _Raw],
+    chunks: list[bytes],
+) -> None:
+    server = raw(chunks, 0.1)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _limited(fake_qsv(PLAIN_QSV), home, fetch_timeout=0.5)
+    ds = _dataset(daemon, data, source_url=server.url, allow_replace=True)
+    started = time.monotonic()
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert time.monotonic() - started < 10
+    assert (info.value.status, info.value.code) == (504, "download_timeout")
+    assert data.read_text() == "name\nold\n"
+    assert _staging_files(daemon, ds) == []
+
+
+async def test_a_malformed_response_is_a_download_failure(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    raw: Callable[[list[bytes], float], _Raw],
+) -> None:
+    # http.client raises BadStatusLine, an HTTPException, not an OSError
+    server = raw([b"NOT HTTP\r\n\r\n"], 0)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, source_url=server.url, allow_replace=True)
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (502, "download_failed")
+    assert data.read_text() == "name\nold\n"
+
+
+async def test_a_qsv_get_past_fetch_timeout_is_a_download_timeout(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path
+) -> None:
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    slow_get = GET_QSV.replace(
+        'if sys.argv[1:3] == ["get", "cache-fetch"]:',
+        'if sys.argv[1] == "get" and sys.argv[2] != "cache-fetch":\n'
+        "    import time; time.sleep(30)\n"
+        'elif sys.argv[1:3] == ["get", "cache-fetch"]:',
+    )
+    daemon = _limited(fake_qsv(f"LOG = {str(log)!r}\n" + slow_get), home, fetch_timeout=0.5)
+    ds = _dataset(daemon, data, source_url="https://example.org/d.csv", allow_replace=True)
+    started = time.monotonic()
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert time.monotonic() - started < 20
+    assert (info.value.status, info.value.code) == (504, "download_timeout")
+    assert data.read_text() == "name\nold\n"
+
+
+async def test_a_failed_qsv_get_is_reported_as_it_failed(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path
+) -> None:
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    failing_get = GET_QSV.replace(
+        'if sys.argv[1:3] == ["get", "cache-fetch"]:',
+        'if sys.argv[1] == "get" and sys.argv[2] != "cache-fetch":\n'
+        '    sys.stderr.write("get: 403 Forbidden\\n"); sys.exit(1)\n'
+        'elif sys.argv[1:3] == ["get", "cache-fetch"]:',
+    )
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + failing_get), home)
+    ds = _dataset(daemon, data, source_url="https://example.org/d.csv", allow_replace=True)
+    # not a timeout, so not turned into one
+    with pytest.raises(HttpError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert info.value.status == 502 and info.value.code != "download_timeout"
+    assert "403 Forbidden" in str(info.value)
+    assert data.read_text() == "name\nold\n"
+
+
+def test_the_watchdog_shuts_a_socket_connected_after_it_fired() -> None:
+    watchdog = fetch._Watchdog(0)
+    deadline = time.monotonic() + 5
+    while not watchdog.fired:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        conn = watchdog.watch(http.client.HTTPConnection)(
+            "127.0.0.1", server.getsockname()[1], timeout=5
+        )
+        conn.connect()
+        peer, _ = server.accept()
+        with peer:
+            # shutting our side down sends the peer an end of data; checked from the peer,
+            # since Windows lets a recv on the shut socket itself block until its timeout
+            peer.settimeout(2)
+            try:
+                got = peer.recv(1)
+            except TimeoutError:
+                pytest.fail("the socket was not shut")
+            assert got == b""
+        conn.close()
+
+
+def test_https_connections_go_through_the_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def do_open(self: Any, http_class: Any, req: Any, **kwargs: Any) -> Any:
+        seen["kwargs"] = kwargs
+        seen["conn"] = http_class(req.host, **kwargs)
+        raise urllib.error.URLError("stop before connecting")
+
+    monkeypatch.setattr(urllib.request.AbstractHTTPHandler, "do_open", do_open)
+    watchdog = fetch._Watchdog(60)
+    try:
+        with pytest.raises(urllib.error.URLError):
+            fetch._WatchedHTTPS(watchdog).https_open(
+                urllib.request.Request("https://example.org/d.csv")
+            )
+    finally:
+        watchdog.cancel()
+    # HTTPSHandler's own TLS arguments got through, and the connection is watched
+    assert isinstance(seen["conn"], http.client.HTTPSConnection)
+    assert "context" in seen["kwargs"]
+    assert "connect" in vars(seen["conn"])

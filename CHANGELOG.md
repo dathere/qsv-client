@@ -15,6 +15,8 @@ All notable changes to this project are documented here. The format follows
   allowlisted read-only queries and fetch the latest data. `DaemonClient` and
   `AsyncDaemonClient` take the same `run()` arguments as `Qsv` and raise the same errors.
   It uses only the standard library. See `docs/DAEMON.md`.
+- `qsv-clientd` settings `fetch_max_bytes` (default 10 GiB) and `fetch_timeout` (default 30
+  minutes), which limit how much a fetch may download and for how long.
 - `QsvError.to_dict()` and `qsv_client.errors.error_from_dict()`.
 - `QsvDaemonError` and `QsvDaemonUnavailable`.
 

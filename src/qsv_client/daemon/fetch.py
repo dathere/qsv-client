@@ -14,18 +14,24 @@ can trigger a fetch but never chooses the URL: both come from the registry.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import csv
 import glob
+import http.client
 import json
 import os
 import shutil
+import socket
 import tempfile
+import threading
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .._process import _finish_despite_cancel
+from ._http import HttpError
 from .config import ensure_private_dir
 from .registry import Dataset
 
@@ -65,20 +71,27 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -
         url, via = await _resolve(source)
         scheme = urllib.parse.urlsplit(url).scheme.lower()
         caps = await daemon._qsv.capabilities()
+        max_bytes, timeout = daemon.config.fetch_max_bytes, daemon.config.fetch_timeout
         if caps.has_command("get") and (scheme in _QSV_GET_SCHEMES or scheme in ("http", "https")):
             name = f"qsv-clientd-{ds.id}.csv"
-            await daemon._browser_run(
-                ds, ["get", url, "--name", name], timeout=daemon.config.max_timeout
-            )
-            await daemon._browser_run(
-                ds,
-                ["get", "cache-fetch", name, "--output", str(incoming)],
-                timeout=daemon.config.max_timeout,
-            )
+            try:
+                await daemon._browser_run(ds, ["get", url, "--name", name], timeout=timeout)
+                await daemon._browser_run(
+                    ds, ["get", "cache-fetch", name, "--output", str(incoming)], timeout=timeout
+                )
+            except HttpError as exc:
+                if exc.code == "qsv_timeout":
+                    raise _timed_out(timeout) from None
+                raise
+            # qsv downloads it, so the size can only be checked once it is here
+            if incoming.stat().st_size > max_bytes:
+                raise _too_large(max_bytes)
         elif scheme in _QSV_GET_SCHEMES:
             raise FetchError(501, "needs_qsv_get", f"{scheme}:// sources need qsv's `get` command")
         elif scheme in ("http", "https"):
-            await _finish_despite_cancel(asyncio.to_thread(_download, url, incoming))
+            await _finish_despite_cancel(
+                asyncio.to_thread(_download, url, incoming, max_bytes=max_bytes, timeout=timeout)
+            )
         else:
             raise FetchError(422, "bad_source", f"unsupported source scheme {scheme!r}")
 
@@ -208,17 +221,114 @@ def _datacite_content_url(doi: str) -> str | None:
     )
 
 
-def _download(url: str, dest: Path) -> None:
+def _download(url: str, dest: Path, *, max_bytes: int, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    watchdog = _Watchdog(timeout)
+    opener = urllib.request.build_opener(_WatchedHTTP(watchdog), _WatchedHTTPS(watchdog))
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+        with opener.open(req, timeout=min(_HTTP_TIMEOUT, timeout)) as resp:
             if resp.headers.get_content_type() == "text/html":
                 raise FetchError(422, "not_data", "the source URL serves a web page, not data")
+            length = resp.headers.get("Content-Length", "")
+            if length.isdigit() and int(length) > max_bytes:
+                raise _too_large(max_bytes)
+            # read1 returns whatever has arrived, so the size is checked as data comes
+            read = getattr(resp, "read1", resp.read)
+            written = 0
             with dest.open("wb") as fh:
-                shutil.copyfileobj(resp, fh, 1 << 20)
+                while chunk := read(1 << 20):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise _too_large(max_bytes)
+                    fh.write(chunk)
+        if watchdog.fired:  # the shut socket can read as a clean end of the data
+            raise _timed_out(timeout)
     except FetchError:
         dest.unlink(missing_ok=True)
         raise
-    except OSError as exc:
+    except (OSError, http.client.HTTPException) as exc:
         dest.unlink(missing_ok=True)
+        if watchdog.fired or time.monotonic() > deadline:
+            raise _timed_out(timeout) from None
         raise FetchError(502, "download_failed", f"download failed: {exc}") from None
+    finally:
+        watchdog.cancel()
+
+
+class _Watchdog:
+    """Shuts the download's sockets at the deadline, so no read (headers included) outlasts it.
+
+    Socket timeouts bound each read, not the download: a server sending a byte at a time
+    would otherwise keep the connection, the worker thread and the dataset's lock busy.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.fired = False
+        # the sockets themselves: urllib drops conn.sock once the headers are in, while the
+        # response goes on reading the body from the same socket
+        self._socks: list[socket.socket] = []
+        self._lock = threading.Lock()
+        self._timer = threading.Timer(seconds, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def watch(self, http_class: Any) -> Any:
+        def create(*args: Any, **kwargs: Any) -> http.client.HTTPConnection:
+            conn: http.client.HTTPConnection = http_class(*args, **kwargs)
+            open_socket = conn.connect
+
+            def connect() -> None:
+                open_socket()
+                with self._lock:
+                    self._socks.append(conn.sock)
+                    if self.fired:  # connected after the deadline, when there was nothing to shut
+                        self._shut(conn.sock)
+
+            setattr(conn, "connect", connect)  # noqa: B010 (mypy: can't assign to a method)
+            return conn
+
+        return create
+
+    @staticmethod
+    def _shut(sock: socket.socket) -> None:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
+
+    def _fire(self) -> None:
+        with self._lock:
+            self.fired = True
+            for sock in self._socks:
+                self._shut(sock)
+
+    def cancel(self) -> None:
+        self._timer.cancel()
+
+
+class _WatchedHTTP(urllib.request.HTTPHandler):
+    def __init__(self, watchdog: _Watchdog) -> None:
+        super().__init__()
+        self._watchdog = watchdog
+
+    def do_open(self, http_class: Any, req: Any, **kwargs: Any) -> Any:
+        return super().do_open(self._watchdog.watch(http_class), req, **kwargs)
+
+
+class _WatchedHTTPS(urllib.request.HTTPSHandler):
+    def __init__(self, watchdog: _Watchdog) -> None:
+        super().__init__()
+        self._watchdog = watchdog
+
+    def do_open(self, http_class: Any, req: Any, **kwargs: Any) -> Any:
+        # https_open passes its own context arguments, which differ across Python versions
+        return super().do_open(self._watchdog.watch(http_class), req, **kwargs)
+
+
+def _timed_out(timeout: float) -> FetchError:
+    return FetchError(
+        504, "download_timeout", f"the download took longer than {timeout:g}s (fetch_timeout)"
+    )
+
+
+def _too_large(max_bytes: int) -> FetchError:
+    return FetchError(413, "too_large", f"the download is over {max_bytes} bytes (fetch_max_bytes)")
