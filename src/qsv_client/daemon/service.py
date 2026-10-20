@@ -162,18 +162,32 @@ def service_installed() -> Literal["launchd", "systemd"] | None:
     return None
 
 
+def _stop_command() -> tuple[list[str], str] | None:
+    if sys.platform == "darwin":
+        path = _launchd_path()
+        return ["launchctl", "unload", str(path)], f"stopped launchd agent {path}"
+    if sys.platform.startswith("linux"):
+        return ["systemctl", "--user", "stop", "qsv-clientd"], (
+            "stopped systemd user unit qsv-clientd"
+        )
+    return None
+
+
 def stop_service() -> str:
     """Stop the installed service for now; it starts again at the next login.
 
     Killing it isn't enough: launchd's KeepAlive (and systemd's Restart=) relaunch it.
+    Raises RuntimeError, with the tool's message, when launchctl or systemctl fails.
     """
-    if sys.platform == "darwin":
-        path = _launchd_path()
-        subprocess.run(["launchctl", "unload", str(path)], check=False, capture_output=True)
-        return f"stopped launchd agent {path}"
-    if sys.platform.startswith("linux"):
-        subprocess.run(
-            ["systemctl", "--user", "stop", "qsv-clientd"], check=False, capture_output=True
+    command = _stop_command()
+    if command is None:
+        return "no service to stop on this platform"
+    argv, done = command
+    result = subprocess.run(argv, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"{shlex.join(argv)} failed (exit code {result.returncode})"
+            + (f": {detail}" if detail else "")
         )
-        return "stopped systemd user unit qsv-clientd"
-    return "no service to stop on this platform"
+    return done

@@ -341,6 +341,29 @@ def test_stop_service(calls: _Calls, user_home: Path, monkeypatch: pytest.Monkey
     assert all(k["check"] is False for k in calls.kwargs)
 
 
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "detail"),
+    [
+        ("", "Failed to connect to bus\n", ": Failed to connect to bus"),
+        ("said so", "", ": said so"),
+        ("", "", ""),
+    ],
+)
+def test_stop_service_reports_a_failure(
+    user_home: Path, monkeypatch: pytest.MonkeyPatch, stdout: str, stderr: str, detail: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, stdout, stderr),
+    )
+    message = f"systemctl --user stop qsv-clientd failed (exit code 1){detail}"
+    with pytest.raises(RuntimeError) as info:
+        service.stop_service()
+    assert str(info.value) == message
+
+
 def test_service_environment_copies_only_daemon_locations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
