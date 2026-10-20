@@ -192,6 +192,9 @@ async def test_async_windows_keeps_systemroot_without_inherit_env(
     assert out == {"SYSTEMROOT": "C:\\Windows", "EXTRA": None}
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="a real Windows child needs SYSTEMROOT to start"
+)
 def test_systemroot_not_added_off_windows(
     fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
