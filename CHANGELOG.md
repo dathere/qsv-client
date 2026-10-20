@@ -30,6 +30,8 @@ All notable changes to this project are documented here. The format follows
 
 - `DaemonClient` raises `QsvDaemonError` for a garbled reply from `qsv-clientd`, as
   `AsyncDaemonClient` already did, instead of leaking `http.client` exceptions.
+- `DaemonClient` closes its socket when it can't connect to `qsv-clientd`, so checking for a
+  daemon that isn't running no longer leaks one (a `ResourceWarning`).
 - The `schtasks` command that `qsv-clientd install` prints on Windows works when a path
   contains spaces.
 - A Data Schematic query's option values must be strings or numbers, like its other

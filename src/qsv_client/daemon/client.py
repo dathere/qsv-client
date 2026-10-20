@@ -181,8 +181,13 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
         if sys.platform == "win32":
             raise FileNotFoundError("Unix sockets are not used on Windows")
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(self.timeout)
-        sock.connect(self._path)
+        try:
+            sock.settimeout(self.timeout)
+            sock.connect(self._path)
+        except BaseException:
+            # not yet self.sock, so close() would not reach it
+            sock.close()
+            raise
         self.sock = sock
 
 
