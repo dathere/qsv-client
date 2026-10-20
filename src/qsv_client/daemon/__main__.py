@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import QsvDaemonError, QsvError, QsvNotFound
-from . import service
+from . import logs, service
 from .client import DaemonClient
 from .config import DaemonConfig
 from .registry import SchematicSource
@@ -28,6 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--config", type=Path, help="config file (default: daemon.json)")
     s.add_argument("--port", type=int, help="loopback port for browsers (0 disables)")
     s.add_argument("--binary", help="qsv binary to use (overrides daemon.json)")
+    s.add_argument("--log-file", type=Path, help="also log to this file (rotated at 5 MB, 3 kept)")
     s.add_argument("-v", "--verbose", action="store_true")
 
     sub.add_parser("status", help="show what the running daemon is doing")
@@ -103,10 +104,7 @@ def _confirm(prompt: str) -> bool:
 def _serve(ns: argparse.Namespace) -> int:
     from .server import Daemon
 
-    logging.basicConfig(
-        level=logging.INFO if ns.verbose else logging.WARNING,
-        format="%(asctime)s qsv-clientd %(levelname)s %(message)s",
-    )
+    logs.configure_logging(logging.INFO if ns.verbose else logging.WARNING, ns.log_file)
     config = DaemonConfig.load(ns.config)
     if ns.port is not None:
         config.port = ns.port

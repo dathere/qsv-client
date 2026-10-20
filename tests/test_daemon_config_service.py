@@ -96,6 +96,20 @@ def test_home_override_wins_everywhere(
         assert config.runtime_dir() == tmp_path / "one" / "run"
 
 
+def test_log_path(user_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    # a subdirectory: the launchd service already logs to ~/Library/Logs/qsv-clientd.log
+    assert config.log_path() == user_home / "Library" / "Logs" / "qsv-client" / "qsv-clientd.log"
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert config.log_path() == config.state_dir() / "qsv-clientd.log"
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert config.log_path() == config.state_dir() / "qsv-clientd.log"
+    monkeypatch.setenv("QSV_CLIENTD_HOME", str(tmp_path / "one"))
+    for platform in ("win32", "darwin", "linux"):
+        monkeypatch.setattr(sys, "platform", platform)
+        assert config.log_path() == tmp_path / "one" / "qsv-clientd.log"
+
+
 def test_socket_path_error_only_for_long_paths() -> None:
     long = "/tmp/" + "x" * 200
     assert config.socket_path_error(long, OSError("AF_UNIX path too long")) is not None
