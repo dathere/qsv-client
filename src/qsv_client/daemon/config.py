@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
@@ -81,6 +82,20 @@ def write_private_file(path: Path, data: bytes) -> None:
         raise
 
 
+def _is_int(v: object) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+# keyed by DaemonConfig's field annotations (strings, under `from __future__ import annotations`)
+_TYPE_CHECKS: dict[str, Callable[[object], bool]] = {
+    "str | None": lambda v: v is None or isinstance(v, str),
+    "int": _is_int,
+    "float": lambda v: _is_int(v) or isinstance(v, float),
+    "bool": lambda v: isinstance(v, bool),
+    "list[str]": lambda v: isinstance(v, list) and all(isinstance(s, str) for s in v),
+}
+
+
 @dataclass
 class DaemonConfig:
     """Settings read from ``daemon.json`` in :func:`config_dir` (every key is optional)."""
@@ -119,6 +134,10 @@ class DaemonConfig:
         unknown = sorted(set(data) - set(known))
         if unknown:
             raise ValueError(f"{path}: unknown setting(s): {', '.join(unknown)}")
+        for name, value in data.items():
+            expected = str(known[name].type)
+            if not _TYPE_CHECKS[expected](value):
+                raise ValueError(f"{path}: {name} must be {expected}, not {value!r}")
         return cls(**data)
 
     def socket_path(self) -> Path:

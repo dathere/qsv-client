@@ -34,7 +34,8 @@ from .config import (
     runtime_dir,
 )
 
-# the daemon bounds each run by its timeout; this covers the --capabilities probe and teardown
+# the daemon bounds a run's wait for a job slot, then the run itself, by its timeout (so up to
+# twice it); this covers the --capabilities probe and teardown
 _EXTRA_WAIT = 120.0
 
 
@@ -138,6 +139,13 @@ def _decode(status: int, payload: bytes) -> Any:
 def _finish(data: dict[str, Any], *, command: str, check: bool, text: bool) -> QsvResult:
     if isinstance(data.get("error"), dict):
         raise error_from_dict(data["error"])
+    if isinstance(data.get("os_error"), dict):
+        err = data["os_error"]
+        errno, strerror = err.get("errno"), err.get("strerror")
+        if isinstance(errno, int):
+            # OSError(errno, ...) picks the subclass, e.g. PermissionError, as a local run would
+            raise OSError(errno, str(strerror), err.get("filename"))
+        raise OSError(str(strerror))
     res = data["result"]
     argv = [str(a) for a in res["args"]]
     stderr = str(res["stderr"])
@@ -244,7 +252,7 @@ class DaemonClient:
             env=env,
             cwd=self.cwd or os.getcwd(),
         )
-        wait = timeout + _EXTRA_WAIT if timeout is not None else None
+        wait = 2 * timeout + _EXTRA_WAIT if timeout is not None else None
         return _finish(
             self.request("POST", "/v1/run", body, wait=wait),
             command=command,
@@ -345,7 +353,7 @@ class AsyncDaemonClient:
             env=env,
             cwd=self.cwd or os.getcwd(),
         )
-        wait = timeout + _EXTRA_WAIT if timeout is not None else None
+        wait = 2 * timeout + _EXTRA_WAIT if timeout is not None else None
         reply = await self.request("POST", "/v1/run", body, wait=wait)
         return _finish(reply, command=command, check=check, text=text)
 

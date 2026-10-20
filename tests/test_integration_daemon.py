@@ -104,7 +104,7 @@ def test_refresh_sees_changes(paired: tuple[DaemonThread, str, str, Path]) -> No
 
 
 def test_query(paired: tuple[DaemonThread, str, str, Path]) -> None:
-    d, ds_id, token, _ = paired
+    d, ds_id, token, data = paired
     reply = d.http(
         "POST",
         f"/v1/datasets/{ds_id}/query",
@@ -113,6 +113,8 @@ def test_query(paired: tuple[DaemonThread, str, str, Path]) -> None:
     )
     assert reply.status == 200, reply.body
     assert "red" in reply.json()["stdout"]
+    # frequency would otherwise leave stats cache files beside the data
+    assert sorted(p.name for p in data.parent.iterdir()) == [data.name]
 
 
 def test_render(paired: tuple[DaemonThread, str, str, Path], qsv: Qsv, tmp_path: Path) -> None:

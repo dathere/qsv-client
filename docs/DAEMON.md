@@ -56,11 +56,15 @@ client = qsv_or_daemon()  # the daemon if it is running, else a local Qsv
 Relative paths resolve against the caller's working directory (`cwd=` to change it), as
 they would locally. The daemon's own environment is used, plus any `env=` you pass. A
 connection that drops mid-run cancels the run, and the whole qsv process tree is killed as
-with any timeout. Failures raise the same `QsvError` subclasses as a local run;
-`QsvDaemonError` means the daemon refused the request, and `QsvDaemonUnavailable` means none
-is listening.
+with any timeout. `timeout` also bounds the wait for one of the daemon's `max_jobs` slots;
+if none frees up in time, the run raises `QsvTimeout` without starting qsv. Failures raise the
+same `QsvError` subclasses as a local run, and an unwritable `stdout_path` or missing `cwd`
+raises the same `OSError`. `QsvDaemonError` means the daemon refused the request, and
+`QsvDaemonUnavailable` means none is listening.
 
-From a shell: `qsv-clientd run count data.csv`.
+From a shell: `qsv-clientd run count data.csv`. Add `--stdin` (or pass `-` as the input) to
+send the shell's stdin: `cat data.csv | qsv-clientd run --stdin count`. Without it, stdin is
+left alone, so `qsv-clientd run` is safe inside `while read` loops.
 
 ## Data Schematics
 
@@ -105,15 +109,21 @@ On that basis the browser tier:
 - **Never takes a path from the page.** The daemon adds the registered file itself, and
   re-renders use only the viz arguments you registered.
 - **Uses a command allowlist.** Ad-hoc queries are limited to `count`, `headers`, `stats`,
-  `frequency`, `slice`, `search`, `select`, `sort`, `dedup`, `sample` and `table`. `stats`
-  runs with `--cache-threshold 0`, so a page never makes qsv write cache files beside your
-  data. Each has its own set of flags, and positional arguments are limited.
+  `frequency`, `slice`, `search`, `select`, `sort`, `dedup`, `sample` and `table`. Queries
+  run with `QSV_STATSCACHE_MODE=none` and `stats` with `--cache-threshold 0`, so a page never
+  makes qsv write cache files beside your data. Each has its own set of flags, and positional
+  arguments are limited. `table`'s `--width` and `--pad` are capped at 100, since they
+  multiply the output size before the output cap applies.
   - **Refused:** `-o`/`--output`, attached short-flag values, extra positionals, and any
     flag not in the command's set.
   - **Never listed:** commands that read other files, use the network or run code, such as
     `sqlp`, `luau`, `py`, `fetch`, `describegpt`, `to` and `join`.
 - **Caps outputs.** Output is capped at 4 MiB (`browser_max_output`), with a 60s timeout
   (`browser_timeout`).
+- **Bounds connections.** A client gets 10s to send its request head and 60s for the body,
+  and at most 64 loopback connections are open at once, so other local users can't exhaust
+  the daemon's file descriptors. On POSIX your own clients use the socket and aren't affected
+  by the cap; on Windows they share it.
 - **Scrubs paths.** Error messages a page sees have local paths replaced by the dataset
   title.
 - **Answers CORS only for allowed origins.** Replies carry CORS headers only for origins in
@@ -152,7 +162,7 @@ bodies). Daemon refusals are `{"daemon_error": {"code", "message"}}` with a 4xx/
 | `POST /v1/datasets/<id>/rows` | `{"column"?, "value"?, "offset"=0, "limit"=100 (≤500)}` → `{"headers","rows","offset"}`; with `value`, the rows whose `column` equals it exactly |
 | `POST /v1/datasets/<id>/refresh` | `{"stats"?: bool}` → `{"changed","fingerprint","rows","stats"?}`; `changed` compares with the data the schematic was rendered from |
 | `POST /v1/datasets/<id>/query` | `{"command","args"}` → `{"stdout","truncated","bytes"}` |
-| `POST /v1/datasets/<id>/render` | `{}` → the new schematic HTML (`text/html`). It is also written over the registered schematic file |
+| `POST /v1/datasets/<id>/render` | `{}` → the new schematic HTML (`text/html`); a local caller gets `{"schematic_path","bytes"}` instead. It is also written over the registered schematic file |
 | `POST /v1/datasets/<id>/fetch` | `{}` → `{"changed","fingerprint","via"}`; follow with `render` |
 
 ### Local only
@@ -160,7 +170,7 @@ bodies). Daemon refusals are `{"daemon_error": {"code", "message"}}` with a 4xx/
 | Route | Body → reply |
 |---|---|
 | `GET /v1/status` | → daemon, qsv and job information |
-| `POST /v1/run` | `{"command","args","cwd"?,"env"?,"stdin_b64"?,"stdout_path"?,"timeout"?}` → `{"result":{"args","exit_code","stdout_b64","stderr","duration","stdout_path"}}` or `{"error": <QsvError.to_dict()>}` (timeouts, version errors). The run itself uses `check=False`; the client applies `check` |
+| `POST /v1/run` | `{"command","args","cwd"?,"env"?,"stdin_b64"?,"stdout_path"?,"timeout"?}` → `{"result":{"args","exit_code","stdout_b64","stderr","duration","stdout_path"}}` or `{"error": <QsvError.to_dict()>}` (timeouts, version errors) or `{"os_error": {"errno","strerror","filename"}}`. The run itself uses `check=False`; the client applies `check` |
 | `GET /v1/datasets`, `POST /v1/datasets`, `DELETE /v1/datasets/<id>` | list / register (`path`, `viz_args`, `schematic_path`, `title`, `pid`, `source_url`, `allow_replace`, `force`, `render`) / forget |
 | `GET /v1/pairings`, `POST /v1/pairings/<code>/approve\|deny` | pending pairings / decide |
 | `POST /v1/tokens/revoke` | `{"dataset_id"?}` → `{"revoked": n}` |
@@ -197,5 +207,8 @@ re-rendering. Flags whose value is a file keep only its basename and are listed 
   `contentUrl`. Most DOIs resolve to a landing page instead, so register `--source-url` for
   those.
 
-The download must parse as CSV (`qsv count`) before it is used. It is kept in the daemon's
-cache and does not overwrite your file, unless you registered with `--allow-replace`.
+The download is used only if it has every column the current data has; new columns are fine.
+That keeps an error page served as plain text from replacing your data. If columns were
+renamed or dropped on purpose, run `qsv-clientd fetch <id> --force` (a page can't). The
+download is kept in the daemon's cache and does not overwrite your file, unless you
+registered with `--allow-replace`.

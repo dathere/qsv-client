@@ -234,6 +234,14 @@ def test_min_version_from_capabilities_json(fake_qsv: Callable[[str], str], tmp_
         Qsv(binary, env=env, min_version="25.2.0").count("x.csv")
 
 
+@pytest.mark.parametrize("cls", [Qsv, AsyncQsv])
+def test_bad_min_version_fails_at_construction(
+    fake_qsv: Callable[[str], str], cls: type[Qsv] | type[AsyncQsv]
+) -> None:
+    with pytest.raises(ValueError, match="not a qsv version"):
+        cls(fake_qsv(CAPABILITIES), min_version="25")
+
+
 async def test_async_min_version_from_capabilities_json(
     fake_qsv: Callable[[str], str], tmp_path: Path
 ) -> None:

@@ -14,6 +14,8 @@ can trigger a fetch but never chooses the URL: both come from the registry.
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import os
 import shutil
@@ -43,17 +45,18 @@ class FetchError(Exception):
         self.code = code
 
 
-async def fetch_latest(daemon: Daemon, ds: Dataset) -> dict[str, Any]:
+async def fetch_latest(daemon: Daemon, ds: Dataset, *, force: bool = False) -> dict[str, Any]:
+    """``force`` skips the column check (the user's call, never a page's)."""
     source = ds.source_url or ds.pid
     if not source:
         raise FetchError(409, "no_source", "no source URL or PID is registered for this dataset")
     # one fetch per dataset at a time: they share the qsv cache entry and the target file
     lock = daemon._fetch_locks.setdefault(ds.id, asyncio.Lock())
     async with lock:
-        return await _fetch_locked(daemon, ds, source)
+        return await _fetch_locked(daemon, ds, source, force)
 
 
-async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str) -> dict[str, Any]:
+async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -> dict[str, Any]:
     cache = ensure_private_dir(daemon.home / "cache" / ds.id)
     # threads can't be cancelled, so a disconnect waits for them (_finish_despite_cancel)
     # before the staging file is removed and the lock released
@@ -79,8 +82,20 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str) -> dict[str, A
         else:
             raise FetchError(422, "bad_source", f"unsupported source scheme {scheme!r}")
 
-        # a page of HTML or a truncated file must not replace good data
-        await daemon._browser_run(ds, ["count", str(incoming)])
+        # An error page served as text/plain still "parses" as one-column CSV, so require every
+        # column the data has now (new ones are fine): the viz arguments may name any of them
+        headers = await _headers(daemon, ds, incoming)
+        current = Path(ds.path)
+        if not force and current.is_file():
+            missing = [h for h in await _headers(daemon, ds, current) if h not in headers]
+            if missing or not headers:
+                raise FetchError(
+                    422,
+                    "columns_missing",
+                    f"the fetched data lacks {len(missing)} of the dataset's columns, so it was "
+                    "not used; if the columns were renamed or dropped on purpose, run "
+                    f"`qsv-clientd fetch {ds.id} --force`",
+                )
         fp = await daemon._fingerprint(incoming, ds.algo, ds)
         changed = fp.digest != ds.digest
         if ds.allow_replace:
@@ -103,6 +118,12 @@ def _private_temp(directory: Path, suffix: str) -> Path:
     fd, name = tempfile.mkstemp(prefix=".qsv-clientd-", suffix=suffix, dir=directory)
     os.close(fd)
     return Path(name)
+
+
+async def _headers(daemon: Daemon, ds: Dataset, path: Path) -> list[str]:
+    out = await daemon._browser_run(ds, ["slice", "--len", "0", str(path)])
+    rows = list(csv.reader(io.StringIO(out)))
+    return rows[0] if rows else []
 
 
 def _replace_keeping_mode(src: Path, target: Path) -> None:

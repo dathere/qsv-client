@@ -20,6 +20,9 @@ NO_SIDE_FILES: dict[str, tuple[str, ...]] = {
     # stats caches its results in <stem>.stats.csv* beside the input unless told not to
     "stats": ("--cache-threshold", "0"),
 }
+QUERY_ENV = {"QSV_STATSCACHE_MODE": "none"}
+"""Env for browser queries: "smart" commands such as frequency otherwise run stats and leave
+its cache files beside the input."""
 
 
 @dataclass(frozen=True)
@@ -30,10 +33,16 @@ class CommandRule:
     """Flags that take one value."""
     positionals: int = 0
     """Positional arguments before the input (e.g. search's <regex>)."""
+    limits: tuple[tuple[str, int], ...] = ()
+    """Options whose value must be an integer from 0 to a maximum."""
 
 
-def _rule(switches: str = "", options: str = "", positionals: int = 0) -> CommandRule:
-    return CommandRule(frozenset(switches.split()), frozenset(options.split()), positionals)
+def _rule(
+    switches: str = "", options: str = "", positionals: int = 0, limits: str = ""
+) -> CommandRule:
+    """``limits`` is "flag=max ...": e.g. "-p=100 --pad=100"."""
+    bounds = tuple((f, int(m)) for f, m in (s.split("=") for s in limits.split()))
+    return CommandRule(frozenset(switches.split()), frozenset(options.split()), positionals, bounds)
 
 
 BROWSER_COMMANDS: dict[str, CommandRule] = {
@@ -62,7 +71,12 @@ BROWSER_COMMANDS: dict[str, CommandRule] = {
     ),
     "dedup": _rule("-N --numeric -i --ignore-case --sorted", "-s --select"),
     "sample": _rule("--bernoulli --systematic", "--seed", positionals=1),
-    "table": _rule("", "-w --width -p --pad -a --align -c --condense"),
+    # width and padding multiply the output size, and the output cap only applies afterwards
+    "table": _rule(
+        "",
+        "-w --width -p --pad -a --align -c --condense",
+        limits="-w=100 --width=100 -p=100 --pad=100",
+    ),
 }
 
 
@@ -90,6 +104,11 @@ def build_query(command: str, args: list[object], available: frozenset[str]) -> 
                     value = str(nxt)
                 if value.startswith("-") and not _is_number(value):
                     raise NotAllowed(f"value for {name} may not start with '-'")
+                limit = dict(rule.limits).get(name)
+                if limit is not None and not (
+                    value.isascii() and value.isdigit() and int(value) <= limit
+                ):
+                    raise NotAllowed(f"{name} must be a whole number from 0 to {limit}")
                 out += [name, value]
             else:
                 raise NotAllowed(f"flag {name!r} is not allowed for {command}")

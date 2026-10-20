@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ from qsv_client.daemon.server import Daemon
 StartDaemon = Callable[..., DaemonThread]
 
 ECHO = """
+import contextlib
 import json
 print(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin": sys.stdin.read()}))
 """
@@ -599,14 +601,72 @@ def test_cli_run_forwards_stdin(fake_qsv: Callable[[str], str], start_daemon: St
     import subprocess
 
     start_daemon(_script(fake_qsv, ECHO))
-    proc = subprocess.run(
-        [sys.executable, "-m", "qsv_client.daemon", "run", "count"],
-        input=b"a\n1\n",
-        capture_output=True,
-        timeout=60,
-        check=True,
+
+    def run(*argv: str) -> str:
+        proc = subprocess.run(
+            [sys.executable, "-m", "qsv_client.daemon", "run", *argv],
+            input=b"a\n1\n",
+            capture_output=True,
+            timeout=60,
+            check=True,
+        )
+        stdin: str = json.loads(proc.stdout)["stdin"]
+        return stdin
+
+    assert run("--stdin", "count") == "a\n1\n"
+    assert run("count", "-") == "a\n1\n"
+    # without being asked, stdin is left for the caller (e.g. a `while read` loop)
+    assert run("count") == ""
+
+
+def test_queued_run_times_out_as_qsv_timeout(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon
+) -> None:
+    import threading
+
+    start_daemon(_script(fake_qsv, "import time; time.sleep(3)\n"), max_jobs=1)
+    first = threading.Thread(target=lambda: DaemonClient().run("count", timeout=30))
+    first.start()
+    time.sleep(0.5)  # let it take the only job slot
+    try:
+        with pytest.raises(QsvTimeout, match="job slots"):
+            DaemonClient().run("count", timeout=0.5)
+    finally:
+        first.join()
+
+
+def test_os_errors_are_the_same_as_locally(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    from qsv_client import Qsv
+
+    binary = _script(fake_qsv, ECHO)
+    start_daemon(binary)
+    target = tmp_path  # a directory: IsADirectoryError, or PermissionError on Windows
+    with pytest.raises(OSError) as local:
+        Qsv(binary).run("count", stdout_path=target)
+    with pytest.raises(OSError) as remote:
+        DaemonClient().run("count", stdout_path=target)
+    assert type(remote.value) is type(local.value)
+    assert remote.value.errno == local.value.errno
+
+
+ENV_QSV = """
+print(os.environ.get("QSV_STATSCACHE_MODE", "unset"))
+"""
+
+
+def test_queries_never_use_the_stats_cache(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, data: Path
+) -> None:
+    d = start_daemon(_script(fake_qsv, ENV_QSV))
+    ds_id = _register(d, data)
+    token = d.pair(_sha(data))
+    reply = d.http(
+        "POST", f"/v1/datasets/{ds_id}/query", {"command": "frequency", "args": []}, token=token
     )
-    assert json.loads(proc.stdout)["stdin"] == "a\n1\n"
+    assert reply.status == 200, reply.body
+    assert reply.json()["stdout"].strip() == "none"
 
 
 class _Server:
@@ -666,6 +726,71 @@ def test_concurrent_fetches_and_replace_keeps_mode(
         assert leftovers == []
     finally:
         server.close()
+
+
+HEADER_QSV = """
+if sys.argv[1] == "slice":  # slice --len 0 <path>: the header row
+    print(open(sys.argv[-1]).readline(), end="")
+else:
+    print("1")
+"""
+
+
+def test_fetch_keeps_data_when_columns_are_missing(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    data = tmp_path / "d.csv"
+    data.write_text("name,team\nold,red\n")
+    error_page = _Server(b"Service Unavailable - try again later\n")
+    try:
+        d = start_daemon(_script(fake_qsv, HEADER_QSV))
+        ds_id = _register(d, data, source_url=error_page.url, allow_replace=True)
+        token = d.pair(_sha(data))
+        reply = d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token)
+        assert reply.status == 422 and reply.json()["daemon_error"]["code"] == "columns_missing"
+        assert data.read_text() == "name,team\nold,red\n"
+        # a page can't override the check
+        forced = d.http("POST", f"/v1/datasets/{ds_id}/fetch", {"force": True}, token=token)
+        assert forced.status == 422
+    finally:
+        error_page.close()
+    # a new column is fine
+    grown = _Server(b"name,team,score\nnew,blue,3\n")
+    try:
+        d.http(
+            "POST",
+            "/v1/datasets",
+            {"path": str(data), "source_url": grown.url, "allow_replace": True},
+            origin=None,
+            token=d.daemon.local_token,
+        )
+        reply = d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token)
+        assert reply.status == 200, reply.body
+        assert data.read_text() == "name,team,score\nnew,blue,3\n"
+    finally:
+        grown.close()
+    # a rename needs the user's say-so
+    renamed = _Server(b"who,team,score\nnew,blue,3\n")
+    try:
+        d.http(
+            "POST",
+            "/v1/datasets",
+            {"path": str(data), "source_url": renamed.url, "allow_replace": True},
+            origin=None,
+            token=d.daemon.local_token,
+        )
+        assert d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token).status == 422
+        reply = d.http(
+            "POST",
+            f"/v1/datasets/{ds_id}/fetch",
+            {"force": True},
+            origin=None,
+            token=d.daemon.local_token,
+        )
+        assert reply.status == 200, reply.body
+        assert data.read_text().startswith("who,")
+    finally:
+        renamed.close()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
@@ -768,6 +893,46 @@ def test_slow_request_head_times_out(
     reply = s.recv(4096)
     s.close()
     assert reply.startswith(b"HTTP/1.1 408")
+
+
+def test_slow_request_body_times_out(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from qsv_client.daemon import server
+
+    monkeypatch.setattr(server, "_BODY_TIMEOUT", 0.3)
+    d = start_daemon(_script(fake_qsv, ECHO))
+    s = socket.create_connection(("127.0.0.1", d.port), timeout=10)
+    s.sendall(
+        b"GET /v1/hello HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Length: 10\r\n\r\n" % d.port
+    )
+    reply = s.recv(4096)
+    s.close()
+    assert reply.startswith(b"HTTP/1.1 408")
+
+
+def test_loopback_connections_are_capped(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from qsv_client.daemon import server
+
+    monkeypatch.setattr(server, "_MAX_TCP_CONNECTIONS", 2)
+    d = start_daemon(_script(fake_qsv, ECHO))
+    held = [socket.create_connection(("127.0.0.1", d.port), timeout=10) for _ in range(2)]
+    try:
+        time.sleep(0.3)  # let the daemon accept them
+        extra = socket.create_connection(("127.0.0.1", d.port), timeout=10)
+        # dropped at once, without waiting for a request
+        with contextlib.suppress(ConnectionResetError):
+            assert extra.recv(4096) == b""
+        extra.close()
+        if sys.platform != "win32":  # the owner's socket clients are unaffected
+            assert DaemonClient().run("count").exit_code == 0
+    finally:
+        for s in held:
+            s.close()
+    time.sleep(0.3)
+    assert d.http("GET", "/v1/hello").status == 200
 
 
 def test_shutdown_is_not_blocked_by_a_client_that_stops_reading(
