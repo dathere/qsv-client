@@ -35,6 +35,11 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("uninstall", help="stop and remove the user service")
 
     r = sub.add_parser("run", help="run a qsv command through the daemon")
+    r.add_argument(
+        "--stdin",
+        action="store_true",
+        help="send this process's stdin to the command (implied when an argument is '-')",
+    )
     r.add_argument("command")
     r.add_argument("args", nargs=argparse.REMAINDER)
 
@@ -66,6 +71,12 @@ def _parser() -> argparse.ArgumentParser:
     ):
         sp = sub.add_parser(name, help=help_)
         sp.add_argument("dataset_id")
+        if name == "fetch":
+            sp.add_argument(
+                "--force",
+                action="store_true",
+                help="use the new data even if some of the current columns are gone",
+            )
 
     sub.add_parser("pending", help="list schematics waiting to be paired")
     a = sub.add_parser("approve", help="approve a schematic's pairing code")
@@ -186,8 +197,10 @@ def main(argv: list[str] | None = None) -> int:
         if ns.cmd == "status":
             _print(client.status())
         elif ns.cmd == "run":
-            # like running qsv directly: redirected or piped input reaches the command
-            stdin = None if sys.stdin is None or sys.stdin.isatty() else sys.stdin.buffer.read()
+            # only when asked: the whole of stdin is read up front, which would swallow a shell
+            # loop's input or hang on a pipe that never closes
+            wants = ns.stdin or "-" in ns.args
+            stdin = sys.stdin.buffer.read() if wants and sys.stdin is not None else None
             result = client.run(ns.command, *ns.args, stdin=stdin, check=False, text=False)
             sys.stdout.buffer.write(result.stdout_bytes or b"")
             sys.stderr.write(result.stderr)
@@ -211,7 +224,8 @@ def main(argv: list[str] | None = None) -> int:
             client.request("POST", f"/v1/datasets/{ns.dataset_id}/render", {}, wait=None)
             print("re-rendered")
         elif ns.cmd == "fetch":
-            _print(client.request("POST", f"/v1/datasets/{ns.dataset_id}/fetch", {}, wait=None))
+            body = {"force": True} if ns.force else {}
+            _print(client.request("POST", f"/v1/datasets/{ns.dataset_id}/fetch", body, wait=None))
         elif ns.cmd == "pending":
             _print(client.request("GET", "/v1/pairings"))
         elif ns.cmd == "approve":

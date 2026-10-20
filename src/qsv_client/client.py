@@ -144,11 +144,14 @@ class _Base:
                 variables, so the key never appears in the process table.
             min_version: raise :class:`QsvVersionError` on first use if the binary is older.
                 The binary must be at least :data:`MIN_QSV_VERSION` (25.0.0) regardless;
-                this can only raise that floor.
+                this can only raise that floor. A string that is not a version
+                (``"major.minor.patch"``) raises ``ValueError`` here.
             kill_grace: seconds to wait between the polite stop (SIGTERM, or
                 ``CTRL_BREAK_EVENT`` on Windows) and the forced kill on timeout or
                 cancellation, and the most spent collecting output after the kill.
         """
+        if min_version is not None:
+            parse_version(min_version)  # fail now, not on every run
         self.binary = find_qsv(binary)
         self.timeout = timeout
         self.inherit_env = inherit_env

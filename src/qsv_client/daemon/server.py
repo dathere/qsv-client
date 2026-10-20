@@ -32,10 +32,10 @@ from typing import Any, ClassVar, Literal
 
 from .. import __version__
 from ..client import AsyncQsv, QsvResult, find_qsv
-from ..errors import SUCCESS_EXIT_CODES, QsvError, error_from_run
+from ..errors import EXIT_TIMEOUT, SUCCESS_EXIT_CODES, QsvError, QsvTimeout, error_from_run
 from . import fetch
 from ._http import HttpError, Request, Response, read_body, read_head, write_response
-from .allowlist import NO_SIDE_FILES, NotAllowed, build_query, exact_match_regex
+from .allowlist import NO_SIDE_FILES, QUERY_ENV, NotAllowed, build_query, exact_match_regex
 from .config import (
     API_VERSION,
     DaemonConfig,
@@ -55,9 +55,14 @@ _LOCAL_BODY_LIMIT = 64 * 1024 * 1024
 _BROWSER_BODY_LIMIT = 64 * 1024
 _MAX_ROWS = 500
 _HEAD_TIMEOUT = 10.0
+"""Seconds a client gets to send its request head; an idle connection can't hold us forever."""
+_BODY_TIMEOUT = 60.0
+"""Seconds a client gets to send its request body once the head is in."""
 _FLUSH_TIMEOUT = 30.0
 """Seconds to flush a response to a client before dropping the connection."""
-"""Seconds a client gets to send its request head; an idle connection can't hold us forever."""
+_MAX_TCP_CONNECTIONS = 64
+"""Open loopback connections allowed at once. Other local users can reach the loopback port
+(not the 0600 socket); without a cap they could use up our file descriptors."""
 
 
 class Daemon:
@@ -86,6 +91,7 @@ class Daemon:
         self._owns_socket = False
         self._connections: set[asyncio.Task[None]] = set()
         self._writers: set[asyncio.StreamWriter] = set()
+        self._tcp_open = 0
         self._fetch_locks: dict[str, asyncio.Lock] = {}
         self._qsv = self._client()
 
@@ -208,6 +214,20 @@ class Daemon:
     async def _on_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, transport: str
     ) -> None:
+        if transport == "tcp":
+            if self._tcp_open >= _MAX_TCP_CONNECTIONS:
+                writer.transport.abort()
+                return
+            self._tcp_open += 1
+        try:
+            await self._serve_connection(reader, writer, transport)
+        finally:
+            if transport == "tcp":
+                self._tcp_open -= 1
+
+    async def _serve_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, transport: str
+    ) -> None:
         self._writers.add(writer)
         task = asyncio.current_task()
         if task is not None:
@@ -223,7 +243,10 @@ class Daemon:
                     raise HttpError(408, "timeout", "request head not received in time") from None
                 tier = self._tier(request, transport)
                 limit = _LOCAL_BODY_LIMIT if tier == "local" else _BROWSER_BODY_LIMIT
-                await read_body(reader, request, limit)
+                try:
+                    await asyncio.wait_for(read_body(reader, request, limit), _BODY_TIMEOUT)
+                except asyncio.TimeoutError:
+                    raise HttpError(408, "timeout", "request body not received in time") from None
                 if request.method == "OPTIONS":
                     response = Response(204)
                 else:
@@ -408,7 +431,7 @@ class Daemon:
         timeout = self._timeout(body.get("timeout"), self.config.max_timeout)
         qsv = self._client(cwd)
         try:
-            async with self._job():
+            async with self._job(wait=timeout):
                 result = await qsv.run(
                     command,
                     *args,
@@ -421,6 +444,11 @@ class Daemon:
                 )
         except QsvError as exc:
             return Response.json({"error": exc.to_dict()})
+        except OSError as exc:  # e.g. an unwritable stdout_path or a missing cwd, as locally
+            filename = exc.filename if isinstance(exc.filename, str) else None
+            return Response.json(
+                {"os_error": {"errno": exc.errno, "strerror": exc.strerror, "filename": filename}}
+            )
         return Response.json({"result": _result_dict(result)})
 
     async def _register(self, body: dict[str, Any]) -> Response:
@@ -613,7 +641,7 @@ class Daemon:
             raise HttpError(403, "not_allowed", str(exc)) from None
         with tempfile.TemporaryDirectory(prefix="qsv-clientd-") as tmp:
             out = Path(tmp) / "out"
-            await self._browser_run(ds, [*argv, ds.path], stdout_path=out)
+            await self._browser_run(ds, [*argv, ds.path], stdout_path=out, env=QUERY_ENV)
             size = out.stat().st_size
             with out.open("rb") as fh:
                 data = fh.read(self.config.browser_max_output)
@@ -636,8 +664,10 @@ class Daemon:
     async def _fetch(self, ds: Dataset, body: dict[str, Any], tier: Tier) -> Response:
         if tier == "browser" and not self.config.allow_fetch:
             raise HttpError(403, "disabled", "fetching is turned off")
+        # only the user may accept data whose columns changed; a page can't ask for that
+        force = tier == "local" and body.get("force") is True
         try:
-            result = await fetch.fetch_latest(self, ds)
+            result = await fetch.fetch_latest(self, ds, force=force)
         except fetch.FetchError as exc:
             raise HttpError(exc.status, exc.code, _scrub(str(exc), ds)) from None
         return Response.json(result)
@@ -757,13 +787,26 @@ class Daemon:
         return result.stdout or ""
 
     @contextlib.asynccontextmanager
-    async def _job(self) -> Any:
-        async with self.jobs:
-            self.running += 1
+    async def _job(self, wait: float | None = None) -> Any:
+        """Hold one of the ``max_jobs`` slots. With ``wait``, give up after that many seconds
+        with :class:`QsvTimeout`: a caller's timeout covers the time queued, not just qsv."""
+        if wait is None:
+            await self.jobs.acquire()
+        else:
             try:
-                yield
-            finally:
-                self.running -= 1
+                await asyncio.wait_for(self.jobs.acquire(), wait)
+            except asyncio.TimeoutError:
+                raise QsvTimeout(
+                    f"timed out after {wait}s waiting for one of the daemon's "
+                    f"{self.config.max_jobs} job slots; qsv did not run",
+                    exit_code=EXIT_TIMEOUT,
+                ) from None
+        self.running += 1
+        try:
+            yield
+        finally:
+            self.running -= 1
+            self.jobs.release()
 
     def _timeout(self, value: object, cap: float) -> float:
         if value is None:

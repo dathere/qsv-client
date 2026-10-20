@@ -66,6 +66,9 @@ def test_query_allows_listed_flags() -> None:
         ("search", ["-s", "--output", "x"]),  # option value that is a flag
         ("search", []),  # missing <regex>
         ("frequency", [True]),
+        ("table", ["-p", "2000000000"]),  # padding multiplies the output size
+        ("table", ["--width=101"]),
+        ("table", ["-w", "1e3"]),
     ],
 )
 def test_query_rejects(command: str, args: list[object]) -> None:
@@ -201,6 +204,40 @@ def test_config_rejects_unknown_keys(tmp_path: Path) -> None:
     assert DaemonConfig.load(path).port == 1234
 
 
+@pytest.mark.parametrize(
+    "setting",
+    [
+        '{"max_jobs": "2"}',
+        '{"max_timeout": "60"}',
+        '{"browser": 1}',
+        '{"port": true}',
+        '{"browser_origins": "null"}',
+        '{"binary": 5}',
+    ],
+)
+def test_config_rejects_wrong_types(tmp_path: Path, setting: str) -> None:
+    path = tmp_path / "daemon.json"
+    path.write_text(setting)
+    with pytest.raises(ValueError, match="must be"):
+        DaemonConfig.load(path)
+
+
+def test_config_accepts_every_field_type(tmp_path: Path) -> None:
+    path = tmp_path / "daemon.json"
+    path.write_text(
+        '{"binary": null, "port": 0, "max_timeout": 30, "kill_grace": 1.5, "browser": false,'
+        ' "browser_origins": ["null"]}'
+    )
+    config = DaemonConfig.load(path)
+    assert config.max_timeout == 30 and config.kill_grace == 1.5 and config.browser is False
+    # a new setting needs a type check, or loading it would raise KeyError
+    from dataclasses import fields
+
+    from qsv_client.daemon.config import _TYPE_CHECKS
+
+    assert {str(f.type) for f in fields(DaemonConfig)} <= set(_TYPE_CHECKS)
+
+
 # -- HTTP parsing ---------------------------------------------------------------------------
 
 
@@ -236,6 +273,16 @@ def test_stats_never_writes_cache_files() -> None:
     assert build_query("stats", ["-E"], ALL) == ["stats", "-E", "--cache-threshold", "0"]
     with pytest.raises(NotAllowed):
         build_query("stats", ["--cache-threshold", "1"], ALL)
+
+
+def test_table_padding_within_bounds() -> None:
+    assert build_query("table", ["-p", "100", "--width=4"], ALL) == [
+        "table",
+        "-p",
+        "100",
+        "--width",
+        "4",
+    ]
 
 
 # -- service definitions --------------------------------------------------------------------

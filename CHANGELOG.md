@@ -18,6 +18,11 @@ All notable changes to this project are documented here. The format follows
 - `QsvError.to_dict()` and `qsv_client.errors.error_from_dict()`.
 - `QsvDaemonError` and `QsvDaemonUnavailable`.
 
+### Changed
+
+- A `min_version` that is not a version (`"major.minor.patch"`) now raises `ValueError` when
+  `Qsv` or `AsyncQsv` is created, instead of on every run.
+
 ## [0.4.0] - 2026-10-15
 
 qsv 25.0.0 or later is now required. It is the first release whose binaries (`qsv`,
