@@ -37,6 +37,7 @@ def key_for_grant(digest: str) -> str:
 
 
 Order = tuple[int, bool]  # (0-based column, descending)
+Source = tuple[str, tuple[int, int] | None]  # a dataset file and its version
 
 
 @dataclass
@@ -108,9 +109,19 @@ class ResultStore:
     # ---- creating
 
     async def create(
-        self, key: str, ds: Dataset, produce: Callable[[Path], Awaitable[None]]
+        self,
+        key: str,
+        ds: Dataset,
+        produce: Callable[[Path], Awaitable[None]],
+        source: Source | None = None,
     ) -> Stored:
-        """Replace ``key``'s result with the CSV ``produce`` writes to the path it is given."""
+        """Replace ``key``'s result with the CSV ``produce`` writes to the path it is given.
+
+        ``source`` is the dataset file (path, version) the CSV was computed from, when qsv
+        already ran before this call; otherwise it is taken now, before ``produce`` runs.
+        """
+        if source is None:
+            source = snapshot(ds)
         async with self._locks.setdefault(key, asyncio.Lock()):
             self._drop(key)
             directory = ensure_private_dir(self.root / key)
@@ -118,9 +129,9 @@ class ResultStore:
                 id=secrets.token_hex(8),
                 key=key,
                 dataset_id=ds.id,
-                data_path=ds.path,
-                # before qsv reads it, so a change while it runs makes the result stale too
-                data_version=_version(ds.path),
+                # from before qsv read it, so a change while it ran makes the result stale too
+                data_path=source[0],
+                data_version=source[1],
                 directory=directory,
                 headers=[],
                 total=0,
@@ -147,13 +158,13 @@ class ResultStore:
         live = {key_for_grant(d) for d in self._daemon.pairing.live_digests()}
         return key == LOCAL_KEY or key in live
 
-    async def adopt(self, key: str, ds: Dataset, path: Path) -> Stored:
-        """Store a CSV file qsv already wrote (it is moved, not copied when on one disk)."""
+    async def adopt(self, key: str, ds: Dataset, path: Path, source: Source) -> Stored:
+        """Store a CSV file qsv already wrote from ``source`` (see ``snapshot``)."""
 
         async def move(target: Path) -> None:
             await asyncio.to_thread(shutil.move, path, target)
 
-        return await self.create(key, ds, move)
+        return await self.create(key, ds, move, source)
 
     # ---- reading
 
@@ -172,7 +183,7 @@ class ResultStore:
             stored = self._results.get(key)
             if stored is None or result_id != stored.id or stored.dataset_id != ds.id:
                 raise HttpError(410, "result_gone", "that result was replaced; run the query again")
-            if (stored.data_path, stored.data_version) != (ds.path, _version(ds.path)):
+            if (stored.data_path, stored.data_version) != snapshot(ds):
                 raise HttpError(409, "result_stale", "the data changed; run the query again")
             if order is not None and not 0 <= order[0] < len(stored.headers):
                 raise HttpError(422, "bad_request", "order column is out of range")
@@ -279,10 +290,11 @@ class ResultStore:
         return records if with_headers else records[1:]
 
 
-def _version(path: str) -> tuple[int, int] | None:
-    """What changes when a file is rewritten in place (a fetch with --allow-replace, an edit)."""
+def snapshot(ds: Dataset) -> Source:
+    """The dataset's file and its size and mtime, which change when it is replaced: a fetch
+    switching to a new copy, a fetch with --allow-replace, or an edit."""
     try:
-        st = Path(path).stat()
+        st = Path(ds.path).stat()
     except OSError:
-        return None
-    return (st.st_size, st.st_mtime_ns)
+        return (ds.path, None)
+    return (ds.path, (st.st_size, st.st_mtime_ns))

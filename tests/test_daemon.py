@@ -1551,3 +1551,34 @@ def test_expired_tokens_results_are_swept(
     while list(idle_results.iterdir()):
         assert time.monotonic() < deadline, "the idle sweep never ran"
         time.sleep(0.1)
+
+
+def test_a_query_overlapping_a_file_change_is_stale(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setenv("FAKE_SLOW", "1")
+    data = _people(tmp_path / "data" / "people.csv", 300)
+    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000)
+    ds_id = _register(d, data)
+    token = d.pair(_sha(data))
+    with ThreadPoolExecutor(1) as pool:
+        running = pool.submit(
+            d.http,
+            "POST",
+            f"/v1/datasets/{ds_id}/query",
+            {"command": "slice", "args": []},
+            token=token,
+        )
+        time.sleep(0.5)
+        # replaced while qsv is still reading the old contents (as a fetch would)
+        with data.open("a") as fh:
+            fh.write("301,person301,red\n")
+        reply = running.result()
+    # stale at once: its first page is read from the old contents
+    assert reply.status == 409, reply.body
+    assert reply.json()["daemon_error"]["code"] == "result_stale"

@@ -56,7 +56,7 @@ from .config import (
 )
 from .pairing import Pairing, token_digest
 from .registry import Dataset, Fingerprint, Registry, SchematicSource, validate_viz_args
-from .results import LOCAL_KEY, ResultStore, Stored, key_for_grant
+from .results import LOCAL_KEY, ResultStore, Stored, key_for_grant, snapshot
 
 log = logging.getLogger("qsv_client.daemon")
 
@@ -694,6 +694,7 @@ class Daemon:
         except NotAllowed as exc:
             raise HttpError(403, "not_allowed", str(exc)) from None
         is_csv = command in CSV_OUTPUT and not NON_CSV_FLAGS.intersection(args)
+        source = snapshot(ds)  # before qsv reads it: a fetch may swap the file meanwhile
         with tempfile.TemporaryDirectory(prefix="qsv-clientd-") as tmp:
             out = Path(tmp) / "out"
             await self._browser_run(ds, [*argv, ds.path], stdout_path=out, env=QUERY_ENV)
@@ -705,7 +706,7 @@ class Daemon:
             reply: dict[str, Any] = {"stdout": text, "truncated": truncated, "bytes": size}
             if is_csv and truncated:
                 # too big to send whole: keep it, and let the page read it a page at a time
-                stored = await self.results.adopt(key, ds, out)
+                stored = await self.results.adopt(key, ds, out, source)
                 reply["result"] = stored.public()
                 reply.update(await self._first_page(key, ds, stored, 0, _PAGE_ROWS))
             else:
