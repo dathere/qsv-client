@@ -562,8 +562,15 @@ def raw() -> Iterator[Callable[[list[bytes], float], _Raw]]:
         [b"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nX-Pad: "] + [b"a"] * 300,
         # a body that stops arriving: the socket times out after the deadline
         [b"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\n\r\nname\n"] + [b""] * 300,
+        # a chunk-size line that never ends: read1 blocks inside the body, after urllib has
+        # let go of the connection's socket
+        [
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nTransfer-Encoding: chunked\r\n\r\n"
+            b"5\r\nname\n\r\n"
+        ]
+        + [b"0"] * 300,
     ],
-    ids=["trickled-headers", "stalled-body"],
+    ids=["trickled-headers", "stalled-body", "trickled-chunk-size"],
 )
 async def test_any_slow_download_is_a_download_timeout(
     fake_qsv: Callable[[str], str],

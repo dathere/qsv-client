@@ -267,7 +267,9 @@ class _Watchdog:
 
     def __init__(self, seconds: float) -> None:
         self.fired = False
-        self._conns: list[http.client.HTTPConnection] = []
+        # the sockets themselves: urllib drops conn.sock once the headers are in, while the
+        # response goes on reading the body from the same socket
+        self._socks: list[socket.socket] = []
         self._lock = threading.Lock()
         self._timer = threading.Timer(seconds, self._fire)
         self._timer.daemon = True
@@ -280,29 +282,26 @@ class _Watchdog:
 
             def connect() -> None:
                 open_socket()
-                # connected after the deadline fired, when there was no socket yet to shut
                 with self._lock:
-                    if self.fired:
-                        self._shut(conn)
+                    self._socks.append(conn.sock)
+                    if self.fired:  # connected after the deadline, when there was nothing to shut
+                        self._shut(conn.sock)
 
             setattr(conn, "connect", connect)  # noqa: B010 (mypy: can't assign to a method)
-            with self._lock:
-                self._conns.append(conn)
             return conn
 
         return create
 
     @staticmethod
-    def _shut(conn: http.client.HTTPConnection) -> None:
-        if conn.sock is not None:
-            with contextlib.suppress(OSError):
-                conn.sock.shutdown(socket.SHUT_RDWR)
+    def _shut(sock: socket.socket) -> None:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
 
     def _fire(self) -> None:
         with self._lock:
             self.fired = True
-            for conn in self._conns:
-                self._shut(conn)
+            for sock in self._socks:
+                self._shut(sock)
 
     def cancel(self) -> None:
         self._timer.cancel()
