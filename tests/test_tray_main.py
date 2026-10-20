@@ -28,6 +28,14 @@ def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     shutil.rmtree(path, ignore_errors=True)
 
 
+@pytest.fixture
+def shown(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The command's messages to the user (on Windows a real MessageBoxW would block)."""
+    messages: list[str] = []
+    monkeypatch.setattr(cli, "_message_box", messages.append)
+    return messages
+
+
 class Recorder:
     def __init__(self) -> None:
         self.runs: list[Controller] = []
@@ -69,34 +77,41 @@ def test_runs_the_tray_and_shuts_down(fake_gui: Recorder, home: Path) -> None:
     assert fake_gui.logging[-1] == (logging.DEBUG, home / "qsv-clientd.log")
 
 
-def test_a_second_tray_is_refused(
-    fake_gui: Recorder, home: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_a_second_tray_is_refused(fake_gui: Recorder, home: Path, shown: list[str]) -> None:
     held = _lock.acquire(home / "run" / "tray.lock")
     try:
         assert cli.main([]) == 1
     finally:
         held.close()
-    assert "qsv-clientd-tray is already running" in capsys.readouterr().err
+    (message,) = shown
+    assert message.startswith("qsv-clientd-tray is already running")
     assert fake_gui.runs == []
 
 
 def test_a_crash_is_reported_and_still_shuts_down(
-    fake_gui: Recorder, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+    fake_gui: Recorder, shown: list[str], caplog: pytest.LogCaptureFixture
 ) -> None:
     fake_gui.raise_in_run = RuntimeError("no display")
     assert cli.main([]) == 1
     assert fake_gui.shutdowns == 1
-    assert "the tray failed: no display" in capsys.readouterr().err
+    (message,) = shown
+    assert message.startswith("the tray failed: no display (see ")
     assert "the tray failed" in caplog.text
 
 
-def test_without_the_extra(
-    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_without_the_extra(home: Path, monkeypatch: pytest.MonkeyPatch, shown: list[str]) -> None:
     monkeypatch.setitem(sys.modules, "pystray", None)  # `import pystray` raises ImportError
     assert cli.main([]) == 1
-    assert "pip install 'qsv-client[tray]'" in capsys.readouterr().err
+    (message,) = shown
+    assert "pip install 'qsv-client[tray]'" in message
+
+
+def test_message_box_writes_to_stderr_elsewhere(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    cli._message_box("hello")
+    assert capsys.readouterr().err == "qsv-clientd-tray: hello\n"
 
 
 def test_message_box_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
