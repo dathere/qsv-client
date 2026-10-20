@@ -87,9 +87,12 @@ def _assert_refused(reply: Reply, status: int, code: str, *private: Path) -> Non
     """A refusal with this status and code, mentioning none of ``private``."""
     assert reply.status == status, reply.body
     assert _code(reply) == code, reply.body
+    body = reply.body.decode()
     for path in private:
-        assert str(path) not in reply.body.decode(), reply.body
-        assert str(path.resolve()) not in reply.body.decode(), reply.body
+        for p in (str(path), str(path.resolve())):
+            # JSON escapes the backslashes in a Windows path
+            assert p not in body, reply.body
+            assert json.dumps(p)[1:-1] not in body, reply.body
 
 
 def _logging_qsv(fake_qsv: Callable[[str], str], log: Path, body: str = "") -> str:
