@@ -22,6 +22,22 @@ All notable changes to this project are documented here. The format follows
 
 - A `min_version` that is not a version (`"major.minor.patch"`) now raises `ValueError` when
   `Qsv` or `AsyncQsv` is created, instead of on every run.
+- `QsvNotFound` is now a `FileNotFoundError`. A run whose binary was removed after the
+  client was created raises it, instead of a bare `FileNotFoundError`; existing `OSError`
+  handlers still catch it.
+
+### Fixed
+
+- `DaemonClient` raises `QsvDaemonError` for a garbled reply from `qsv-clientd`, as
+  `AsyncDaemonClient` already did, instead of leaking `http.client` exceptions.
+- `DaemonClient` closes its socket when it can't connect to `qsv-clientd`, so checking for a
+  daemon that isn't running no longer leaks one (a `ResourceWarning`).
+- The `schtasks` command that `qsv-clientd install` prints on Windows works when a path
+  contains spaces.
+- A Data Schematic query's option values must be strings or numbers, like its other
+  arguments.
+- `qsv-clientd run search -- -x` passes the `--` on to qsv, so a pattern or argument that
+  starts with `-` works. argparse used to drop it.
 
 ## [0.4.0] - 2026-10-15
 

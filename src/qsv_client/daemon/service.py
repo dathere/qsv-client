@@ -109,7 +109,8 @@ def install() -> str:
         # restart, not start: a reinstall must replace a running daemon's old settings
         subprocess.run(["systemctl", "--user", "restart", "qsv-clientd"], check=True)
         return f"installed and started systemd user unit {path} (qsv: {env['QSV_BIN']})"
-    task = subprocess.list2cmdline(command)
+    # list2cmdline quotes arguments with spaces; inside /TR "..." those quotes must be \"
+    task = subprocess.list2cmdline(command).replace('"', '\\"')
     return (
         "automatic install is not supported on this platform; to start qsv-clientd at logon run:\n"
         f'  schtasks /Create /SC ONLOGON /TN qsv-clientd /TR "{task}"'

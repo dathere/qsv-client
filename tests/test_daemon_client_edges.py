@@ -6,12 +6,14 @@ The two clients are mirrored by hand, so each case runs against both.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import shutil
 import socket
 import sys
 import tempfile
 import threading
+import warnings
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -241,13 +243,7 @@ def test_a_daemon_that_never_answers_times_out(
 @pytest.mark.parametrize(
     "cls",
     [
-        pytest.param(
-            DaemonClient,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="sync client lets http.client.HTTPException escape (not an OSError)",
-            ),
-        ),
+        DaemonClient,
         AsyncDaemonClient,
     ],
 )
@@ -299,3 +295,16 @@ def test_socket_path_too_long_is_explained(home: Path) -> None:
         with pytest.raises(QsvDaemonError, match="too long for a Unix socket") as info:
             _call(cls(socket_path=long_path), "request", "GET", "/v1/hello")
         assert not isinstance(info.value, QsvDaemonUnavailable)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets")
+def test_a_failed_unix_connect_closes_its_socket(home: Path) -> None:
+    client = DaemonClient(socket_path=home / "nobody-listening.sock")
+    gc.collect()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        for _ in range(3):
+            assert not client.available()
+        gc.collect()
+    leaks = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    assert leaks == [], [str(w.message) for w in leaks]

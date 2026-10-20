@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import csv
+import errno
 import io
 import json
 import os
@@ -433,6 +434,12 @@ class Qsv(_Base):
                 timeout=effective_timeout,
                 kill_grace=self.kill_grace,
             )
+        except FileNotFoundError as exc:
+            # also raised for a missing cwd; only a vanished binary is QsvNotFound
+            if os.path.exists(self.binary):
+                raise
+            # errno form, so it reads like the FileNotFoundError it replaces (e.g. via qsv-clientd)
+            raise QsvNotFound(errno.ENOENT, "qsv binary no longer exists", self.binary) from exc
         finally:
             if fh is not None:
                 fh.close()
@@ -582,6 +589,12 @@ class AsyncQsv(_Base):
                 timeout=effective_timeout,
                 kill_grace=self.kill_grace,
             )
+        except FileNotFoundError as exc:
+            # also raised for a missing cwd; only a vanished binary is QsvNotFound
+            if os.path.exists(self.binary):
+                raise
+            # errno form, so it reads like the FileNotFoundError it replaces (e.g. via qsv-clientd)
+            raise QsvNotFound(errno.ENOENT, "qsv binary no longer exists", self.binary) from exc
         finally:
             if fh is not None:
                 fh.close()

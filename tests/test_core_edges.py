@@ -4,6 +4,7 @@ helper parsers, and the parts of the client API not exercised elsewhere with a f
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import sys
@@ -22,7 +23,16 @@ from test_process import (
     _wait_dead,
 )
 
-from qsv_client import AsyncQsv, Qsv, QsvResult, QsvTimeout, QsvUsageError, _process, client
+from qsv_client import (
+    AsyncQsv,
+    Qsv,
+    QsvNotFound,
+    QsvResult,
+    QsvTimeout,
+    QsvUsageError,
+    _process,
+    client,
+)
 from qsv_client.capabilities import from_capabilities_json
 from qsv_client.errors import parse_json_error
 
@@ -198,8 +208,13 @@ def test_binary_removed_after_construction(fake_qsv: Callable[[str], str]) -> No
     fake = fake_qsv("print('ok')")
     qsv = Qsv(fake)
     os.remove(fake)
-    with pytest.raises(OSError):
+    # still a FileNotFoundError, so callers' existing OSError handlers catch it
+    with pytest.raises(FileNotFoundError) as info:
         qsv.run("x")
+    assert isinstance(info.value, QsvNotFound)
+    # errno and filename as Popen's error had, so qsv-clientd relays it the same way
+    assert (info.value.errno, info.value.filename) == (errno.ENOENT, fake)
+    assert "no longer exists" in str(info.value)
     assert client._caps_cache == {}
 
 
@@ -207,9 +222,30 @@ async def test_async_binary_removed_after_construction(fake_qsv: Callable[[str],
     fake = fake_qsv("print('ok')")
     qsv = AsyncQsv(fake)
     os.remove(fake)
-    with pytest.raises(OSError):
+    with pytest.raises(FileNotFoundError) as info:
         await qsv.run("x")
+    assert isinstance(info.value, QsvNotFound)
+    assert (info.value.errno, info.value.filename) == (errno.ENOENT, fake)
+    assert "no longer exists" in str(info.value)
     assert client._caps_cache == {}
+
+
+def test_missing_cwd_is_not_qsv_not_found(fake_qsv: Callable[[str], str], tmp_path: Path) -> None:
+    qsv = Qsv(fake_qsv("print('ok')"), cwd=tmp_path / "gone")
+    # FileNotFoundError on POSIX, NotADirectoryError on Windows; never QsvNotFound
+    with pytest.raises(OSError) as info:
+        qsv.run("x")
+    assert not isinstance(info.value, QsvNotFound)
+
+
+async def test_async_missing_cwd_is_not_qsv_not_found(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    qsv = AsyncQsv(fake_qsv("print('ok')"), cwd=tmp_path / "gone")
+    # FileNotFoundError on POSIX, NotADirectoryError on Windows; never QsvNotFound
+    with pytest.raises(OSError) as info:
+        await qsv.run("x")
+    assert not isinstance(info.value, QsvNotFound)
 
 
 # prints a CSV naming the subcommand and its arguments, or the argv as JSON for describegpt

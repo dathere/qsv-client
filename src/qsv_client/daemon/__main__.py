@@ -40,8 +40,9 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="send this process's stdin to the command (implied when an argument is '-')",
     )
-    r.add_argument("command")
-    r.add_argument("args", nargs=argparse.REMAINDER)
+    # one REMAINDER for the command and its args: argparse drops a `--` that starts a REMAINDER,
+    # and `run search -- -x` must reach qsv with its `--`
+    r.add_argument("argv", nargs=argparse.REMAINDER, metavar="command [args ...]")
 
     reg = sub.add_parser("register", help="let a Data Schematic for this file use the daemon")
     reg.add_argument("data", type=Path)
@@ -186,8 +187,15 @@ def main(argv: list[str] | None = None) -> int:
     if argv[:1] in (["register"], ["viz"]) and "--" in argv:
         i = argv.index("--")
         argv, viz_args = argv[:i], argv[i + 1 :]
-    ns = _parser().parse_args(argv)
+    parser = _parser()
+    ns = parser.parse_args(argv)
     ns.viz_args = viz_args
+    if ns.cmd == "run":
+        if ns.argv[:1] == ["--"]:  # `run -- search ...`: ends qsv-clientd's own options
+            del ns.argv[0]
+        if not ns.argv:
+            parser.error("run: the following arguments are required: command")
+        ns.command, ns.args = ns.argv[0], ns.argv[1:]
     try:
         if ns.cmd == "serve":
             return _serve(ns)
