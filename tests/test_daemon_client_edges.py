@@ -279,11 +279,17 @@ def test_async_no_daemon(home: Path) -> None:
     assert not asyncio.run(client.available())
 
 
-def test_qsv_or_daemon_without_a_daemon_runs_locally(home: Path) -> None:
+def test_qsv_or_daemon_without_a_daemon_runs_locally(
+    home: Path, fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the local fallback resolves its binary at once: no real qsv needed
+    binary = fake_qsv(ECHO)
+    monkeypatch.setenv("QSV_BIN", binary)
     # POSIX: the socket is missing; Windows: so is the local token
     found = qsv_or_daemon(cwd=str(home))
     assert isinstance(found, Qsv)
     assert found.cwd == str(home)
+    assert found.binary == binary
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix socket")
