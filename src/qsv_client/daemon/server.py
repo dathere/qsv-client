@@ -35,13 +35,22 @@ from ..client import AsyncQsv, QsvResult, find_qsv
 from ..errors import EXIT_TIMEOUT, SUCCESS_EXIT_CODES, QsvError, QsvTimeout, error_from_run
 from . import fetch
 from ._http import HttpError, Request, Response, read_body, read_head, write_response
-from .allowlist import NO_SIDE_FILES, QUERY_ENV, NotAllowed, build_query, exact_match_regex
+from .allowlist import (
+    CSV_OUTPUT,
+    NO_SIDE_FILES,
+    NON_CSV_FLAGS,
+    QUERY_ENV,
+    NotAllowed,
+    build_query,
+    exact_match_regex,
+)
 from .config import (
     API_VERSION,
     DaemonConfig,
     ensure_private_dir,
     local_token_path,
     runtime_dir,
+    socket_path_error,
     state_dir,
     write_private_file,
 )
@@ -135,6 +144,11 @@ class Daemon:
                     path=self._socket_path,
                     limit=64 * 1024,
                 )
+            except OSError as exc:
+                message = socket_path_error(self._socket_path, exc)
+                if message is None:
+                    raise
+                raise ValueError(message) from None
             finally:
                 os.umask(old_umask)
             self._owns_socket = True
@@ -642,13 +656,11 @@ class Daemon:
             size = out.stat().st_size
             with out.open("rb") as fh:
                 data = fh.read(self.config.browser_max_output)
-        return Response.json(
-            {
-                "stdout": data.decode("utf-8", "replace"),
-                "truncated": size > len(data),
-                "bytes": size,
-            }
-        )
+        text = data.decode("utf-8", "replace")
+        reply: dict[str, Any] = {"stdout": text, "truncated": size > len(data), "bytes": size}
+        if command in CSV_OUTPUT and not NON_CSV_FLAGS.intersection(args):
+            reply.update(_table(text, truncated=size > len(data)))
+        return Response.json(reply)
 
     async def _render(self, ds: Dataset, body: dict[str, Any], tier: Tier) -> Response:
         html = await self._render_to_disk(ds)
@@ -854,6 +866,23 @@ def _os_error_dict(exc: OSError) -> dict[str, Any]:
         "strerror": exc.strerror if exc.strerror is not None else str(exc),
         "filename": exc.filename if isinstance(exc.filename, str) else None,
     }
+
+
+def _table(text: str, *, truncated: bool) -> dict[str, Any]:
+    """``headers`` and ``rows`` for a page to show as a table, or nothing if ``text`` isn't CSV."""
+    try:
+        records = _parse_csv(text, csv.reader)
+    except HttpError:
+        return {}
+    # A cut is between records only after a line break outside quotes, where the quotes so far
+    # pair up ("" escapes come in pairs). Otherwise the last record is partial: csv closes a
+    # dangling quote at the end.
+    cut_mid_record = not text.endswith(("\n", "\r")) or text.count('"') % 2 == 1
+    if truncated and records and cut_mid_record:
+        records.pop()
+    if not records:
+        return {}
+    return {"headers": records[0], "rows": records[1:]}
 
 
 def _parse_csv(text: str, reader: Any) -> list[Any]:

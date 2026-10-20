@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import glob
 import json
 import os
 import shutil
@@ -104,8 +105,16 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -
             await _finish_despite_cancel(asyncio.to_thread(_replace_keeping_mode, incoming, target))
             ds.path = str(target)
         else:
-            current = cache / ("data" + _suffix(source))
+            # the file's name is the schematic's title, so keep the registered one's stem
+            original = Path(ds.original_path or ds.path)
+            current = cache / (original.stem + _suffix(source))
             os.replace(incoming, current)
+            previous = Path(ds.path)
+            if previous != current and previous.parent == cache:
+                previous.unlink(missing_ok=True)
+                for sidecar in cache.glob(f"{glob.escape(previous.stem)}.stats.csv*"):
+                    if sidecar != current:  # the data itself may be named data.stats.csv
+                        sidecar.unlink(missing_ok=True)
             if ds.original_path is None:
                 ds.original_path = ds.path
             ds.path = str(current)

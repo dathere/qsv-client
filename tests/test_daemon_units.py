@@ -373,3 +373,23 @@ def test_service_overrides_configured_binary_and_paths(
     assert ["systemctl", "--user", "restart", "qsv-clientd"] in calls
     unit = (tmp_path / ".config/systemd/user/qsv-clientd.service").read_text()
     assert f"--binary {lite}" in unit
+
+
+@pytest.mark.parametrize(
+    ("text", "truncated", "rows"),
+    [
+        ("h\n1\n2\n", False, [["1"], ["2"]]),
+        ("h\n1\n", True, [["1"]]),  # cut exactly after a record: keep it
+        ("h\n1\r\n", True, [["1"]]),
+        ("h\n1\n2", True, [["1"]]),  # cut inside a record: drop it
+        ('h\n1\n"a\n', True, [["1"]]),  # the line break is inside an open quote
+        ('h\n1\n"a ""b"" c"\n', True, [["1"], ['a "b" c']]),  # escaped quotes pair up
+        ("h\n1\n2�", True, [["1"]]),  # a multibyte character cut in half
+    ],
+)
+def test_query_table_drops_only_a_partial_last_record(
+    text: str, truncated: bool, rows: list[list[str]]
+) -> None:
+    from qsv_client.daemon.server import _table
+
+    assert _table(text, truncated=truncated) == {"headers": ["h"], "rows": rows}

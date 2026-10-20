@@ -32,6 +32,7 @@ from .config import (
     default_socket_path,
     local_token_path,
     runtime_dir,
+    socket_path_error,
 )
 
 # the daemon bounds a run's wait for a job slot, then the run itself, by its timeout (so up to
@@ -166,6 +167,11 @@ def _finish(data: dict[str, Any], *, command: str, check: bool, text: bool) -> Q
     )
 
 
+def _os_error_message(t: _Target, exc: OSError) -> str:
+    too_long = socket_path_error(t.socket_path, exc) if t.socket_path is not None else None
+    return too_long or f"talking to qsv-clientd failed: {exc}"
+
+
 class _UnixHTTPConnection(http.client.HTTPConnection):
     def __init__(self, path: str, timeout: float | None) -> None:
         super().__init__("localhost", timeout=timeout)
@@ -217,7 +223,7 @@ class DaemonClient:
         except (FileNotFoundError, ConnectionRefusedError) as exc:
             raise QsvDaemonUnavailable(f"qsv-clientd is not running at {t.describe()}") from exc
         except OSError as exc:
-            raise QsvDaemonError(f"talking to qsv-clientd failed: {exc}") from exc
+            raise QsvDaemonError(_os_error_message(t, exc)) from exc
         finally:
             conn.close()
         return _decode(status, data)
@@ -293,7 +299,9 @@ class AsyncDaemonClient:
             raise QsvDaemonUnavailable(f"qsv-clientd is not running at {t.describe()}") from exc
         except asyncio.TimeoutError:
             raise QsvDaemonError("qsv-clientd did not answer in time") from None
-        except (OSError, asyncio.IncompleteReadError, ValueError) as exc:
+        except OSError as exc:
+            raise QsvDaemonError(_os_error_message(t, exc)) from exc
+        except (asyncio.IncompleteReadError, ValueError) as exc:
             raise QsvDaemonError(f"talking to qsv-clientd failed: {exc}") from exc
         return _decode(status, data)
 

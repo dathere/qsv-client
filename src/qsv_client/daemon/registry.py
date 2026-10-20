@@ -144,6 +144,8 @@ class Dataset:
             "can_fetch": bool(self.source_url or self.pid),
             "can_render": self.schematic_path is not None or bool(self.viz_args),
             "fingerprint": self.fingerprint.public(),
+            # reading the daemon's fetched copy, not the registered file
+            "fetched": self.original_path is not None,
         }
 
 
