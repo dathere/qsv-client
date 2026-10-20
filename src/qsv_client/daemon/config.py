@@ -129,6 +129,8 @@ class DaemonConfig:
     """Origins allowed to pair. ``null`` is what a ``file://`` page sends."""
     browser_timeout: float = 60.0
     browser_max_output: int = 4 * 1024 * 1024
+    # one stored result a page can read page by page (see results.py)
+    browser_max_result: int = 1 << 30
     browser_max_render: int = 64 * 1024 * 1024
     token_ttl: float = 8 * 3600.0
     allow_fetch: bool = True

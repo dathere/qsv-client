@@ -54,8 +54,9 @@ from .config import (
     state_dir,
     write_private_file,
 )
-from .pairing import Pairing
+from .pairing import Pairing, token_digest
 from .registry import Dataset, Fingerprint, Registry, SchematicSource, validate_viz_args
+from .results import LOCAL_KEY, ResultStore, Stored, key_for_grant, snapshot
 
 log = logging.getLogger("qsv_client.daemon")
 
@@ -63,6 +64,8 @@ Tier = Literal["local", "browser"]
 _LOCAL_BODY_LIMIT = 64 * 1024 * 1024
 _BROWSER_BODY_LIMIT = 64 * 1024
 _MAX_ROWS = 500
+_PAGE_ROWS = 100  # a stored result's first page, and /page's default length
+_SWEEP_EVERY = 300.0  # seconds between sweeps of expired tokens' stored results
 _HEAD_TIMEOUT = 10.0
 """Seconds a client gets to send its request head; an idle connection can't hold us forever."""
 _BODY_TIMEOUT = 60.0
@@ -102,6 +105,9 @@ class Daemon:
         self._writers: set[asyncio.StreamWriter] = set()
         self._tcp_open = 0
         self._fetch_locks: dict[str, asyncio.Lock] = {}
+        self.results = ResultStore(self)
+        self._started = False
+        self._sweeper: asyncio.Task[None] | None = None
         self._qsv = self._client()
 
     # -- lifecycle -------------------------------------------------------------------------
@@ -117,6 +123,11 @@ class Daemon:
         except BaseException:
             await self._close_servers()
             raise
+        # Tokens live in memory only, so any result left on disk belongs to no page now. Only
+        # once bound: a second instance must not touch the running daemon's results.
+        self.results.clear()
+        self._started = True
+        self._sweeper = asyncio.create_task(self._sweep_forever())
         token_file = (
             local_token_path()
             if self._socket_path == self.config.socket_path()
@@ -126,6 +137,12 @@ class Daemon:
         self._token_file = token_file
         info = {"pid": os.getpid(), "port": self.port, "socket": str(self._socket_path)}
         write_private_file(token_file.parent / "daemon.json", json.dumps(info).encode())
+
+    async def _sweep_forever(self) -> None:
+        """Remove expired tokens' results even while no request arrives to trigger it."""
+        while True:
+            await asyncio.sleep(_SWEEP_EVERY)
+            self.results.sweep(self.pairing.live_digests())
 
     async def _bind(self) -> None:
         if sys.platform != "win32":
@@ -177,7 +194,11 @@ class Daemon:
         raise RuntimeError(f"another qsv-clientd is already listening on {self._socket_path}")
 
     async def close(self) -> None:
+        if self._sweeper is not None:
+            self._sweeper.cancel()
         await self._close_servers()
+        if self._started:
+            self.results.clear()
         with contextlib.suppress(AttributeError):
             self._token_file.unlink(missing_ok=True)
             (self._token_file.parent / "daemon.json").unlink(missing_ok=True)
@@ -359,6 +380,8 @@ class Daemon:
             raise HttpError(404, "not_found", "unknown route")
         route = parts[1:]
         method = request.method
+        # results of expired or revoked tokens: before authorizing, which their pages now fail
+        self.results.sweep(self.pairing.live_digests())
         match route:
             case ["hello"] if method == "GET":
                 return Response.json({"service": "qsv-clientd", "api": API_VERSION})
@@ -369,12 +392,18 @@ class Daemon:
             case ["datasets", dataset_id] if method == "GET":
                 ds = self._dataset_for(request, tier, dataset_id)
                 return Response.json(ds.public() if tier == "browser" else _private(ds))
+            case ["datasets", dataset_id, "disconnect"] if method == "POST":
+                # a page withdrawing its own token; its stored result goes with it
+                self._dataset_for(request, tier, dataset_id)
+                withdrawn = tier == "browser" and self.pairing.revoke(_bearer(request))
+                self.results.sweep(self.pairing.live_digests())
+                return Response.json({"revoked": int(withdrawn)})
             case ["datasets", dataset_id, action] if method == "POST":
                 ds = self._dataset_for(request, tier, dataset_id)
                 handler = self._dataset_actions.get(action)
                 if handler is None:
                     raise HttpError(404, "not_found", f"unknown dataset action {action!r}")
-                return await handler(self, ds, request.json(), tier)
+                return await handler(self, ds, request.json(), tier, _result_key(request, tier))
         if tier != "local":
             raise HttpError(401, "unauthorized", "this route is only for local clients")
         match route:
@@ -389,6 +418,7 @@ class Daemon:
             case ["datasets", dataset_id] if method == "DELETE":
                 removed = self.registry.remove(dataset_id)
                 revoked = self.pairing.revoke_all(dataset_id)
+                self.results.remove_dataset(dataset_id)
                 if not removed:
                     raise HttpError(404, "not_found", "no such dataset")
                 return Response.json({"removed": dataset_id, "revoked": revoked})
@@ -399,6 +429,7 @@ class Daemon:
             case ["tokens", "revoke"] if method == "POST":
                 target = request.json().get("dataset_id")
                 revoked = self.pairing.revoke_all(target if isinstance(target, str) else None)
+                self.results.sweep(self.pairing.live_digests())
                 return Response.json({"revoked": revoked})
         raise HttpError(404, "not_found", "unknown route")
 
@@ -593,37 +624,49 @@ class Daemon:
 
     # -- dataset actions (local, or browser with a token for that dataset) -----------------
 
-    async def _rows(self, ds: Dataset, body: dict[str, Any], tier: Tier) -> Response:
+    async def _rows(self, ds: Dataset, body: dict[str, Any], tier: Tier, key: str) -> Response:
         offset = _int(body.get("offset", 0), "offset", 0, 2**62)
         limit = _int(body.get("limit", 100), "limit", 1, _MAX_ROWS)
         column, value = body.get("column"), body.get("value")
-        with tempfile.TemporaryDirectory(prefix="qsv-clientd-") as tmp:
-            source = ds.path
-            if value is not None:
-                if not isinstance(column, str) or not column or '"' in column:
-                    raise HttpError(422, "bad_request", "column must be a header name")
-                if not isinstance(value, str):
-                    raise HttpError(422, "bad_request", "value must be a string")
-                matches = Path(tmp) / "matches.csv"
+        if value is not None:
+            if not isinstance(column, str) or not column or '"' in column:
+                raise HttpError(422, "bad_request", "column must be a header name")
+            if not isinstance(value, str):
+                raise HttpError(422, "bad_request", "value must be a string")
+            regex = exact_match_regex(value)
+
+            async def matches(out: Path) -> None:
                 await self._browser_run(
                     ds,
-                    ["search", "--select", f'"{column}"', exact_match_regex(value), ds.path],
-                    stdout_path=matches,
+                    ["search", "--select", f'"{column}"', regex, ds.path],
+                    stdout_path=out,
                     no_match_ok=True,
                 )
-                source = str(matches)
+
+            # kept, so the page can read the matches a page at a time without searching again
+            stored = await self.results.create(key, ds, matches)
+            first = await self._first_page(key, ds, stored, offset, limit)
+            return Response.json(
+                {
+                    "headers": stored.headers,
+                    "rows": first.get("rows", []),
+                    "offset": offset,
+                    "result": stored.public(),
+                }
+            )
+        self.results.discard(key)
+        with tempfile.TemporaryDirectory(prefix="qsv-clientd-") as tmp:
             out = Path(tmp) / "slice.csv"
             await self._browser_run(
                 ds,
-                ["slice", "--start", str(offset), "--len", str(limit), source],
+                ["slice", "--start", str(offset), "--len", str(limit), ds.path],
                 stdout_path=out,
             )
-            text = self._capped_text(out)
-            rows = _parse_csv(text, csv.reader)
+            rows = _parse_csv(self._capped_text(out), csv.reader)
         headers, data = (rows[0], rows[1:]) if rows else ([], [])
         return Response.json({"headers": headers, "rows": data, "offset": offset})
 
-    async def _refresh(self, ds: Dataset, body: dict[str, Any], tier: Tier) -> Response:
+    async def _refresh(self, ds: Dataset, body: dict[str, Any], tier: Tier, key: str) -> Response:
         fp = await self._fingerprint(Path(ds.path), ds.algo, ds)
         count = await self._browser_run(ds, ["count", ds.path])
         out: dict[str, Any] = {
@@ -640,7 +683,7 @@ class Daemon:
                 out["stats"] = _parse_csv(self._capped_text(stats_file), csv.DictReader)
         return Response.json(out)
 
-    async def _query(self, ds: Dataset, body: dict[str, Any], tier: Tier) -> Response:
+    async def _query(self, ds: Dataset, body: dict[str, Any], tier: Tier, key: str) -> Response:
         command = body.get("command")
         args = body.get("args", [])
         if not isinstance(command, str) or not isinstance(args, list):
@@ -650,19 +693,69 @@ class Daemon:
             argv = build_query(command, args, frozenset(caps.commands))
         except NotAllowed as exc:
             raise HttpError(403, "not_allowed", str(exc)) from None
+        is_csv = command in CSV_OUTPUT and not NON_CSV_FLAGS.intersection(args)
+        source = snapshot(ds)  # before qsv reads it: a fetch may swap the file meanwhile
         with tempfile.TemporaryDirectory(prefix="qsv-clientd-") as tmp:
             out = Path(tmp) / "out"
             await self._browser_run(ds, [*argv, ds.path], stdout_path=out, env=QUERY_ENV)
             size = out.stat().st_size
             with out.open("rb") as fh:
                 data = fh.read(self.config.browser_max_output)
-        text = data.decode("utf-8", "replace")
-        reply: dict[str, Any] = {"stdout": text, "truncated": size > len(data), "bytes": size}
-        if command in CSV_OUTPUT and not NON_CSV_FLAGS.intersection(args):
-            reply.update(_table(text, truncated=size > len(data)))
+            truncated = size > len(data)
+            text = data.decode("utf-8", "replace")
+            reply: dict[str, Any] = {"stdout": text, "truncated": truncated, "bytes": size}
+            if is_csv and truncated:
+                # too big to send whole: keep it, and let the page read it a page at a time
+                stored = await self.results.adopt(key, ds, out, source)
+                reply["result"] = stored.public()
+                reply.update(await self._first_page(key, ds, stored, 0, _PAGE_ROWS))
+            else:
+                self.results.discard(key)
+                if is_csv:
+                    reply.update(_table(text))
         return Response.json(reply)
 
-    async def _render(self, ds: Dataset, body: dict[str, Any], tier: Tier) -> Response:
+    async def _first_page(
+        self, key: str, ds: Dataset, stored: Stored, start: int, length: int
+    ) -> dict[str, Any]:
+        """A stored result's first page, or none when it is over the response cap: the reply
+        still carries the result, so the page can ask for smaller pages."""
+        try:
+            page = await self.results.page(
+                key, ds, stored.id, start=start, length=length, search="", order=None
+            )
+        except HttpError as exc:
+            if exc.code != "too_large":
+                raise
+            return {}
+        return {"headers": stored.headers, "rows": page["rows"]}
+
+    async def _page(self, ds: Dataset, body: dict[str, Any], tier: Tier, key: str) -> Response:
+        start = _int(body.get("start", 0), "start", 0, 2**62)
+        length = _int(body.get("length", _PAGE_ROWS), "length", 1, _MAX_ROWS)
+        search = body.get("search", "")
+        if not isinstance(search, str):
+            raise HttpError(422, "bad_request", "search must be a string")
+        search = search.strip()
+        order = body.get("order")
+        parsed: tuple[int, bool] | None = None
+        if order is not None:
+            if not isinstance(order, dict) or not isinstance(order.get("desc", False), bool):
+                raise HttpError(422, "bad_request", "order must be {column, desc}")
+            parsed = (_int(order.get("column"), "order.column", 0, 2**31), order.get("desc", False))
+        return Response.json(
+            await self.results.page(
+                key,
+                ds,
+                body.get("result"),
+                start=start,
+                length=length,
+                search=search,
+                order=parsed,
+            )
+        )
+
+    async def _render(self, ds: Dataset, body: dict[str, Any], tier: Tier, key: str) -> Response:
         html = await self._render_to_disk(ds)
         if tier == "local":
             return Response.json({"schematic_path": ds.schematic_path, "bytes": len(html)})
@@ -670,7 +763,7 @@ class Daemon:
             raise HttpError(413, "too_large", "the re-rendered schematic is too large to return")
         return Response(200, html, "text/html; charset=utf-8")
 
-    async def _fetch(self, ds: Dataset, body: dict[str, Any], tier: Tier) -> Response:
+    async def _fetch(self, ds: Dataset, body: dict[str, Any], tier: Tier, key: str) -> Response:
         if tier == "browser" and not self.config.allow_fetch:
             raise HttpError(403, "disabled", "fetching is turned off")
         # only the user may accept data whose columns changed; a page can't ask for that
@@ -682,9 +775,10 @@ class Daemon:
         return Response.json(result)
 
     _dataset_actions: ClassVar[
-        dict[str, Callable[[Daemon, Dataset, dict[str, Any], Tier], Awaitable[Response]]]
+        dict[str, Callable[[Daemon, Dataset, dict[str, Any], Tier, str], Awaitable[Response]]]
     ] = {
         "rows": _rows,
+        "page": _page,
         "refresh": _refresh,
         "query": _query,
         "render": _render,
@@ -840,6 +934,17 @@ def _result_dict(result: QsvResult) -> dict[str, Any]:
     }
 
 
+def _result_key(request: Request, tier: Tier) -> str:
+    """Whose stored result a request reads: its paired page's, or the local user's."""
+    if tier != "browser":
+        return LOCAL_KEY
+    return key_for_grant(token_digest(_bearer(request)))
+
+
+def _bearer(request: Request) -> str:
+    return request.headers.get("authorization", "").removeprefix("Bearer ")
+
+
 def _private(ds: Dataset) -> dict[str, Any]:
     return asdict(ds)
 
@@ -868,18 +973,15 @@ def _os_error_dict(exc: OSError) -> dict[str, Any]:
     }
 
 
-def _table(text: str, *, truncated: bool) -> dict[str, Any]:
-    """``headers`` and ``rows`` for a page to show as a table, or nothing if ``text`` isn't CSV."""
+def _table(text: str) -> dict[str, Any]:
+    """``headers`` and ``rows`` for a page to show as a table, or nothing if ``text`` isn't CSV.
+
+    Only for whole output: output over the cap is stored and read a page at a time instead.
+    """
     try:
         records = _parse_csv(text, csv.reader)
     except HttpError:
         return {}
-    # A cut is between records only after a line break outside quotes, where the quotes so far
-    # pair up ("" escapes come in pairs). Otherwise the last record is partial: csv closes a
-    # dangling quote at the end.
-    cut_mid_record = not text.endswith(("\n", "\r")) or text.count('"') % 2 == 1
-    if truncated and records and cut_mid_record:
-        records.pop()
     if not records:
         return {}
     return {"headers": records[0], "rows": records[1:]}
