@@ -232,7 +232,8 @@ re-rendering. Flags whose value is a file keep only its basename and are listed 
   those.
 
 A download is limited to `fetch_max_bytes` (10 GiB by default) and `fetch_timeout` (30
-minutes, for the whole download, headers included). Over either, the fetch is refused (413
+minutes, for the whole download, headers included; looking up the host's address is bounded
+by the operating system's resolver instead). Over either, the fetch is refused (413
 `too_large` or 504 `download_timeout`) and your data is left as it was. The urllib fallback
 stops as soon as a download passes a limit and deletes what it got. qsv's `get` downloads
 into qsv's own cache first, so there the size is checked once the download is done: the
