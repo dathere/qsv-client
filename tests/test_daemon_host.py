@@ -68,34 +68,31 @@ def test_stop_right_after_start_stops(home: Path, fake_qsv: Callable[[str], str]
 
 
 def test_a_start_that_fails_after_binding_lets_go_of_its_listeners(
-    home: Path, fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+    home: Path, fake_qsv: Callable[[str], str]
 ) -> None:
     def disk_full(path: Path, data: bytes) -> None:
         raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(server, "write_private_file", disk_full)
     daemon = _daemon(home, fake_qsv)
     host = DaemonHost(daemon)
-    with pytest.raises(OSError, match="No space"):
-        host.start()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(server, "write_private_file", disk_full)
+        with pytest.raises(OSError, match="No space"):
+            host.start()
     host.stop()  # nothing left to close
     assert daemon._servers == []
     if sys.platform != "win32":
         assert not daemon.socket_path.exists()
-    monkeypatch.undo()
-    monkeypatch.setenv("QSV_CLIENTD_HOME", str(home))
     retry = DaemonHost(_daemon(home, fake_qsv)).start()
     retry.stop()
 
 
-def test_start_times_out(
-    home: Path, fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_start_times_out(home: Path, fake_qsv: Callable[[str], str]) -> None:
     host = DaemonHost(_daemon(home, fake_qsv))
-    monkeypatch.setattr(host._ready, "wait", lambda timeout: False)
-    with pytest.raises(TimeoutError, match="did not start"):
-        host.start()
-    monkeypatch.undo()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(host._ready, "wait", lambda timeout: False)
+        with pytest.raises(TimeoutError, match="did not start"):
+            host.start()
     host._ready.wait(60)
     host.stop()
 
