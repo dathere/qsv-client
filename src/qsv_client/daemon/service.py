@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Literal
 from xml.sax.saxutils import escape
 
 from ..client import find_qsv
@@ -42,18 +43,27 @@ def service_environment() -> dict[str, str]:
     return env
 
 
-def launchd_plist(command: list[str], env: dict[str, str]) -> str:
+def launchd_plist(
+    command: list[str],
+    env: dict[str, str],
+    *,
+    label: str = LABEL,
+    keep_alive: bool = True,
+    log: Path | None = None,
+) -> str:
+    """A launchd agent; ``log`` (stderr) defaults to ~/Library/Logs/qsv-clientd.log."""
     args = "\n".join(f"    <string>{escape(a)}</string>" for a in command)
     env_items = "\n".join(
         f"    <key>{escape(k)}</key><string>{escape(v)}</string>" for k, v in env.items()
     )
-    log = escape(str(Path.home() / "Library/Logs/qsv-clientd.log"))
+    log_path = escape(str(log or Path.home() / "Library/Logs/qsv-clientd.log"))
+    keep = "<true/>" if keep_alive else "<false/>"
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
 "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>{LABEL}</string>
+  <key>Label</key><string>{escape(label)}</string>
   <key>ProgramArguments</key>
   <array>
 {args}
@@ -63,8 +73,8 @@ def launchd_plist(command: list[str], env: dict[str, str]) -> str:
 {env_items}
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>{log}</string>
+  <key>KeepAlive</key>{keep}
+  <key>StandardErrorPath</key><string>{log_path}</string>
 </dict>
 </plist>
 """
@@ -89,19 +99,27 @@ WantedBy=default.target
 """
 
 
+def _launchd_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+
+def _systemd_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / "qsv-clientd.service"
+
+
 def install() -> str:
     """Write and load the service definition; returns a description of what was done."""
     env = service_environment()
     command = _command(env["QSV_BIN"])
     if sys.platform == "darwin":
-        path = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+        path = _launchd_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(launchd_plist(command, env))
         subprocess.run(["launchctl", "unload", str(path)], check=False, capture_output=True)
         subprocess.run(["launchctl", "load", "-w", str(path)], check=True)
         return f"installed and started launchd agent {path} (qsv: {env['QSV_BIN']})"
     if sys.platform.startswith("linux"):
-        path = Path.home() / ".config" / "systemd" / "user" / "qsv-clientd.service"
+        path = _systemd_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(systemd_unit(command, env))
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
@@ -119,12 +137,12 @@ def install() -> str:
 
 def uninstall() -> str:
     if sys.platform == "darwin":
-        path = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+        path = _launchd_path()
         subprocess.run(["launchctl", "unload", str(path)], check=False, capture_output=True)
         path.unlink(missing_ok=True)
         return f"removed {path}"
     if sys.platform.startswith("linux"):
-        path = Path.home() / ".config" / "systemd" / "user" / "qsv-clientd.service"
+        path = _systemd_path()
         subprocess.run(
             ["systemctl", "--user", "disable", "--now", "qsv-clientd"],
             check=False,
@@ -133,3 +151,29 @@ def uninstall() -> str:
         path.unlink(missing_ok=True)
         return f"removed {path}"
     return "remove the task with: schtasks /Delete /TN qsv-clientd"
+
+
+def service_installed() -> Literal["launchd", "systemd"] | None:
+    """Which service ``install`` set up (by its file), or None. It may not be running."""
+    if sys.platform == "darwin" and _launchd_path().exists():
+        return "launchd"
+    if sys.platform.startswith("linux") and _systemd_path().exists():
+        return "systemd"
+    return None
+
+
+def stop_service() -> str:
+    """Stop the installed service for now; it starts again at the next login.
+
+    Killing it isn't enough: launchd's KeepAlive (and systemd's Restart=) relaunch it.
+    """
+    if sys.platform == "darwin":
+        path = _launchd_path()
+        subprocess.run(["launchctl", "unload", str(path)], check=False, capture_output=True)
+        return f"stopped launchd agent {path}"
+    if sys.platform.startswith("linux"):
+        subprocess.run(
+            ["systemctl", "--user", "stop", "qsv-clientd"], check=False, capture_output=True
+        )
+        return "stopped systemd user unit qsv-clientd"
+    return "no service to stop on this platform"
