@@ -671,14 +671,13 @@ def test_the_watchdog_shuts_a_socket_connected_after_it_fired() -> None:
         conn.connect()
         peer, _ = server.accept()
         with peer:
-            assert conn.sock is not None
-            conn.sock.settimeout(2)
+            # shutting our side down sends the peer an end of data; checked from the peer,
+            # since Windows lets a recv on the shut socket itself block until its timeout
+            peer.settimeout(2)
             try:
-                got = conn.sock.recv(1)  # shut down: the end of the data at once
+                got = peer.recv(1)
             except TimeoutError:
                 pytest.fail("the socket was not shut")
-            except OSError:
-                got = b""  # Windows reports a shut-down socket as an error instead
             assert got == b""
         conn.close()
 
