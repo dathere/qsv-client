@@ -729,9 +729,14 @@ def test_concurrent_fetches_and_replace_keeps_mode(
 
 
 HEADER_QSV = """
-if sys.argv[1] == "slice":  # slice --len 0 <path>: the header row
-    print(open(sys.argv[-1]).readline(), end="")
-elif sys.argv[1] == "count" and len({l.count(",") for l in open(sys.argv[-1])}) > 1:
+import csv, io
+csv.field_size_limit(1 << 30)
+records = list(csv.reader(open(sys.argv[-1], newline=""))) if len(sys.argv) > 2 else []
+if sys.argv[1] == "slice":  # slice --len 0 <path>: the header record, quoted fields intact
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="\\n").writerow(records[0])
+    sys.stdout.buffer.write(buf.getvalue().encode())
+elif sys.argv[1] == "count" and len({len(r) for r in records}) > 1:
     sys.stderr.write("csv error: found record with 1 fields, but the previous record has 2\\n")
     sys.exit(1)
 else:
@@ -833,6 +838,24 @@ def test_fetch_handles_a_long_header(
         reply = d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token)
         assert reply.status == 200, reply.body[:500]
         assert data.read_bytes() == body
+    finally:
+        server.close()
+
+
+def test_fetch_compares_header_line_breaks_exactly(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    original = b'"team\r\nname",x\nold,1\n'
+    data = tmp_path / "d.csv"
+    data.write_bytes(original)
+    server = _Server(b'"team\nname",x\nnew,2\n')  # a different column name, by one CR
+    try:
+        d = start_daemon(_script(fake_qsv, HEADER_QSV))
+        ds_id = _register(d, data, source_url=server.url, allow_replace=True)
+        token = d.pair(_sha(data))
+        reply = d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token)
+        assert reply.status == 422 and reply.json()["daemon_error"]["code"] == "columns_missing"
+        assert data.read_bytes() == original
     finally:
         server.close()
 

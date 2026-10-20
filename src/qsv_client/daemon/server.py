@@ -725,7 +725,9 @@ class Daemon:
                 f"result is {size} bytes, over the {self.config.browser_max_output}-byte limit; "
                 "ask for fewer rows",
             )
-        return path.read_text("utf-8", "replace")
+        # newline="": keep a CR inside a quoted field (read_text would turn CRLF into LF)
+        with path.open(encoding="utf-8", errors="replace", newline="") as fh:
+            return fh.read()
 
     async def _fingerprint(
         self, path: Path, algo: str | None = None, ds: Dataset | None = None
