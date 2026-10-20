@@ -630,3 +630,104 @@ async def test_async_unusable_capabilities_raises_qsv_error(
     qsv = AsyncQsv(fake_qsv(body))
     with pytest.raises(QsvError, match="could not determine the qsv version"):
         await qsv.run("count", "x.csv")
+
+
+def test_timeout_raises_even_with_check_false(fake_qsv: Callable[[str], str]) -> None:
+    qsv = Qsv(fake_qsv(HANG_WITHOUT_READING), kill_grace=0.5)
+    with pytest.raises(QsvTimeout) as exc:
+        qsv.run("stats", timeout=0.5, check=False)
+    assert exc.value.exit_code == 124
+
+
+async def test_async_timeout_raises_even_with_check_false(
+    fake_qsv: Callable[[str], str],
+) -> None:
+    qsv = AsyncQsv(fake_qsv(HANG_WITHOUT_READING), kill_grace=0.5)
+    with pytest.raises(QsvTimeout) as exc:
+        await qsv.run("stats", timeout=0.5, check=False)
+    assert exc.value.exit_code == 124
+
+
+async def test_async_warning_exit_code_is_success(fake_qsv: Callable[[str], str]) -> None:
+    res = await AsyncQsv(fake_qsv("import sys; print('done'); sys.exit(255)")).run("x")
+    assert res.ok
+    assert res.exit_code == 255
+    assert res.stdout == "done\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGINT to ourselves is POSIX only")
+def test_interrupt_while_running_kills_process_group(
+    fake_qsv: Callable[[str], str], tmp_path: Path
+) -> None:
+    # a real Ctrl-C reaches only us: qsv runs in its own process group
+    pidfile = tmp_path / "child.pid"
+    qsv = Qsv(fake_qsv(HANG_WITH_GRANDCHILD), kill_grace=0.5)
+    _ = qsv.capabilities  # probe first, so the interrupt lands in the stats run
+
+    def interrupt() -> None:
+        _read_pid(pidfile)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    threading.Thread(target=interrupt, daemon=True).start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            qsv.run("stats", pidfile)
+        assert time.monotonic() - started < 10
+        assert _wait_dead(_read_pid(pidfile)), "grandchild survived Ctrl-C"
+    finally:
+        _kill(_read_pid(pidfile))
+
+
+# what a panic=abort build or the OOM killer looks like: some stderr, no JSON line, a signal
+KILLED_BY_SIGNAL = """
+import os, signal, sys
+sys.stderr.write("partial progress\\n")
+sys.stderr.flush()
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no signal exit statuses on Windows")
+def test_run_killed_by_signal_is_a_qsv_error(fake_qsv: Callable[[str], str]) -> None:
+    qsv = Qsv(fake_qsv(KILLED_BY_SIGNAL))
+    with pytest.raises(QsvError) as exc:
+        qsv.run("stats")
+    assert type(exc.value) is QsvError
+    assert exc.value.exit_code == -9  # SIGKILL
+    assert not exc.value.structured
+    assert "partial progress" in exc.value.stderr
+    res = qsv.run("stats", check=False)
+    assert not res.ok
+    assert res.exit_code == -9  # SIGKILL
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no signal exit statuses on Windows")
+async def test_async_run_killed_by_signal_is_a_qsv_error(fake_qsv: Callable[[str], str]) -> None:
+    qsv = AsyncQsv(fake_qsv(KILLED_BY_SIGNAL))
+    with pytest.raises(QsvError) as exc:
+        await qsv.run("stats")
+    assert type(exc.value) is QsvError
+    assert exc.value.exit_code == -9  # SIGKILL
+    assert not exc.value.structured
+    res = await qsv.run("stats", check=False)
+    assert not res.ok
+    assert res.exit_code == -9  # SIGKILL
+
+
+def test_error_format_cannot_be_overridden(
+    fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QSV_ERROR_FORMAT", "text")
+    qsv = Qsv(fake_qsv(ECHO_ENV_AND_ARGS), env={"QSV_ERROR_FORMAT": "text"})
+    out = qsv.run("x", env={"QSV_ERROR_FORMAT": "text"}).json()
+    assert out["env"]["QSV_ERROR_FORMAT"] == "json"
+
+
+async def test_async_error_format_cannot_be_overridden(
+    fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QSV_ERROR_FORMAT", "text")
+    qsv = AsyncQsv(fake_qsv(ECHO_ENV_AND_ARGS), env={"QSV_ERROR_FORMAT": "text"})
+    out = (await qsv.run("x", env={"QSV_ERROR_FORMAT": "text"})).json()
+    assert out["env"]["QSV_ERROR_FORMAT"] == "json"
