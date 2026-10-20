@@ -8,11 +8,16 @@ starts once: to restart, stop it and build a new ``Daemon`` and ``DaemonHost``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 import threading
 
 from .client import DaemonClient
 from .server import Daemon
+
+_START_TIMEOUT = 60.0
+_STOP_TIMEOUT = 30.0
+"""Seconds to wait for the daemon to close, on top of its kill_grace."""
 
 
 class DaemonHost:
@@ -32,9 +37,13 @@ class DaemonHost:
                 self.loop.run_until_complete(self.daemon.start())
             except BaseException as exc:
                 self._error = exc
-                return
-            finally:
+                # a start that failed after binding still holds its listeners
+                with contextlib.suppress(BaseException):
+                    self.loop.run_until_complete(self.daemon.close())
                 self._ready.set()
+                return
+            # ready only once the loop runs, so a stop() right after start() finds it running
+            self.loop.call_soon(self._ready.set)
             self.loop.run_forever()
         finally:
             self._close_loop()
@@ -55,20 +64,36 @@ class DaemonHost:
     def start(self) -> DaemonHost:
         """Start serving; raises whatever ``Daemon.start`` raised (no qsv, port in use...)."""
         self._thread.start()
-        assert self._ready.wait(60), "daemon did not start"
+        if not self._ready.wait(_START_TIMEOUT):
+            raise TimeoutError(f"qsv-clientd did not start within {_START_TIMEOUT:.0f}s")
         if self._error is not None:
             raise self._error
         return self
 
     def stop(self) -> None:
-        """Close the daemon (removing its socket, local-token and daemon.json) and the loop."""
+        """Close the daemon (removing its socket, local-token and daemon.json) and the loop.
+
+        Closing kills running qsv processes, which can take their ``kill_grace``.
+        """
         if self._thread.ident is None:  # never started: the loop never ran
             self.loop.close()
             return
+        done = None
         if self._error is None and self.loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.daemon.close(), self.loop).result(30)
-            self.loop.call_soon_threadsafe(self.loop.stop)
-        self._thread.join(30)
+            done = asyncio.run_coroutine_threadsafe(self._shutdown(), self.loop)
+        timeout = _STOP_TIMEOUT + self.daemon.config.kill_grace
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            raise TimeoutError(f"qsv-clientd did not stop within {timeout:.0f}s")
+        if done is not None:
+            done.result()  # close()'s own error, if any
+
+    async def _shutdown(self) -> None:
+        # the loop stops however long or badly close() goes, so the thread always ends
+        try:
+            await self.daemon.close()
+        finally:
+            self.loop.stop()
 
     @property
     def port(self) -> int:
