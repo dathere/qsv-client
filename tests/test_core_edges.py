@@ -4,6 +4,7 @@ helper parsers, and the parts of the client API not exercised elsewhere with a f
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import sys
@@ -208,6 +209,8 @@ def test_binary_removed_after_construction(fake_qsv: Callable[[str], str]) -> No
     with pytest.raises(FileNotFoundError) as info:
         qsv.run("x")
     assert isinstance(info.value, QsvNotFound)
+    # errno and filename as Popen's error had, so qsv-clientd relays it the same way
+    assert (info.value.errno, info.value.filename) == (errno.ENOENT, fake)
     assert "no longer exists" in str(info.value)
     assert client._caps_cache == {}
 
@@ -216,8 +219,11 @@ async def test_async_binary_removed_after_construction(fake_qsv: Callable[[str],
     fake = fake_qsv("print('ok')")
     qsv = AsyncQsv(fake)
     os.remove(fake)
-    with pytest.raises(QsvNotFound, match="no longer exists"):
+    with pytest.raises(FileNotFoundError) as info:
         await qsv.run("x")
+    assert isinstance(info.value, QsvNotFound)
+    assert (info.value.errno, info.value.filename) == (errno.ENOENT, fake)
+    assert "no longer exists" in str(info.value)
     assert client._caps_cache == {}
 
 
