@@ -78,14 +78,20 @@ version, running jobs and datasets, and lets you start, stop and restart the dae
   a daemon that starts later.
 
 **Pairing requests.** When a Data Schematic asks to pair, the dot turns magenta, a
-notification names the code and the dataset, and the request appears in the menu under
-**Waiting to pair** with its dataset, path, origin and expiry. Check that the page shows the
-same code, then **Approve** or **Deny**. The rules are those of `qsv-clientd approve`:
+notification names the dataset, and the request appears in the menu under **Waiting to
+pair** with its dataset, path, origin and expiry. To approve it, open **Approve…** and pick,
+from four codes, the one the page shows; or **Deny** it.
+
+The code is the only proof that a request is the page in front of you (a sandboxed frame on
+any website sends the same `null` origin as a local file), so the tray never shows which code
+is the real one: you recognize it from the page. Picking one of the three decoys denies the
+request; if that was a misclick, pair again from the page. Otherwise the rules are those of
+`qsv-clientd approve`:
 
 - a schematic that matches no registered dataset can only be denied (register it first);
-- a request that didn't come from a local file (any origin but `null`) carries a warning and
-  takes a second confirmation, **Approve despite the warning ▸ Yes**;
-- notifications only inform: approving always takes the menu, with the code in view.
+- a request that didn't come from a local file (any origin but `null`) shows a warning, and
+  its codes sit under **Approve despite the warning…**;
+- notifications only inform: approving always takes the menu, and the page's code.
 
 Notifications use pystray's own where it has them (on macOS through `osascript`, so macOS
 shows them as coming from "Script Editor"; Windows; GTK and AppIndicator on Linux), else

@@ -19,11 +19,11 @@ CODE_TTL = 300.0
 MAX_PENDING = 10
 MAX_REQUESTS_PER_MINUTE = 5
 # no 0/O, 1/I/L, so a code survives being read aloud or retyped
-_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 
 def _code() -> str:
-    raw = "".join(secrets.choice(_ALPHABET) for _ in range(6))
+    raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(6))
     return f"{raw[:3]}-{raw[3:]}"
 
 

@@ -411,9 +411,11 @@ def test_requests_are_listed_announced_once_and_approved(
     assert notes == [
         (
             "Pairing request",
-            f"{page['code']}: 'Sales'. Approve or deny it from the qsv-clientd menu.",
+            "'Sales' wants to pair. To approve, pick the code the page shows in the "
+            "qsv-clientd menu.",
         )
     ]
+    assert page["code"] not in repr(notes)  # recognized from the page, never told
     _do(c, REFRESH)
     assert len(notes) == 1  # once per request
     c.submit(model.APPROVE, page["code"]).result(60)
@@ -435,10 +437,10 @@ def test_unregistered_and_non_file_requests_say_so(
     _do(c, REFRESH)
     assert sorted(m for _, m in notes) == sorted(
         [
-            f"{stranger['code']}: a schematic that matches no registered dataset. "
-            "Approve or deny it from the qsv-clientd menu.",
-            f"{local['code']}: 'Sales', from local (not a local file). "
-            "Approve or deny it from the qsv-clientd menu.",
+            "A schematic that matches no registered dataset wants to pair. Deny it from the "
+            "qsv-clientd menu, or register the dataset first.",
+            "'Sales' wants to pair, from local (not a local file). To approve, pick the code "
+            "the page shows in the qsv-clientd menu.",
         ]
     )
     c.submit(model.DENY, stranger["code"]).result(60)
@@ -485,3 +487,20 @@ def test_a_hosted_daemon_lists_requests_too(
     assert [p.text.code for p in _do(c, REFRESH).pairings] == [page["code"]]
     # and the attention dot goes with the daemon
     assert _do(c, model.STOP).pairings == ()
+
+
+def test_picking_a_decoy_denies_the_request(
+    make_controller: MakeController, outside: DaemonThread, data: Path
+) -> None:
+    _local(outside, "POST", "/v1/datasets", {"path": str(data), "title": "Sales"})
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    page = _ask_to_pair(outside, _sha(data))
+    _do(c, REFRESH)
+    c.submit(model.WRONG_CODE, page["code"]).result(60)
+    assert c.state.pairings == ()
+    assert outside.http("GET", f"/v1/pair/{page['request_id']}").json()["status"] == "denied"
+    title, message = notes[-1]
+    assert title == "Pairing denied" and message.startswith("The code you picked isn't")

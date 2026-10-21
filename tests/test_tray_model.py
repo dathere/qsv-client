@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from qsv_client.daemon.pairing import CODE_ALPHABET
 from qsv_client.tray import model
 from qsv_client.tray.model import SEPARATOR, MenuSpec, Mode, TrayState
 
@@ -136,46 +137,78 @@ def _tree(spec: MenuSpec) -> Any:
     return [text, [_tree(s) for s in spec.submenu]] if spec.submenu else text
 
 
+def _codes(code: str) -> list[str]:
+    """The four choices, as _tree() renders them."""
+    return [
+        f"{c} -> {'approve' if c == code else 'wrong-code'} {code}"
+        for c in model.code_choices(code)
+    ]
+
+
 def test_a_request_from_a_local_file() -> None:
     state = TrayState(Mode.HOSTED, _status(), pairings=model.pending_requests([_item()]))
     menu = model.build_menu(state)
     assert _tree(menu[2]) == "—" and _tree(menu[3]) == "(Waiting to pair:)"
     assert _tree(menu[4]) == [
-        "ABC-123 · Sales",
+        "Pairing 1 · Sales",
         [
             "(For 'Sales')",
             "(/data/sales.csv)",
             "(Origin: null (a page opened from a file, or a sandboxed frame).)",
             "(Expires in 4m)",
             "—",
-            "(Check that the page shows ABC-123)",
-            "Approve -> approve ABC-123",
+            ["Approve…", ["(Which code does the page show?)", *_codes("ABC-123")]],
             "Deny -> deny ABC-123",
         ],
     ]
 
 
-def test_a_request_from_a_website_needs_one_more_confirmation() -> None:
+def test_the_tray_never_shows_which_code_is_real() -> None:
+    state = TrayState(Mode.HOSTED, _status(), pairings=model.pending_requests([_item()]))
+    shown = repr([_tree(s) for s in model.build_menu(state)])
+    for code in model.code_choices("ABC-123"):
+        assert shown.count(f"'{code} -> ") == 1  # only as one of the four choices
+    assert "ABC-123" not in model.title(state)
+
+
+def test_the_choices_are_four_distinct_codes_stable_for_a_request() -> None:
+    choices = model.code_choices("ABC-123")
+    assert len(set(choices)) == 4 and "ABC-123" in choices
+    assert all(len(c) == 7 and c[3] == "-" for c in choices)
+    alphabet = set(CODE_ALPHABET)
+    decoys = [c for c in choices if c != "ABC-123"]
+    assert all(set(c.replace("-", "")) <= alphabet for c in decoys)  # they look like codes
+    assert model.code_choices("ABC-123") == choices  # no reshuffle while the menu is open
+    positions = {model.code_choices(f"AB{c}-123").index(f"AB{c}-123") for c in "CDEFGHJKMN"}
+    assert len(positions) > 1  # the real code isn't always in the same place
+
+
+def test_a_request_from_a_website_warns_on_the_way_to_the_codes() -> None:
     item = _item(origin="https://evil.example", expires_in=30)
     item["dataset"]["original_path"] = "/data/orig.csv"
     (request,) = model.pending_requests([item])
-    assert _tree(model.pairing_menu(request))[1] == [
-        "(For 'Sales')",
-        "(/data/sales.csv)",
-        "((the fetched copy of /data/orig.csv, which is not being read))",
-        "(WARNING: the request came from 'https://evil.example', not a local file.)",
-        "(Expires in under a minute)",
-        "—",
-        "(Check that the page shows ABC-123)",
-        ["Approve despite the warning", ["Yes, approve ABC-123 -> approve ABC-123"]],
-        "Deny -> deny ABC-123",
+    assert _tree(model.pairing_menu(request, 2)) == [
+        "Pairing 2 · Sales",
+        [
+            "(For 'Sales')",
+            "(/data/sales.csv)",
+            "((the fetched copy of /data/orig.csv, which is not being read))",
+            "(WARNING: the request came from 'https://evil.example', not a local file.)",
+            "(Expires in under a minute)",
+            "—",
+            [
+                "Approve despite the warning…",
+                ["(Which code does the page show?)", *_codes("ABC-123")],
+            ],
+            "Deny -> deny ABC-123",
+        ],
     ]
 
 
 def test_an_unregistered_schematic_can_only_be_denied() -> None:
     (request,) = model.pending_requests([_item(dataset=None, expires_in=None)])
-    assert _tree(model.pairing_menu(request)) == [
-        "ABC-123 · no registered dataset",
+    assert _tree(model.pairing_menu(request, 1)) == [
+        "Pairing 1 · no registered dataset",
         [
             "(This schematic matches no registered dataset. Register it first:)",
             "(qsv-clientd register <data.csv> --schematic <schematic.html>)",

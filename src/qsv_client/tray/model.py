@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import enum
+import random
+import secrets
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from ..daemon._text import NO_DATASET, PairingText, describe_pairing
+from ..daemon.pairing import CODE_ALPHABET
 
 ServiceKind = Literal["launchd", "systemd"]
 IconState = Literal["stopped", "running", "busy", "attention", "error"]
@@ -21,6 +24,11 @@ RETRY = "retry"
 QUIT = "quit"
 APPROVE = "approve"
 DENY = "deny"
+WRONG_CODE = "wrong-code"
+"""A decoy was picked in place of the request's code: deny it."""
+
+# decoys can't be predicted from outside this process (not that knowing them would help a page)
+_CHOICE_SALT = secrets.token_hex(8)
 
 
 class Mode(enum.Enum):
@@ -155,28 +163,48 @@ def _info(text: str) -> MenuSpec:
     return MenuSpec(text, enabled=False)
 
 
-def pairing_menu(request: Pending) -> MenuSpec:
-    """One request: its details, then the decision. Approving takes the same checks as
-    ``qsv-clientd approve``: no registered dataset, no approval; a page that isn't a local
-    file (origin other than ``null``), one more confirmation."""
+def code_choices(code: str) -> tuple[str, ...]:
+    """The request's code among three decoys in the same alphabet and format, shuffled. Stable
+    for a code within this process, so the menu doesn't reshuffle while it is open."""
+    rng = random.Random(f"{_CHOICE_SALT}:{code}")
+    decoys: set[str] = set()
+    while len(decoys) < 3:
+        raw = "".join(rng.choice(CODE_ALPHABET) for _ in range(6))
+        decoys.add(f"{raw[:3]}-{raw[3:]}")
+        decoys.discard(code)
+    choices = [code, *sorted(decoys)]
+    rng.shuffle(choices)
+    return tuple(choices)
+
+
+def pairing_menu(request: Pending, number: int) -> MenuSpec:
+    """One request: its details, then the decision.
+
+    Approving means picking, from four codes, the one the page shows: the code is the only
+    proof that this request is that page's (any sandboxed frame on any site has origin
+    ``null`` too), so the tray never shows which code is real, and a wrong pick denies the
+    request. Otherwise the checks are ``qsv-clientd approve``'s: no registered dataset, no
+    approval; a page that isn't a local file, a warning on the way to the codes.
+    """
     t = request.text
     if t.can_approve:
-        label = f"{t.code} · {t.title}"
+        label = f"Pairing {number} · {t.title}"
         details = [_info(f"For {t.title!r}"), _info(str(t.path))]
         if t.fetched_note:
             details.append(_info(t.fetched_note))
     else:
-        label = f"{t.code} · no registered dataset"
+        label = f"Pairing {number} · no registered dataset"
         details = [_info(line.strip()) for line in NO_DATASET.splitlines()]
     details += [_info(t.origin_line), _info(request.expires.capitalize())]
     decision = []
     if t.can_approve:
-        decision.append(_info(f"Check that the page shows {t.code}"))
-        if t.warning is None:
-            decision.append(MenuSpec("Approve", APPROVE, arg=t.code))
-        else:
-            yes = MenuSpec(f"Yes, approve {t.code}", APPROVE, arg=t.code)
-            decision.append(MenuSpec("Approve despite the warning", submenu=(yes,)))
+        codes = [
+            MenuSpec(choice, APPROVE if choice == t.code else WRONG_CODE, arg=t.code)
+            for choice in code_choices(t.code)
+        ]
+        pick = (_info("Which code does the page show?"), *codes)
+        text = "Approve…" if t.warning is None else "Approve despite the warning…"
+        decision.append(MenuSpec(text, submenu=pick))
     decision.append(MenuSpec("Deny", DENY, arg=t.code))
     return MenuSpec(label, submenu=(*details, SEPARATOR, *decision))
 
@@ -187,7 +215,7 @@ def build_menu(state: TrayState) -> list[MenuSpec]:
         items.append(MenuSpec(detail, enabled=False))
     if state.pairings and state.mode in (Mode.HOSTED, Mode.ATTACHED):
         items += [SEPARATOR, _info("Waiting to pair:")]
-        items += [pairing_menu(p) for p in state.pairings]
+        items += [pairing_menu(p, n) for n, p in enumerate(state.pairings, 1)]
     if lifecycle := _lifecycle(state):
         items += [SEPARATOR, *lifecycle]
     items += [SEPARATOR, MenuSpec("Quit", QUIT)]

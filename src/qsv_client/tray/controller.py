@@ -76,6 +76,7 @@ class Controller:
             model.TAKEOVER: self._takeover,
             model.APPROVE: self._approve,
             model.DENY: self._deny,
+            model.WRONG_CODE: self._wrong_code,
         }
 
     @property
@@ -159,20 +160,25 @@ class Controller:
 
     def _announce(self, pairings: tuple[Pending, ...]) -> None:
         """Notify once per new request. A code that left the list (decided, or expired) is
-        forgotten; it can't come back."""
+        forgotten; it can't come back. The code itself is never shown: approving means
+        recognizing it, from the page, among decoys."""
         codes = {p.text.code for p in pairings}
         for request in pairings:
             t = request.text
             if t.code in self._announced:
                 continue
             if not t.can_approve:
-                message = f"{t.code}: a schematic that matches no registered dataset"
-            elif t.warning:
-                message = f"{t.code}: {t.title!r}, from {t.origin} (not a local file)"
-            else:
-                message = f"{t.code}: {t.title!r}"
+                self.notify(
+                    "Pairing request",
+                    "A schematic that matches no registered dataset wants to pair. "
+                    "Deny it from the qsv-clientd menu, or register the dataset first.",
+                )
+                continue
+            source = f", from {t.origin} (not a local file)" if t.warning else ""
             self.notify(
-                "Pairing request", message + ". Approve or deny it from the qsv-clientd menu."
+                "Pairing request",
+                f"{t.title!r} wants to pair{source}. To approve, pick the code the page shows "
+                "in the qsv-clientd menu.",
             )
         self._announced = codes
 
@@ -274,6 +280,17 @@ class Controller:
 
     def _deny(self, code: str) -> None:
         self._decide(code, "deny")
+
+    def _wrong_code(self, code: str) -> None:
+        # the picked code isn't this request's: the page the user is looking at didn't make it
+        log.warning("a decoy code was picked for pairing %s; denying it", code)
+        self._decide(code, "deny")
+        self.notify(
+            "Pairing denied",
+            "The code you picked isn't that request's, so it was denied. If the page shows "
+            "that code, its request is another one in the menu; if you misclicked, pair again "
+            "from the page.",
+        )
 
     def _decide(self, code: str, verb: str) -> None:
         client = self._client

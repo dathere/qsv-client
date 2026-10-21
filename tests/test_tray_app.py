@@ -339,18 +339,24 @@ def test_deciding_a_request_from_its_submenu(
     controller._set(mode=Mode.HOSTED, status={}, pairings=requests)
     assert icon.icon is icons.image("attention")
     texts = [getattr(e, "text", "—") for e in icon.entries()]
-    assert texts[3:6] == ["Waiting to pair:", "ABC-123 · Sales", "XYZ-789 · Sales"]
-    submenu = icon.click("ABC-123 · Sales")
-    assert [getattr(e, "text", "—") for e in submenu][-3:] == [
-        "Check that the page shows ABC-123",
-        "Approve",
-        "Deny",
+    assert texts[3:6] == ["Waiting to pair:", "Pairing 1 · Sales", "Pairing 2 · Sales"]
+    submenu = icon.click("Pairing 1 · Sales")
+    assert [getattr(e, "text", "—") for e in submenu][-2:] == ["Approve…", "Deny"]
+    choices = model.code_choices("ABC-123")
+    codes = icon.click("Pairing 1 · Sales", "Approve…")
+    assert [e.text for e in codes] == ["Which code does the page show?", *choices]
+    decoy = next(c for c in choices if c != "ABC-123")
+    icon.click("Pairing 1 · Sales", "Approve…", "ABC-123")
+    icon.click("Pairing 1 · Sales", "Approve…", decoy)
+    icon.click("Pairing 2 · Sales", "Deny")
+    # a page that isn't a local file: the warning is on the way to the codes
+    icon.click("Pairing 2 · Sales", "Approve despite the warning…", "XYZ-789")
+    assert controller.submitted[-4:] == [
+        "approve ABC-123",
+        "wrong-code ABC-123",
+        "deny XYZ-789",
+        "approve XYZ-789",
     ]
-    icon.click("ABC-123 · Sales", "Approve")
-    icon.click("XYZ-789 · Sales", "Deny")
-    # a page that isn't a local file takes a second confirmation
-    icon.click("XYZ-789 · Sales", "Approve despite the warning", "Yes, approve XYZ-789")
-    assert controller.submitted[-3:] == ["approve ABC-123", "deny XYZ-789", "approve XYZ-789"]
 
 
 def test_notifications_go_through_the_icon(
