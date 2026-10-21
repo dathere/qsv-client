@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -29,9 +30,14 @@ time.sleep(60)
 
 
 def _is_zombie(pid: int) -> bool:
-    """Linux only: dead but not yet reaped. On Python 3.12+ asyncio reaps children from the
-    event loop (a pidfd reader), so a child killed as ``asyncio.run()`` shuts down is never
-    reaped by it and ``os.kill(pid, 0)`` keeps succeeding."""
+    """Dead but not yet reaped, which ``os.kill(pid, 0)`` can't tell from alive. On Linux with
+    Python 3.12+ asyncio reaps children from the event loop (a pidfd reader), so a child
+    killed as ``asyncio.run()`` shuts down is never reaped by it."""
+    if sys.platform == "darwin":  # no /proc
+        stat = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout
+        return stat.strip().startswith("Z")
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
@@ -372,6 +378,10 @@ async def test_async_timeout_releases_pipes_held_by_escaped_grandchild(
             _kill(_read_pid(pidfile))
 
 
+STARTUP = 2.0
+"""Seconds a fake qsv may take to start (and write its pid) on a slow CI runner. A run's
+timeout must not fire before then, or the fake never writes the pid the test waits for."""
+
 IGNORE_STOP_AND_HANG = (
     IGNORE_STOP
     + """
@@ -385,13 +395,13 @@ time.sleep(60)
 async def test_async_cancel_during_timeout_cleanup_still_kills(
     fake_qsv: Callable[[str], str], tmp_path: Path
 ) -> None:
-    # the run times out at 0.5s and starts its 2s SIGTERM grace wait; the outer deadline at
-    # 1s cancels it mid-cleanup, which must not skip the SIGKILL
+    # the run times out and starts its 2s SIGTERM grace wait; the outer deadline 0.5s later
+    # cancels it mid-cleanup, which must not skip the SIGKILL
     pidfile = tmp_path / "leader.pid"
     qsv = AsyncQsv(fake_qsv(IGNORE_STOP_AND_HANG), kill_grace=2)
     try:
         with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(qsv.run("stats", pidfile, timeout=0.5), 1)
+            await asyncio.wait_for(qsv.run("stats", pidfile, timeout=STARTUP), STARTUP + 0.5)
         pid = _read_pid(pidfile)
         assert await asyncio.to_thread(_wait_dead, pid, 6), "leader survived cancellation"
     finally:
@@ -407,7 +417,7 @@ def test_asyncio_run_returning_mid_cleanup_still_kills(
     qsv = AsyncQsv(fake_qsv(IGNORE_STOP_AND_HANG), kill_grace=2)
 
     async def main() -> None:
-        await asyncio.wait_for(qsv.run("stats", pidfile, timeout=0.5), 1)
+        await asyncio.wait_for(qsv.run("stats", pidfile, timeout=STARTUP), STARTUP + 0.5)
 
     try:
         with pytest.raises(asyncio.TimeoutError):
@@ -425,8 +435,8 @@ def test_asyncio_run_cancelling_background_run_mid_cleanup_still_kills(
     qsv = AsyncQsv(fake_qsv(IGNORE_STOP_AND_HANG), kill_grace=2)
 
     async def main() -> None:
-        background = asyncio.create_task(qsv.run("stats", pidfile, timeout=0.5))
-        await asyncio.sleep(1)
+        background = asyncio.create_task(qsv.run("stats", pidfile, timeout=STARTUP))
+        await asyncio.sleep(STARTUP + 0.5)
         assert not background.done()  # still in its SIGTERM grace wait
 
     try:
@@ -456,7 +466,7 @@ def _wait_reaped(pid: int, within: float = 5.0) -> bool:
 def test_second_interrupt_during_grace_wait_still_kills(
     fake_qsv: Callable[[str], str], tmp_path: Path
 ) -> None:
-    # times out at 0.5s and starts its 3s grace wait; a "second Ctrl-C" at 1s interrupts it
+    # times out and starts its 3s grace wait; a "second Ctrl-C" 0.5s later interrupts it
     pidfile = tmp_path / "leader.pid"
     qsv = Qsv(fake_qsv(IGNORE_STOP_AND_HANG), kill_grace=3)
 
@@ -464,10 +474,10 @@ def test_second_interrupt_during_grace_wait_still_kills(
         raise KeyboardInterrupt
 
     previous = signal.signal(signal.SIGALRM, interrupt)  # type: ignore[attr-defined,unused-ignore]
-    signal.setitimer(signal.ITIMER_REAL, 1.0)  # type: ignore[attr-defined,unused-ignore]
+    signal.setitimer(signal.ITIMER_REAL, STARTUP + 0.5)  # type: ignore[attr-defined,unused-ignore]
     try:
         with pytest.raises(KeyboardInterrupt):
-            qsv.run("stats", pidfile, timeout=0.5)
+            qsv.run("stats", pidfile, timeout=STARTUP)
         assert _wait_reaped(_read_pid(pidfile)), "leader survived the second interrupt"
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)  # type: ignore[attr-defined,unused-ignore]
