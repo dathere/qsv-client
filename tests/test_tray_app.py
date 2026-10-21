@@ -33,8 +33,8 @@ class FakeMenu:
 
 
 class FakeMenuItem:
-    def __init__(self, text: str, action: Any, enabled: bool = True) -> None:
-        self.text, self.action, self.enabled = text, action, enabled
+    def __init__(self, text: str, action: Any, enabled: bool = True, checked: Any = None) -> None:
+        self.text, self.action, self.enabled, self.checked = text, action, enabled, checked
 
 
 class FakeIcon:
@@ -153,6 +153,9 @@ def test_the_menu_follows_the_state(
         "—",
         "Stop",
         "Restart (unpairs open schematics)",
+        "—",
+        "Open config…",
+        "Open log…",
         "—",
         "Quit",
     ]
@@ -367,3 +370,17 @@ def test_notifications_go_through_the_icon(
     icon = _run(controller, "linux", monkeypatch)
     controller.notify("Pairing request", "ABC-123: 'Sales'")
     assert icon.notifications == [("Pairing request", "ABC-123: 'Sales'")]
+
+
+def test_start_at_login_is_a_check_box(
+    fake_pystray: types.ModuleType, controller: FakeController, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    icon = _run(controller, "linux", monkeypatch)
+    controller._set(autostart=True)
+    (item,) = [e for e in icon.entries() if getattr(e, "text", None) == "Start at login"]
+    assert callable(item.checked) and item.checked(item) is True
+    (quit_item,) = [e for e in icon.entries() if getattr(e, "text", None) == "Quit"]
+    assert quit_item.checked is None  # no check box
+    icon.click("Start at login")
+    icon.click("Open config…")
+    assert controller.submitted[-2:] == ["autostart", "open-config"]

@@ -145,6 +145,7 @@ For a system tray icon that runs and controls the daemon, install the `tray` ext
 ```bash
 pipx install 'qsv-client[tray]'
 qsv-clientd-tray
+qsv-clientd-tray --enable-autostart       # start it at login (or tick Start at login)
 ```
 
 On Linux the tray needs a desktop with AppIndicator or GTK tray support (see the doc).

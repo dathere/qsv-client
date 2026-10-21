@@ -21,11 +21,11 @@ from typing import Any
 
 from ..daemon import service
 from ..daemon.client import DaemonClient
-from ..daemon.config import DaemonConfig
+from ..daemon.config import DaemonConfig, config_dir, log_path
 from ..daemon.host import DaemonHost
 from ..daemon.server import Daemon
 from ..errors import QsvDaemonError
-from . import model
+from . import _open, autostart, model
 from .model import DatasetView, Job, Mode, Pending, ServiceKind, TrayState
 from .notify import Notifier, nothing
 
@@ -36,21 +36,29 @@ _PAIRING_ACTIONS = frozenset({model.APPROVE, model.DENY, model.WRONG_CODE})
 _STATUS_WAIT = 5.0
 
 
-def _load_daemon() -> Daemon:
-    # read daemon.json afresh each time, so a restart picks up edits
-    return Daemon(DaemonConfig.load())
+def load_daemon(binary: str | None = None) -> Daemon:
+    """A daemon from daemon.json, read afresh each time so a restart picks up edits.
+    ``binary`` overrides its ``binary``, as `qsv-clientd serve --binary` does."""
+    config = DaemonConfig.load()
+    if binary is not None:
+        config.binary = binary
+    return Daemon(config)
 
 
 class Controller:
     def __init__(
         self,
         *,
-        make_daemon: Callable[[], Daemon] = _load_daemon,
+        make_daemon: Callable[[], Daemon] = load_daemon,
         attach: Callable[[], DaemonClient] = DaemonClient,
         service_installed: Callable[[], ServiceKind | None] = service.service_installed,
         stop_service: Callable[[], str] = service.stop_service,
         poll_interval: float = 2.0,
         takeover_timeout: float = 30.0,
+        open_path: Callable[[Path], None] = _open.open_path,
+        autostart_enabled: Callable[[], bool | None] = autostart.is_enabled,
+        enable_autostart: Callable[[], str] = autostart.enable,
+        disable_autostart: Callable[[], str] = autostart.disable,
     ) -> None:
         self._make_daemon = make_daemon
         self._attach = attach
@@ -58,6 +66,10 @@ class Controller:
         self._stop_service = stop_service
         self._poll_interval = poll_interval
         self._takeover_timeout = takeover_timeout
+        self._open_path = open_path
+        self._autostart_enabled = autostart_enabled
+        self._enable_autostart = enable_autostart
+        self._disable_autostart = disable_autostart
         self.on_change: Callable[[TrayState], None] = lambda state: None
         """Called with each new state, on the worker thread."""
         self.notify: Notifier = nothing
@@ -88,6 +100,9 @@ class Controller:
             model.FETCH_FORCE: lambda dataset_id: self._start_job(model.FETCH_FORCE, dataset_id),
             model.FORGET: self._forget,
             model.REVOKE_ALL: self._revoke_all,
+            model.OPEN_CONFIG: self._open_config,
+            model.OPEN_LOG: self._open_log,
+            model.AUTOSTART: self._toggle_autostart,
         }
 
     @property
@@ -221,6 +236,7 @@ class Controller:
         log.info("attached to qsv-clientd (pid %s)", status.get("pid"))
 
     def _start(self) -> None:
+        self._read_autostart()
         self._stop_host()  # after an error, the old host may still hold its listeners
         # check again: a daemon may have started since (two would fight over local-token)
         client = self._probe()
@@ -449,6 +465,66 @@ class Controller:
         with contextlib.suppress(RuntimeError):  # Quit shut the worker down meanwhile
             self.submit(REFRESH)
 
+    # -- files and login ---------------------------------------------------------------------
+
+    def _open(self, path: Path) -> bool:
+        try:
+            self._open_path(path)
+        except OSError as exc:
+            self.notify(f"Couldn't open {path.name}", str(exc))
+            return False
+        return True
+
+    def _open_config(self) -> None:
+        """Open the default daemon.json, creating it as ``{}`` (the only safe seed: unknown
+        keys are errors) so there is something to edit."""
+        path = config_dir() / "daemon.json"
+        try:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+        except OSError as exc:  # a read-only config directory: no reason to show an error state
+            self.notify("Couldn't create daemon.json", str(exc))
+            return
+        if not self._open(path):
+            return
+        state = self.state
+        if state.mode is Mode.ATTACHED and state.service:
+            hint = _APPLY_TO_SERVICE.format(state.service)
+        else:
+            hint = _APPLY_CONFIG.get(state.mode, _APPLY_ON_START)
+        self.notify("Editing daemon.json", hint)
+
+    def _open_log(self) -> None:
+        state = self.state
+        hosted_or_tray = not (state.mode is Mode.ATTACHED and state.service == "launchd")
+        path = log_path() if hosted_or_tray else service.launchd_log_path()
+        if not path.exists():
+            self.notify("No log yet", f"Nothing has been logged to {path} yet.")
+            return
+        self._open(path)
+
+    def _read_autostart(self) -> None:
+        try:
+            enabled = self._autostart_enabled()
+        except OSError:
+            log.warning("couldn't tell whether the tray starts at login", exc_info=True)
+            enabled = None
+        if enabled != self.state.autostart:
+            self._set(autostart=enabled)
+
+    def _toggle_autostart(self) -> None:
+        # a login item that couldn't be written is no reason to show the daemon as broken
+        try:
+            if self.state.autostart:
+                log.info(self._disable_autostart())
+            else:
+                log.info(self._enable_autostart())
+        except Exception as exc:  # no qsv to pin, a bad daemon.json, a permission error
+            log.warning("changing Start at login failed", exc_info=True)
+            self.notify("Couldn't change Start at login", str(exc) or type(exc).__name__)
+        self._read_autostart()
+
 
 def _dataset_path(dataset_id: str) -> str:
     return f"/v1/datasets/{urllib.parse.quote(dataset_id, safe='')}"
@@ -456,3 +532,11 @@ def _dataset_path(dataset_id: str) -> str:
 
 def _tokens(count: object) -> str:
     return "1 token" if count == 1 else f"{count} tokens"
+
+
+_APPLY_CONFIG = {
+    Mode.HOSTED: "Restart, in the menu, applies your changes (and unpairs open schematics).",
+    Mode.ATTACHED: "Changes apply when qsv-clientd next starts: restart it.",
+}
+_APPLY_TO_SERVICE = "Changes apply when the qsv-clientd {} service restarts."
+_APPLY_ON_START = "Changes apply when qsv-clientd next starts."
