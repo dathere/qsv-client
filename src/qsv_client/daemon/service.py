@@ -50,14 +50,21 @@ def launchd_plist(
     label: str = LABEL,
     keep_alive: bool = True,
     log: Path | None = None,
+    session_type: str | None = None,
 ) -> str:
-    """A launchd agent; ``log`` (stderr) defaults to ~/Library/Logs/qsv-clientd.log."""
+    """A launchd agent; ``log`` (stderr) defaults to ~/Library/Logs/qsv-clientd.log.
+    ``session_type`` sets LimitLoadToSessionType ("Aqua": only in a GUI login)."""
     args = "\n".join(f"    <string>{escape(a)}</string>" for a in command)
     env_items = "\n".join(
         f"    <key>{escape(k)}</key><string>{escape(v)}</string>" for k, v in env.items()
     )
     log_path = escape(str(log or Path.home() / "Library/Logs/qsv-clientd.log"))
     keep = "<true/>" if keep_alive else "<false/>"
+    session = (
+        f"  <key>LimitLoadToSessionType</key><string>{escape(session_type)}</string>\n"
+        if session_type
+        else ""
+    )
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
 "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -72,7 +79,7 @@ def launchd_plist(
   <dict>
 {env_items}
   </dict>
-  <key>RunAtLoad</key><true/>
+{session}  <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>{keep}
   <key>StandardErrorPath</key><string>{log_path}</string>
 </dict>
@@ -130,7 +137,10 @@ def install() -> str:
     # list2cmdline quotes arguments with spaces; inside /TR "..." those quotes must be \"
     task = subprocess.list2cmdline(command).replace('"', '\\"')
     return (
-        "automatic install is not supported on this platform; to start qsv-clientd at logon run:\n"
+        "automatic install is not supported on this platform. The system tray can run "
+        "qsv-clientd and start at logon instead:\n"
+        "  pip install 'qsv-client[tray]' && qsv-clientd-tray --enable-autostart\n"
+        "or, to start qsv-clientd itself at logon, run:\n"
         f'  schtasks /Create /SC ONLOGON /TN qsv-clientd /TR "{task}"'
     )
 
