@@ -23,7 +23,9 @@ qsv-clientd install           # launchd agent (macOS) or systemd --user unit (Li
 qsv-clientd status
 ```
 
-On Windows, `install` prints the `schtasks` command to run.
+On Windows, where `install` can't set up a service, use the tray instead: it runs the daemon
+and can start at login (see Tray). `install` prints a `schtasks` command too, for running
+the daemon at logon without the tray.
 
 `serve` logs to stderr (`-v` adds INFO lines: pairing requests and decisions, datasets
 registered and forgotten, renders, fetches, and revoked tokens; tokens and pairing codes
@@ -105,6 +107,19 @@ the background: it shows in the menu, the dot turns amber, and a notification te
 it went. A fetch refused because the new data lacks some of the dataset's columns offers
 **Fetch latest data, accepting missing columns** next. **Revoke all tokens ▸ Yes** unpairs
 every open schematic.
+
+**Files.** **Open config…** opens the default `daemon.json` in the config directory (not a
+`--config` file a foreground `serve` may use), creating it as `{}` if it's missing, and says
+how changes apply: **Restart** when the tray hosts the daemon, otherwise a restart of the
+service or of `serve`. **Open log…** opens the tray's log, which a daemon it hosts writes to
+as well, or the launchd service's `~/Library/Logs/qsv-clientd.log`. For a systemd service the
+menu shows `journalctl --user -u qsv-clientd` instead.
+
+**Start at login.** The **Start at login** check box, or `qsv-clientd-tray --enable-autostart`
+(and `--disable-autostart`), starts the tray when you log in: a LaunchAgent on macOS (not kept
+alive, so Quit stays quit), an XDG autostart entry on Linux, and the `Run` registry key on
+Windows. It is independent of `qsv-clientd install`; pick one. With both, the service runs the
+daemon and the tray attaches to it at login, which works but runs two things.
 
 One tray runs per user. It logs to `~/Library/Logs/qsv-client/qsv-clientd.log` on macOS, and
 `qsv-clientd.log` in the state directory elsewhere (`-v` adds debug lines).
