@@ -46,6 +46,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- On Windows, a run that timed out or was cancelled in a process without a console, such as
+  one started with `pythonw`, raised `SystemError` and left qsv running. It is killed after
+  `kill_grace` now.
 - `DaemonClient` raises `QsvDaemonError` for a garbled reply from `qsv-clientd`, as
   `AsyncDaemonClient` already did, instead of leaking `http.client` exceptions.
 - `DaemonClient` closes its socket when it can't connect to `qsv-clientd`, so checking for a
