@@ -132,7 +132,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --extra tray
-      - run: uv run pytest -v --cov tests/test_tray_*.py
+      # the paths before --cov, which would otherwise take the first as its source
+      - run: uv run pytest -v tests/test_tray_*.py --cov
       - run: uv run coverage xml
       - uses: codecov/codecov-action@v5
         # an upload or OIDC-token hiccup must not fail the tests; fail_ci_if_error misses the latter
