@@ -25,8 +25,15 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+# the system tray for qsv-clientd: `pip install 'qsv-client[tray]'`
+tray = ["pystray>=0.19.5,<0.20", "Pillow>=10"]
+
 [project.scripts]
 qsv-clientd = "qsv_client.daemon.__main__:main"
+
+[project.gui-scripts]
+qsv-clientd-tray = "qsv_client.tray.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/dathere/qsv-client"
@@ -72,6 +79,11 @@ exclude_also = [
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
+
+# pystray has no type information; both may be absent when the tray extra isn't installed
+[[tool.mypy.overrides]]
+module = ["pystray", "pystray.*", "PIL", "PIL.*", "AppKit", "PyObjCTools", "PyObjCTools.*", "gi", "gi.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100

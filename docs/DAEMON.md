@@ -56,6 +56,35 @@ browser listener off), `socket`, `max_jobs`, `max_timeout`, `inherit_env`, `kill
 (`socket`, or `QSV_CLIENTD_SOCKET`) must fit a Unix socket address, about 104 bytes on macOS
 and 108 on Linux; the daemon refuses a longer one with an error naming both settings.
 
+## Tray
+
+```bash
+pipx install 'qsv-client[tray]'    # adds pystray and Pillow
+qsv-clientd-tray
+```
+
+`qsv-clientd-tray` puts the qsv logo in the menu bar (macOS) or notification area (Windows,
+Linux). Its dot shows the daemon's state: grey stopped, green running, amber busy, magenta
+when a schematic is waiting to be paired, red on an error. The menu shows the status, qsv's
+version, running jobs and datasets, and lets you start, stop and restart the daemon.
+
+- **Hosted:** when no daemon is running, the tray runs one itself, on a background thread,
+  with your `daemon.json`. Quitting the tray stops it. Restart reads `daemon.json` again, and
+  unpairs every open schematic, since tokens are kept in memory.
+- **Attached:** when a daemon is already running (the service `install` set up, or
+  `qsv-clientd serve`), the tray only shows it. Quitting leaves it running. If that daemon
+  is the launchd or systemd service, **Stop service and run it here** stops the service
+  until your next login and hosts the daemon in the tray instead. A stopped tray attaches to
+  a daemon that starts later.
+
+One tray runs per user. It logs to `~/Library/Logs/qsv-client/qsv-clientd.log` on macOS, and
+`qsv-clientd.log` in the state directory elsewhere (`-v` adds debug lines).
+
+On Linux, pystray needs the AppIndicator or GTK bindings for Python (`python3-gi` and the
+AppIndicator typelib from your distribution); in a pipx or uv environment, create it with
+`--system-site-packages` so they are visible. GNOME also needs the AppIndicator extension.
+Without them the icon falls back to plain X, which has no menus; the log says so.
+
 ## Local clients
 
 ```python
