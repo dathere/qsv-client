@@ -13,6 +13,7 @@ from typing import Any
 
 from ..errors import QsvDaemonError, QsvError, QsvNotFound
 from . import logs, service
+from ._text import NO_DATASET, describe_pairing
 from .client import DaemonClient
 from .config import DaemonConfig
 from .registry import SchematicSource
@@ -152,29 +153,21 @@ def _approve(client: DaemonClient, ns: argparse.Namespace) -> int:
             f"no pending pairing with code {wanted} (codes expire after 5 minutes)", file=sys.stderr
         )
         return 1
-    p = pending[0]
-    ds = p["dataset"]
-    if ds is None:
-        print(
-            "This schematic matches no registered dataset. Register it first:\n"
-            "  qsv-clientd register <data.csv> --schematic <schematic.html>",
-            file=sys.stderr,
-        )
+    text = describe_pairing(pending[0])
+    if not text.can_approve:
+        print(NO_DATASET, file=sys.stderr)
         return 1
-    print(f"Pair code {p['code']} for {ds['title']!r} ({ds['path']})")
-    if ds.get("original_path"):
-        print(f"  (the fetched copy of {ds['original_path']}, which is not being read)")
-    if p["origin"] == "null":
-        print("Origin: null (a page opened from a file, or a sandboxed frame).")
-    else:
-        print(f"WARNING: the request came from {p['origin']!r}, not a local file.")
+    print(text.headline)
+    if text.fetched_note:
+        print(f"  {text.fetched_note}")
+    print(text.origin_line)
     if not ns.yes and not sys.stdin.isatty():
         print("no terminal to confirm on; re-run with --yes to approve", file=sys.stderr)
         return 1
     if not (ns.yes or _confirm("Approve?")):
         print("not approved", file=sys.stderr)
         return 1
-    _print(client.request("POST", f"/v1/pairings/{p['code']}/approve"))
+    _print(client.request("POST", f"/v1/pairings/{text.code}/approve"))
     return 0
 
 
