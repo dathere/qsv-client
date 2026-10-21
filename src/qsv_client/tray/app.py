@@ -119,8 +119,13 @@ def _item(pystray: Any, spec: MenuSpec, controller: Controller) -> Any:
     if action == model.QUIT:
         # run() returns once the icon stops; the caller then shuts the controller down
         return pystray.MenuItem(spec.text, lambda icon, item: icon.stop())
+    # pystray wants a callable for a check box's state, or None for no check box
+    checked = None if spec.checked is None else (lambda item, value=spec.checked: value)
     return pystray.MenuItem(
-        spec.text, lambda icon, item: controller.submit(action, arg), enabled=spec.enabled
+        spec.text,
+        lambda icon, item: controller.submit(action, arg),
+        enabled=spec.enabled,
+        checked=checked,
     )
 
 

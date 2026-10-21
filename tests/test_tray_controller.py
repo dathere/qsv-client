@@ -58,6 +58,9 @@ def make_controller(make_daemon: Callable[[], Daemon]) -> Iterator[MakeControlle
             "service_installed": lambda: None,
             "stop_service": lambda: "stopped",
             "poll_interval": 0.05,
+            # never the real login items or files of whoever runs the tests
+            "autostart_enabled": lambda: None,
+            "open_path": lambda path: None,
         }
         settings.update(overrides)
         c = Controller(**settings)  # type: ignore[arg-type]
@@ -792,3 +795,126 @@ def test_concurrent_changes_reach_the_gui_in_order(make_controller: MakeControll
     adder.join(10)
     remover.join(10)
     assert seen[-1].jobs == ()  # the GUI ends showing the job finished
+
+
+# -- files and login ----------------------------------------------------------------------------
+
+
+def _opener(c: Controller) -> list[Path]:
+    opened: list[Path] = []
+    c._open_path = opened.append
+    return opened
+
+
+@pytest.mark.parametrize(
+    ("fields", "hint"),
+    [
+        ({"mode": Mode.HOSTED}, "Restart, in the menu, applies your changes"),
+        ({"mode": Mode.ATTACHED, "service": "launchd"}, "the qsv-clientd launchd service"),
+        ({"mode": Mode.ATTACHED}, "next starts: restart it"),
+        ({"mode": Mode.ERROR}, "Changes apply when qsv-clientd next starts."),
+    ],
+)
+def test_open_config_creates_it_and_says_how_changes_apply(
+    make_controller: MakeController, home: Path, fields: dict[str, Any], hint: str
+) -> None:
+    c = make_controller()
+    opened = _opener(c)
+    notes = Notes()
+    c.notify = notes
+    c._set(**fields)
+    c.submit(model.OPEN_CONFIG).result(60)
+    assert opened == [home / "daemon.json"]
+    assert (home / "daemon.json").read_text() == "{}\n"  # unknown keys are errors: {} only
+    ((title, message),) = notes
+    assert title == "Editing daemon.json" and hint in message
+
+
+def test_open_config_keeps_an_existing_file(make_controller: MakeController, home: Path) -> None:
+    (home / "daemon.json").write_text('{"port": 0}')
+    c = make_controller()
+    _opener(c)
+    c.submit(model.OPEN_CONFIG).result(60)
+    assert (home / "daemon.json").read_text() == '{"port": 0}'
+
+
+def test_a_file_that_wont_open_is_a_notification(
+    make_controller: MakeController, home: Path
+) -> None:
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+
+    def no_opener(path: Path) -> None:
+        raise FileNotFoundError(2, "No such file or directory: 'xdg-open'")
+
+    c._open_path = no_opener
+    c.submit(model.OPEN_CONFIG).result(60)
+    assert notes == [
+        ("Couldn't open daemon.json", "[Errno 2] No such file or directory: 'xdg-open'")
+    ]
+    assert c.state.mode is Mode.STOPPED
+
+
+def test_open_log_opens_the_right_log(
+    make_controller: MakeController, home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    c = make_controller()
+    opened = _opener(c)
+    notes = Notes()
+    c.notify = notes
+    c._set(mode=Mode.HOSTED)
+    c.submit(model.OPEN_LOG).result(60)
+    assert notes == [("No log yet", f"Nothing has been logged to {home / 'qsv-clientd.log'} yet.")]
+    (home / "qsv-clientd.log").write_text("x\n")
+    c.submit(model.OPEN_LOG).result(60)
+    assert opened == [home / "qsv-clientd.log"]
+    user = tmp_path / "user"
+    monkeypatch.setattr(Path, "home", lambda: user)
+    service_log = user / "Library" / "Logs" / "qsv-clientd.log"
+    service_log.parent.mkdir(parents=True)
+    service_log.write_text("x\n")
+    c._set(mode=Mode.ATTACHED, service="launchd")
+    c.submit(model.OPEN_LOG).result(60)
+    assert opened[-1] == service_log
+
+
+def test_start_at_login_toggles_and_reads_back(make_controller: MakeController) -> None:
+    enabled = [False]
+
+    def enable() -> str:
+        enabled[0] = True
+        return "enabled"
+
+    def disable() -> str:
+        enabled[0] = False
+        return "disabled"
+
+    c = make_controller(
+        autostart_enabled=lambda: enabled[0], enable_autostart=enable, disable_autostart=disable
+    )
+    assert _do(c, model.START).autostart is False  # read at start
+    assert _do(c, model.AUTOSTART).autostart is True
+    assert _do(c, model.AUTOSTART).autostart is False
+
+
+def test_start_at_login_failures_are_notifications(
+    make_controller: MakeController, caplog: pytest.LogCaptureFixture
+) -> None:
+    def no_qsv() -> str:
+        raise QsvNotFound("qsv not found on PATH")
+
+    def unreadable() -> bool:
+        raise PermissionError(13, "Access is denied")
+
+    c = make_controller(autostart_enabled=lambda: False, enable_autostart=no_qsv)
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    state = _do(c, model.AUTOSTART)
+    assert notes == [("Couldn't change Start at login", "qsv not found on PATH")]
+    assert state.autostart is False and state.mode is Mode.HOSTED
+    c._autostart_enabled = unreadable
+    with caplog.at_level(logging.WARNING, logger="qsv_client.tray"):
+        assert _do(c, model.RETRY).autostart is None  # unknown: the item goes away
+    assert "couldn't tell whether the tray starts at login" in caplog.text

@@ -43,6 +43,11 @@ def service_environment() -> dict[str, str]:
     return env
 
 
+def launchd_log_path() -> Path:
+    """Where the launchd service's stderr goes."""
+    return Path.home() / "Library" / "Logs" / "qsv-clientd.log"
+
+
 def launchd_plist(
     command: list[str],
     env: dict[str, str],
@@ -58,7 +63,7 @@ def launchd_plist(
     env_items = "\n".join(
         f"    <key>{escape(k)}</key><string>{escape(v)}</string>" for k, v in env.items()
     )
-    log_path = escape(str(log or Path.home() / "Library/Logs/qsv-clientd.log"))
+    log_path = escape(str(log or launchd_log_path()))
     keep = "<true/>" if keep_alive else "<false/>"
     session = (
         f"  <key>LimitLoadToSessionType</key><string>{escape(session_type)}</string>\n"
