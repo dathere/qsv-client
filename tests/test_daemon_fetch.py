@@ -381,8 +381,12 @@ class _Stream:
     """
 
     def __init__(self, chunks: list[bytes], *, gap: float = 0.0, declare: int | None = None):
+        self.hits = 0
+        stream = self
+
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                stream.hits += 1
                 self.send_response(200)
                 self.send_header("Content-Type", "text/csv")
                 if declare is not None:
@@ -726,9 +730,12 @@ async def test_closing_the_daemon_cuts_off_a_download(
     assert (info.value.status, info.value.code) == (503, "shutting_down")
     assert data.read_text() == "name\nold\n"
     assert _staging_files(daemon, ds) == []
-    # and one that starts once the daemon is closing stops at once
+    # and one that starts once the daemon is closing never connects
+    hits = server.hits
+    started = time.monotonic()
     with pytest.raises(FetchError, match="shutting down"):
         await asyncio.wait_for(fetch.fetch_latest(daemon, ds), 10)
+    assert server.hits == hits and time.monotonic() - started < 5
 
 
 def test_stopping_a_running_daemon_does_not_wait_for_a_fetch(

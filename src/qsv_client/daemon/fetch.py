@@ -268,11 +268,11 @@ def _download(
 
 
 def _cut_off(watchdog: _Watchdog, timeout: float) -> FetchError:
-    if watchdog.aborted:
-        return FetchError(
-            503, "shutting_down", "qsv-clientd is shutting down; the download stopped"
-        )
-    return _timed_out(timeout)
+    return _shutting_down() if watchdog.aborted else _timed_out(timeout)
+
+
+def _shutting_down() -> FetchError:
+    return FetchError(503, "shutting_down", "qsv-clientd is shutting down; the download stopped")
 
 
 class Downloads:
@@ -286,10 +286,12 @@ class Downloads:
         self._closed = False
 
     def start(self, watchdog: _Watchdog) -> None:
+        """Register a download about to connect; refused once the daemon is closing."""
         with self._lock:
+            if self._closed:
+                watchdog.cancel()
+                raise _shutting_down()
             self._active.add(watchdog)
-            if self._closed:  # began as the daemon closed
-                watchdog.abort()
 
     def finish(self, watchdog: _Watchdog) -> None:
         with self._lock:
