@@ -139,7 +139,7 @@ def test_no_daemon() -> None:
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix socket / POSIX signals")
 def test_socket_is_owner_only(fake_qsv: Callable[[str], str], start_daemon: StartDaemon) -> None:
     d = start_daemon(_script(fake_qsv, ECHO))
-    sock = Path(d.daemon._socket_path)
+    sock = Path(d.daemon.socket_path)
     assert sock.stat().st_mode & 0o777 == 0o600
     assert sock.parent.stat().st_mode & 0o777 == 0o700
 
@@ -163,7 +163,7 @@ time.sleep(60)
         pytest.skip("Unix socket")
     body = json.dumps({"command": "count", "args": []}).encode()
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(str(d.daemon._socket_path))
+    s.connect(str(d.daemon.socket_path))
     s.sendall(b"POST /v1/run HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
     deadline = time.monotonic() + 20
     while not pidfile.exists() or not pidfile.read_text():
@@ -517,7 +517,7 @@ def test_second_daemon_keeps_the_first_ones_token(
     with pytest.raises(RuntimeError, match="already listening"):
         second.start()
     assert token_file.read_text() == first.daemon.local_token
-    assert first.daemon._socket_path.exists()
+    assert first.daemon.socket_path.exists()
     assert DaemonClient().available()
 
 
@@ -1523,7 +1523,8 @@ def test_expired_tokens_results_are_swept(
     from qsv_client.daemon import server
 
     data = _people(tmp_path / "data" / "people.csv", 300)
-    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000, token_ttl=1.0)
+    # long enough that the token outlives pairing and the query on a slow runner
+    d = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000, token_ttl=3.0)
     ds_id = _register(d, data)
     results = d.daemon.home / "results"
     token = d.pair(_sha(data))
@@ -1532,13 +1533,13 @@ def test_expired_tokens_results_are_swept(
     )
     assert reply.status == 200, reply.body
     # any request sweeps, even one whose token has expired
-    time.sleep(1.2)
+    time.sleep(3.2)
     assert d.http("GET", "/v1/hello").status == 200
     assert list(results.iterdir()) == []
 
     # and so does the daemon when no request comes
     monkeypatch.setattr(server, "_SWEEP_EVERY", 0.2)
-    idle = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000, token_ttl=1.0)
+    idle = start_daemon(_script(fake_qsv, CSV_QSV), browser_max_output=4000, token_ttl=3.0)
     idle_id = _register(idle, data)
     token = idle.pair(_sha(data))
     reply = idle.http(
@@ -1547,7 +1548,7 @@ def test_expired_tokens_results_are_swept(
     assert reply.status == 200, reply.body
     idle_results = idle.daemon.home / "results"
     assert len(list(idle_results.iterdir())) == 1
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 10
     while list(idle_results.iterdir()):
         assert time.monotonic() < deadline, "the idle sweep never ran"
         time.sleep(0.1)

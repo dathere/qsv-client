@@ -1,0 +1,417 @@
+"""The tray's menu, tooltip and icon state, derived from its state alone."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any
+
+import pytest
+
+from qsv_client.daemon.pairing import CODE_ALPHABET
+from qsv_client.tray import model
+from qsv_client.tray.model import SEPARATOR, MenuSpec, Mode, TrayState
+
+
+def _status(**overrides: Any) -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "pid": 4242,
+        "qsv": {"version": "25.1.0"},
+        "jobs": {"running": 1, "max": 4},
+        "datasets": 3,
+        "pending_pairings": 0,
+    }
+    status.update(overrides)
+    return status
+
+
+def _item(code: str = "ABC-123", origin: str = "null", **fields: Any) -> dict[str, Any]:
+    dataset: Any = {"title": "Sales", "path": "/data/sales.csv"}
+    item = {"code": code, "origin": origin, "dataset": dataset, "expires_in": 250}
+    item.update(fields)
+    return item
+
+
+def _requests(n: int) -> tuple[model.Pending, ...]:
+    return model.pending_requests(_item(f"AAA-00{i}") for i in range(n))
+
+
+def _texts(state: TrayState) -> list[str]:
+    return ["—" if s.separator else s.text for s in model.build_menu(state)]
+
+
+def test_stopped() -> None:
+    state = TrayState()
+    assert _texts(state) == [
+        "qsv-clientd: stopped",
+        "—",
+        "Start",
+        "—",
+        "Open config…",
+        "Open log…",
+        "—",
+        "Quit",
+    ]
+    assert model.build_menu(state)[0] == MenuSpec("qsv-clientd: stopped", enabled=False)
+    assert model.build_menu(state)[2].action == model.START
+    assert model.icon_state(state) == "stopped"
+    assert model.title(state) == "qsv-clientd: stopped"
+
+
+def test_hosted() -> None:
+    state = TrayState(Mode.HOSTED, _status())
+    assert _texts(state) == [
+        "qsv-clientd: running",
+        "qsv 25.1.0 · jobs 1/4 · 3 datasets",
+        "—",
+        "Revoke all tokens",
+        "—",
+        "Stop",
+        "Restart (unpairs open schematics)",
+        "—",
+        "Open config…",
+        "Open log…",
+        "—",
+        "Quit",
+    ]
+    assert [s.action for s in model.build_menu(state)] == [
+        None,
+        None,
+        None,
+        None,
+        None,
+        model.STOP,
+        model.RESTART,
+        None,
+        model.OPEN_CONFIG,
+        model.OPEN_LOG,
+        None,
+        model.QUIT,
+    ]
+    assert not model.build_menu(state)[1].enabled
+    assert model.icon_state(state) == "running"
+    assert model.title(state) == "qsv-clientd: running · qsv 25.1.0 · jobs 1/4 · 3 datasets"
+
+
+def test_pending_pairings_need_attention() -> None:
+    one = TrayState(Mode.HOSTED, _status(datasets=1), pairings=_requests(1))
+    assert model.detail_line(one) == "qsv 25.1.0 · jobs 1/4 · 1 dataset · 1 pairing request"
+    assert model.icon_state(one) == "attention"
+    two = TrayState(Mode.ATTACHED, _status(), pairings=_requests(2))
+    assert model.detail_line(two) == "qsv 25.1.0 · jobs 1/4 · 3 datasets · 2 pairing requests"
+    assert model.icon_state(two) == "attention"
+    # the status counts approved requests whose page hasn't collected its token yet: no dot
+    assert model.icon_state(TrayState(Mode.HOSTED, _status(pending_pairings=1))) == "running"
+
+
+def test_odd_status_fields_still_render() -> None:
+    state = TrayState(Mode.HOSTED, {})
+    assert model.detail_line(state) == "qsv ? · jobs 0/? · 0 datasets"
+    assert model.icon_state(state) == "running"
+
+
+def test_attached_to_a_service_offers_the_takeover() -> None:
+    state = TrayState(Mode.ATTACHED, _status(), service="launchd")
+    assert _texts(state)[0] == "qsv-clientd: attached to pid 4242 (launchd service)"
+    assert model.build_menu(state)[5] == MenuSpec("Stop service and run it here", model.TAKEOVER)
+
+
+def test_attached_to_a_foreground_daemon_offers_nothing_to_stop() -> None:
+    state = TrayState(Mode.ATTACHED, {})
+    assert _texts(state) == [
+        "qsv-clientd: attached to pid ?",
+        "qsv ? · jobs 0/? · 0 datasets",
+        "—",
+        "Revoke all tokens",
+        "—",
+        "Open config…",
+        "Log: in the terminal running qsv-clientd serve",
+        "—",
+        "Quit",
+    ]
+
+
+def test_starting_and_busy() -> None:
+    starting = TrayState(Mode.STARTING)
+    assert _texts(starting) == [
+        "qsv-clientd: starting…",
+        "—",
+        "Open config…",
+        "Open log…",
+        "—",
+        "Quit",
+    ]
+    assert model.icon_state(starting) == "busy"
+    stopping = TrayState(Mode.HOSTED, _status(), busy="stopping…", pairings=_requests(1))
+    assert _texts(stopping)[0] == "qsv-clientd: stopping…"
+    assert model.STOP not in [s.action for s in model.build_menu(stopping)]
+    assert model.icon_state(stopping) == "busy"
+
+
+def test_error_offers_retry_and_wins_the_icon() -> None:
+    state = TrayState(Mode.ERROR, _status(), error="no qsv found", pairings=_requests(3))
+    assert _texts(state) == [
+        "qsv-clientd: error: no qsv found",
+        "—",
+        "Retry",
+        "—",
+        "Open config…",
+        "Open log…",
+        "—",
+        "Quit",
+    ]
+    assert model.icon_state(state) == "error"
+
+
+@pytest.mark.parametrize("mode", list(Mode))
+def test_every_menu_ends_with_quit(mode: Mode) -> None:
+    menu = model.build_menu(TrayState(mode, _status()))
+    assert menu[-2:] == [SEPARATOR, MenuSpec("Quit", model.QUIT)]
+
+
+def _tree(spec: MenuSpec) -> Any:
+    """A menu item as text, with its submenu's items nested under it."""
+    if spec.separator:
+        return "—"
+    text = spec.text if spec.enabled else f"({spec.text})"
+    if spec.action:
+        text += f" -> {spec.action} {spec.arg}"
+    return [text, [_tree(s) for s in spec.submenu]] if spec.submenu else text
+
+
+def _codes(code: str) -> list[str]:
+    """The four choices, as _tree() renders them."""
+    return [
+        f"{c} -> {'approve' if c == code else 'wrong-code'} {code}"
+        for c in model.code_choices(code)
+    ]
+
+
+def test_a_request_from_a_local_file() -> None:
+    state = TrayState(Mode.HOSTED, _status(), pairings=model.pending_requests([_item()]))
+    menu = model.build_menu(state)
+    assert _tree(menu[2]) == "—" and _tree(menu[3]) == "(Waiting to pair:)"
+    assert _tree(menu[4]) == [
+        "Pairing 1 · Sales",
+        [
+            "(For 'Sales')",
+            "(/data/sales.csv)",
+            "(Origin: null (a page opened from a file, or a sandboxed frame).)",
+            "(Expires in 4m)",
+            "—",
+            ["Approve…", ["(Which code does the page show?)", *_codes("ABC-123")]],
+            "Deny -> deny ABC-123",
+        ],
+    ]
+
+
+def test_the_tray_never_shows_which_code_is_real() -> None:
+    state = TrayState(Mode.HOSTED, _status(), pairings=model.pending_requests([_item()]))
+    shown = repr([_tree(s) for s in model.build_menu(state)])
+    for code in model.code_choices("ABC-123"):
+        assert shown.count(f"'{code} -> ") == 1  # only as one of the four choices
+    assert "ABC-123" not in model.title(state)
+
+
+def test_the_choices_are_four_distinct_codes_stable_for_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model, "_CHOICE_SALT", "fixed")  # reproducible positions below
+    choices = model.code_choices("ABC-123")
+    assert len(set(choices)) == 4 and "ABC-123" in choices
+    assert all(len(c) == 7 and c[3] == "-" for c in choices)
+    alphabet = set(CODE_ALPHABET)
+    decoys = [c for c in choices if c != "ABC-123"]
+    assert all(set(c.replace("-", "")) <= alphabet for c in decoys)  # they look like codes
+    assert model.code_choices("ABC-123") == choices  # no reshuffle while the menu is open
+    positions = {model.code_choices(f"AB{c}-123").index(f"AB{c}-123") for c in "CDEFGHJKMN"}
+    assert len(positions) > 1  # the real code isn't always in the same place
+
+
+def test_a_request_from_a_website_warns_on_the_way_to_the_codes() -> None:
+    item = _item(origin="https://evil.example", expires_in=30)
+    item["dataset"]["original_path"] = "/data/orig.csv"
+    (request,) = model.pending_requests([item])
+    assert _tree(model.pairing_menu(request, 2)) == [
+        "Pairing 2 · Sales",
+        [
+            "(For 'Sales')",
+            "(/data/sales.csv)",
+            "((the fetched copy of /data/orig.csv, which is not being read))",
+            "(WARNING: the request came from 'https://evil.example', not a local file.)",
+            "(Expires in under a minute)",
+            "—",
+            [
+                "Approve despite the warning…",
+                ["(Which code does the page show?)", *_codes("ABC-123")],
+            ],
+            "Deny -> deny ABC-123",
+        ],
+    ]
+
+
+def test_an_unregistered_schematic_can_only_be_denied() -> None:
+    (request,) = model.pending_requests([_item(dataset=None, expires_in=None)])
+    assert _tree(model.pairing_menu(request, 1)) == [
+        "Pairing 1 · no registered dataset",
+        [
+            "(This schematic matches no registered dataset. Register it first:)",
+            "(qsv-clientd register <data.csv> --schematic <schematic.html>)",
+            "(Origin: null (a page opened from a file, or a sandboxed frame).)",
+            "(Expires in 5 minutes or less)",
+            "—",
+            "Deny -> deny ABC-123",
+        ],
+    ]
+
+
+def test_decided_requests_are_not_waiting() -> None:
+    items = [_item("AAA-001", approved=True), _item("AAA-002", denied=True), _item("AAA-003")]
+    assert [p.text.code for p in model.pending_requests(items)] == ["AAA-003"]
+
+
+def test_requests_show_only_while_the_daemon_runs() -> None:
+    stopped = TrayState(Mode.STOPPED, pairings=_requests(1))
+    assert "(Waiting to pair:)" not in [_tree(s) for s in model.build_menu(stopped)]
+
+
+def test_the_expiry_label_changes_once_a_minute() -> None:
+    assert model.expiry_label(299) == model.expiry_label(240) == "expires in 4m"
+    assert model.expiry_label(59) == "expires in under a minute"
+
+
+def _dataset(**fields: Any) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "id": "ds1",
+        "path": "/data/sales.csv",
+        "title": "Sales",
+        "schematic_path": "/data/sales.html",
+        "viz_args": [],
+        "source_url": None,
+        "pid": None,
+        "original_path": None,
+    }
+    item.update(fields)
+    return item
+
+
+def test_dataset_views() -> None:
+    (plain, fetched, untitled) = model.dataset_views(
+        [
+            _dataset(),
+            _dataset(
+                id="ds2",
+                path="/cache/x.csv",
+                original_path="/data/orig.csv",
+                source_url=None,
+                pid="doi:10.1/x",
+                schematic_path=None,
+                viz_args=["--title", "x"],
+            ),
+            _dataset(id="ds3", title=None, schematic_path=None),
+        ]
+    )
+    assert plain == model.DatasetView(
+        "ds1", "Sales", "/data/sales.csv", False, "/data/sales.html", None, True
+    )
+    assert (fetched.path, fetched.fetched, fetched.source) == ("/data/orig.csv", True, "doi:10.1/x")
+    # viz arguments alone: the daemon would render to a file it then deletes
+    assert not fetched.can_render and fetched.schematic_path is None
+    assert untitled.title == "sales.csv" and not untitled.can_render
+
+
+def test_a_dataset_menu() -> None:
+    (ds,) = model.dataset_views([_dataset(source_url="https://example.com/sales.csv")])
+    state = TrayState(Mode.HOSTED, _status(), datasets=(ds,))
+    assert _tree(model.dataset_menu(ds, state)) == [
+        "Sales",
+        [
+            "(/data/sales.csv)",
+            "(Source: https://example.com/sales.csv)",
+            "—",
+            "Open schematic -> open-schematic ds1",
+            "Re-render schematic -> render ds1",
+            "Fetch latest data -> fetch ds1",
+            "—",
+            ["Forget", ["Yes, forget 'Sales' and unpair its schematics -> forget ds1"]],
+        ],
+    ]
+    menu = model.build_menu(state)
+    assert _tree(menu[3]) == ["Datasets", [_tree(model.dataset_menu(ds, state))]]
+    assert _tree(menu[4]) == [
+        "Revoke all tokens",
+        ["Yes, unpair every open schematic -> revoke-all None"],
+    ]
+
+
+def test_what_a_dataset_cannot_do_is_greyed_out_or_absent() -> None:
+    (ds,) = model.dataset_views([_dataset(schematic_path=None, original_path="/data/o.csv")])
+    tree = _tree(model.dataset_menu(ds, TrayState(Mode.HOSTED)))
+    assert tree[1][:4] == [
+        "(/data/o.csv)",
+        "((reading its fetched copy))",
+        "—",
+        "(Open schematic) -> open-schematic ds1",  # no schematic registered
+    ]
+    assert "(Re-render schematic) -> render ds1" in tree[1]  # no schematic, no viz arguments
+    assert not any("Fetch" in str(t) for t in tree[1])  # no source to fetch from
+
+
+def test_a_refused_fetch_offers_to_accept_missing_columns() -> None:
+    (ds,) = model.dataset_views([_dataset(pid="doi:10.1/x")])
+    state = TrayState(Mode.HOSTED, datasets=(ds,), force_fetch=frozenset({"ds1"}))
+    assert (
+        "Fetch latest data, accepting missing columns -> fetch-force ds1"
+        in (_tree(model.dataset_menu(ds, state))[1])
+    )
+
+
+def test_a_running_job_shows_and_holds_its_dataset() -> None:
+    (ds,) = model.dataset_views([_dataset(source_url="https://x/s.csv")])
+    job = model.Job("ds1", "rendering 'Sales'…")
+    state = TrayState(Mode.HOSTED, _status(), datasets=(ds,), jobs=(job,))
+    assert _texts(state)[2] == "rendering 'Sales'…"
+    actions = _tree(model.dataset_menu(ds, state))[1]
+    assert "(Re-render schematic) -> render ds1" in actions
+    assert "(Fetch latest data) -> fetch ds1" in actions
+    assert "Open schematic -> open-schematic ds1" in actions  # opening never waits
+    assert model.icon_state(state) == "busy"
+    # a pairing waiting on the user outranks a job in the background
+    assert model.icon_state(replace(state, pairings=_requests(1))) == "attention"
+
+
+def test_datasets_and_jobs_show_only_while_the_daemon_runs() -> None:
+    (ds,) = model.dataset_views([_dataset()])
+    job = model.Job("ds1", "rendering 'Sales'…")
+    state = TrayState(Mode.STOPPED, datasets=(ds,), jobs=(job,))
+    assert _texts(state) == [
+        "qsv-clientd: stopped",
+        "—",
+        "Start",
+        "—",
+        "Open config…",
+        "Open log…",
+        "—",
+        "Quit",
+    ]
+    assert model.icon_state(state) == "stopped"
+
+
+def test_open_log_goes_where_the_log_is() -> None:
+    def log(**fields: Any) -> MenuSpec:
+        return model.log_item(TrayState(**fields))
+
+    opens = MenuSpec("Open log…", model.OPEN_LOG)
+    assert log(mode=Mode.HOSTED) == opens  # the tray's log: the hosted daemon logs there too
+    assert log(mode=Mode.ATTACHED, service="launchd") == opens  # the service's log file
+    assert log(mode=Mode.STOPPED) == log(mode=Mode.ERROR) == opens  # why it stopped
+    assert log(mode=Mode.ATTACHED, service="systemd") == MenuSpec(
+        "Log: journalctl --user -u qsv-clientd", enabled=False
+    )
+
+
+def test_start_at_login_is_a_check_box_where_supported() -> None:
+    assert "Start at login" not in _texts(TrayState())  # not known yet, or unsupported
+    for enabled in (True, False):
+        menu = model.build_menu(TrayState(autostart=enabled))
+        (item,) = [s for s in menu if s.text == "Start at login"]
+        assert item == MenuSpec("Start at login", model.AUTOSTART, checked=enabled)

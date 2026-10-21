@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import http.client
 import json
-import threading
 from dataclasses import dataclass
 from typing import Any
 
-from qsv_client.daemon.server import Daemon
+from qsv_client.daemon.host import DaemonHost
 
 
 @dataclass
@@ -22,44 +20,12 @@ class Reply:
         return json.loads(self.body)
 
 
-class DaemonThread:
-    """A :class:`Daemon` serving from its own event loop, so sync clients can call it."""
-
-    def __init__(self, daemon: Daemon) -> None:
-        self.daemon = daemon
-        self.loop = asyncio.new_event_loop()
-        self._ready = threading.Event()
-        self._error: BaseException | None = None
-        self._thread = threading.Thread(target=self._main, daemon=True)
-
-    def _main(self) -> None:
-        asyncio.set_event_loop(self.loop)
-        try:
-            self.loop.run_until_complete(self.daemon.start())
-        except BaseException as exc:
-            self._error = exc
-            self._ready.set()
-            return
-        self._ready.set()
-        self.loop.run_forever()
+class DaemonThread(DaemonHost):
+    """A :class:`DaemonHost` the tests can also talk raw HTTP to."""
 
     def start(self) -> DaemonThread:
-        self._thread.start()
-        assert self._ready.wait(60), "daemon did not start"
-        if self._error is not None:
-            raise self._error
+        super().start()
         return self
-
-    def stop(self) -> None:
-        if self._error is None and self.loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.daemon.close(), self.loop).result(30)
-            self.loop.call_soon_threadsafe(self.loop.stop)
-        self._thread.join(30)
-
-    @property
-    def port(self) -> int:
-        assert self.daemon.port is not None
-        return self.daemon.port
 
     def http(
         self,

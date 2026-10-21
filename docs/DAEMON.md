@@ -23,7 +23,20 @@ qsv-clientd install           # launchd agent (macOS) or systemd --user unit (Li
 qsv-clientd status
 ```
 
-On Windows, `install` prints the `schtasks` command to run.
+On Windows, where `install` can't set up a service, use the tray instead: it runs the daemon
+and can start at login (see Tray). `install` prints a `schtasks` command too, for running
+the daemon at logon without the tray.
+
+`serve` logs to stderr (`-v` adds INFO lines: pairing requests and decisions, datasets
+registered and forgotten, renders, fetches, and revoked tokens; tokens and pairing codes
+are never logged). `--log-file PATH` also writes them to `PATH`, rotated at 5 MB with 3 old files
+kept. The launchd agent already sends stderr to `~/Library/Logs/qsv-clientd.log`, and
+systemd to the journal (`journalctl --user -u qsv-clientd`).
+
+To embed the daemon in another program (a GUI that needs its main thread, say), run it on a
+background thread with `qsv_client.daemon.host.DaemonHost(Daemon(config)).start()`; `stop()`
+closes it, and `client()` returns a `DaemonClient` for it. A host starts once: to restart,
+stop it and build a new `Daemon` and `DaemonHost`.
 
 Services don't read your shell profile, so `install` finds qsv the way the daemon would
 (`binary` in `daemon.json`, then `$QSV_BIN`, then your PATH) and writes that absolute path
@@ -39,10 +52,82 @@ Configuration is optional: `daemon.json` in the config directory
 `%APPDATA%\qsv-client\` on Windows). Keys: `binary`, `port` (default `14470`; `0` turns the
 browser listener off), `socket`, `max_jobs`, `max_timeout`, `inherit_env`, `kill_grace`,
 `browser`, `browser_origins` (default `["null"]`), `browser_timeout`, `browser_max_output`,
-`browser_max_result`, `browser_max_render`, `token_ttl`, `allow_fetch`. Unknown keys are an error.
+`browser_max_result`, `browser_max_render`, `token_ttl`, `allow_fetch`, `fetch_max_bytes`
+(default 10 GiB), `fetch_timeout` (default 1800s). Unknown keys are an error.
 `QSV_CLIENTD_HOME` puts every file under one directory (handy for tests). The socket path
 (`socket`, or `QSV_CLIENTD_SOCKET`) must fit a Unix socket address, about 104 bytes on macOS
 and 108 on Linux; the daemon refuses a longer one with an error naming both settings.
+
+## Tray
+
+```bash
+pipx install 'qsv-client[tray]'    # adds pystray and Pillow
+qsv-clientd-tray
+```
+
+`qsv-clientd-tray` puts the qsv logo in the menu bar (macOS) or notification area (Windows,
+Linux). Its dot shows the daemon's state: grey stopped, green running, amber busy, magenta
+when a schematic is waiting to be paired, red on an error. The menu shows the status, qsv's
+version, running jobs and datasets, and lets you start, stop and restart the daemon.
+
+- **Hosted:** when no daemon is running, the tray runs one itself, on a background thread,
+  with your `daemon.json`. Quitting the tray stops it. Restart reads `daemon.json` again, and
+  unpairs every open schematic, since tokens are kept in memory.
+- **Attached:** when a daemon is already running (the service `install` set up, or
+  `qsv-clientd serve`), the tray only shows it. Quitting leaves it running. If that daemon
+  is the launchd or systemd service, **Stop service and run it here** stops the service
+  until your next login and hosts the daemon in the tray instead. A stopped tray attaches to
+  a daemon that starts later.
+
+**Pairing requests.** When a Data Schematic asks to pair, the dot turns magenta, a
+notification names the dataset, and the request appears in the menu under **Waiting to
+pair** with its dataset, path, origin and expiry. To approve it, open **Approve…** and pick,
+from four codes, the one the page shows; or **Deny** it.
+
+The code is the only proof that a request is the page in front of you (a sandboxed frame on
+any website sends the same `null` origin as a local file), so the tray never shows which code
+is the real one: you recognize it from the page. Picking one of the three decoys denies the
+request; if that was a misclick, pair again from the page. Otherwise the rules are those of
+`qsv-clientd approve`:
+
+- a schematic that matches no registered dataset can only be denied (register it first);
+- a request that didn't come from a local file (any origin but `null`) shows a warning, and
+  its codes sit under **Approve despite the warning…**;
+- notifications only inform: approving always takes the menu, and the page's code.
+
+Notifications use pystray's own where it has them (on macOS through `osascript`, so macOS
+shows them as coming from "Script Editor"; Windows; GTK and AppIndicator on Linux), else
+`notify-send` on Linux, else none, and the dot and tooltip still show waiting requests.
+
+**Datasets.** The **Datasets** submenu lists every registered dataset (an untitled one by
+its file's name), with its path and source. For each: **Open schematic** in your browser,
+**Re-render schematic**, **Fetch latest data** (when it has a source URL or PID), and
+**Forget ▸ Yes**, which unregisters it and unpairs its schematics. A render or fetch runs in
+the background: it shows in the menu, the dot turns amber, and a notification tells you how
+it went. A fetch refused because the new data lacks some of the dataset's columns offers
+**Fetch latest data, accepting missing columns** next. **Revoke all tokens ▸ Yes** unpairs
+every open schematic.
+
+**Files.** **Open config…** opens the default `daemon.json` in the config directory (not a
+`--config` file a foreground `serve` may use), creating it as `{}` if it's missing, and says
+how changes apply: **Restart** when the tray hosts the daemon, otherwise a restart of the
+service or of `serve`. **Open log…** opens the tray's log, which a daemon it hosts writes to
+as well, or the launchd service's `~/Library/Logs/qsv-clientd.log`. For a systemd service the
+menu shows `journalctl --user -u qsv-clientd` instead.
+
+**Start at login.** The **Start at login** check box, or `qsv-clientd-tray --enable-autostart`
+(and `--disable-autostart`), starts the tray when you log in: a LaunchAgent on macOS (not kept
+alive, so Quit stays quit), an XDG autostart entry on Linux, and the `Run` registry key on
+Windows. It is independent of `qsv-clientd install`; pick one. With both, the service runs the
+daemon and the tray attaches to it at login, which works but runs two things.
+
+One tray runs per user. It logs to `~/Library/Logs/qsv-client/qsv-clientd.log` on macOS, and
+`qsv-clientd.log` in the state directory elsewhere (`-v` adds debug lines).
+
+On Linux, pystray needs the AppIndicator or GTK bindings for Python (`python3-gi` and the
+AppIndicator typelib from your distribution); in a pipx or uv environment, create it with
+`--system-site-packages` so they are visible. GNOME also needs the AppIndicator extension.
+Without them the icon falls back to plain X, which has no menus; the log says so.
 
 ## Local clients
 
@@ -135,6 +220,12 @@ On that basis the browser tier:
 Tokens are kept in memory only, so restarting the daemon unpairs every open schematic; the
 page notices (401), forgets its token and offers to connect again.
 
+Known limitation (Windows): a second daemon whose `port` is `0` can start beside a running
+one, since it binds a fresh loopback port and there is no socket to collide on, and then
+overwrites the first one's `local-token` and runtime `daemon.json`, cutting local clients
+off from the first. Run one daemon per user (with the default port, a second one fails to
+bind).
+
 Known limitation: the pairing rate limit is global (origins can't be told apart when every
 `file://` page is `null`), so a page that floods `/v1/pair` can delay real pairing for about
 a minute. It cannot pair without your approval.
@@ -195,7 +286,7 @@ size or modification time, as with an edit or a fetch with `--allow-replace`. A 
 | `GET /v1/status` | → daemon, qsv and job information |
 | `POST /v1/run` | `{"command","args","cwd"?,"env"?,"stdin_b64"?,"stdout_path"?,"timeout"?}` → `{"result":{"args","exit_code","stdout_b64","stderr","duration","stdout_path"}}` or `{"error": <QsvError.to_dict()>}` (timeouts, version errors) or `{"os_error": {"errno","strerror","filename"}}`. The run itself uses `check=False`; the client applies `check` |
 | `GET /v1/datasets`, `POST /v1/datasets`, `DELETE /v1/datasets/<id>` | list / register (`path`, `viz_args`, `schematic_path`, `title`, `pid`, `source_url`, `allow_replace`, `force`, `render`) / forget |
-| `GET /v1/pairings`, `POST /v1/pairings/<code>/approve\|deny` | pending pairings / decide |
+| `GET /v1/pairings`, `POST /v1/pairings/<code>/approve\|deny` | pending pairings (`code`, `origin`, `dataset`, `approved`, `denied`, `expires_in` seconds) / decide |
 | `POST /v1/tokens/revoke` | `{"dataset_id"?}` → `{"revoked": n}` |
 
 ### What a schematic embeds
@@ -229,6 +320,15 @@ re-rendering. Flags whose value is a file keep only its basename and are listed 
 - **DOIs.** A DOI is resolved through DataCite content negotiation, looking for a
   `contentUrl`. Most DOIs resolve to a landing page instead, so register `--source-url` for
   those.
+
+A download is limited to `fetch_max_bytes` (10 GiB by default) and `fetch_timeout` (30
+minutes, for the whole download, headers included; looking up the host's address is bounded
+by the operating system's resolver instead). Over either, the fetch is refused (413
+`too_large` or 504 `download_timeout`) and your data is left as it was. The urllib fallback
+stops as soon as a download passes a limit and deletes what it got. qsv's `get` downloads
+into qsv's own cache first, so there the size is checked once the download is done: the
+daemon's copy is deleted, but the one in qsv's cache stays until qsv evicts or replaces it.
+The time limit applies to each `get` run.
 
 The download is used only if it has every column the current data has; new columns are fine.
 That keeps an error page served as plain text from replacing your data. If columns were

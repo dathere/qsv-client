@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "qsv-client"
 version = "0.5.0"
-description = "Run the qsv CSV toolkit (25.0.0+) from Python: timeouts that kill the whole process tree, typed errors, capability detection, and a local daemon for live Data Schematics."
+description = "Run the qsv CSV toolkit (25.0.0+) from Python: timeouts that kill the whole process tree, typed errors, capability detection, and a local daemon (with an optional system tray) for live Data Schematics."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
@@ -25,8 +25,15 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+# the system tray for qsv-clientd: `pip install 'qsv-client[tray]'`
+tray = ["pystray>=0.19.5,<0.20", "Pillow>=10"]
+
 [project.scripts]
 qsv-clientd = "qsv_client.daemon.__main__:main"
+
+[project.gui-scripts]
+qsv-clientd-tray = "qsv_client.tray.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/dathere/qsv-client"
@@ -34,7 +41,13 @@ Issues = "https://github.com/dathere/qsv-client/issues"
 qsv = "https://github.com/dathere/qsv"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "mypy>=1.11", "ruff>=0.6"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.11",
+    "ruff>=0.6",
+    "pytest-cov>=5",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/qsv_client"]
@@ -47,9 +60,30 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
+[tool.coverage.run]
+source = ["qsv_client"]
+branch = true
+# some tests run qsv_client.daemon in a child Python process
+patch = ["subprocess"]
+# CI merges reports from Linux, macOS and Windows runners
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "^\\s*\\.\\.\\.$",
+]
+
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
+
+# pystray has no type information; both may be absent when the tray extra isn't installed
+[[tool.mypy.overrides]]
+module = ["pystray", "pystray.*", "PIL", "PIL.*", "AppKit", "PyObjCTools", "PyObjCTools.*", "gi", "gi.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100

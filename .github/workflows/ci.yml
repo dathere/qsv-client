@@ -14,11 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync
+      # with the tray extra, so mypy checks the tray against pystray and Pillow
+      - run: uv sync --extra tray
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run mypy --platform win32
+      - run: uv run mypy --platform darwin
 
   test:
     strategy:
@@ -27,6 +29,9 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -44,12 +49,21 @@ jobs:
           chmod +x "$RUNNER_TEMP"/qsv/qsv*
           ls "$RUNNER_TEMP/qsv"
       - name: Unit tests and integration tests (qsv)
-        run: QSV_BIN="$RUNNER_TEMP/qsv/qsv" uv run pytest -v
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsv" uv run pytest -v --cov
       - name: Integration tests (qsvlite)
-        run: QSV_BIN="$RUNNER_TEMP/qsv/qsvlite" uv run pytest -q tests/test_integration.py
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsvlite" uv run pytest -q --cov --cov-append tests/test_integration.py
       - name: Integration tests (qsvdp)
         if: runner.os == 'Linux'
-        run: QSV_BIN="$RUNNER_TEMP/qsv/qsvdp" uv run pytest -q tests/test_integration.py
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsvdp" uv run pytest -q --cov --cov-append tests/test_integration.py
+      - run: uv run coverage xml
+      - uses: codecov/codecov-action@v5
+        # an upload or OIDC-token hiccup must not fail the tests; fail_ci_if_error misses the latter
+        continue-on-error: true
+        with:
+          files: coverage.xml
+          # fork PRs get no OIDC token; Codecov takes their uploads tokenless
+          use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
+          fail_ci_if_error: false
 
   # Separate from `test` because Windows steps run in PowerShell and use the MSVC build.
   test-windows:
@@ -58,6 +72,9 @@ jobs:
       matrix:
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
     defaults:
       run:
         shell: pwsh
@@ -79,8 +96,50 @@ jobs:
       - name: Unit tests and integration tests (qsv)
         run: |
           $env:QSV_BIN = Join-Path $env:RUNNER_TEMP "qsv\qsv.exe"
-          uv run pytest -v
+          uv run pytest -v --cov
       - name: Integration tests (qsvlite)
         run: |
           $env:QSV_BIN = Join-Path $env:RUNNER_TEMP "qsv\qsvlite.exe"
-          uv run pytest -q tests/test_integration.py
+          uv run pytest -q --cov --cov-append tests/test_integration.py
+      - run: uv run coverage xml
+      - uses: codecov/codecov-action@v5
+        # an upload or OIDC-token hiccup must not fail the tests; fail_ci_if_error misses the latter
+        continue-on-error: true
+        with:
+          files: coverage.xml
+          # fork PRs get no OIDC token; Codecov takes their uploads tokenless
+          use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
+          fail_ci_if_error: false
+
+  # The tray's tests with its extra (pystray, Pillow) installed. They use a fake pystray, so
+  # they need no desktop; the jobs above run them without the extra (app and icon tests skip).
+  test-tray:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.14"]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --extra tray
+      # the paths before --cov, which would otherwise take the first as its source
+      - run: uv run pytest -v tests/test_tray_*.py --cov
+      - run: uv run coverage xml
+      - uses: codecov/codecov-action@v5
+        # an upload or OIDC-token hiccup must not fail the tests; fail_ci_if_error misses the latter
+        continue-on-error: true
+        with:
+          files: coverage.xml
+          # fork PRs get no OIDC token; Codecov takes their uploads tokenless
+          use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
+          fail_ci_if_error: false

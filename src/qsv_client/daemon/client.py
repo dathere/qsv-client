@@ -181,8 +181,13 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
         if sys.platform == "win32":
             raise FileNotFoundError("Unix sockets are not used on Windows")
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(self.timeout)
-        sock.connect(self._path)
+        try:
+            sock.settimeout(self.timeout)
+            sock.connect(self._path)
+        except BaseException:
+            # not yet self.sock, so close() would not reach it
+            sock.close()
+            raise
         self.sock = sock
 
 
@@ -224,6 +229,8 @@ class DaemonClient:
             raise QsvDaemonUnavailable(f"qsv-clientd is not running at {t.describe()}") from exc
         except OSError as exc:
             raise QsvDaemonError(_os_error_message(t, exc)) from exc
+        except http.client.HTTPException as exc:
+            raise QsvDaemonError(f"talking to qsv-clientd failed: {exc}") from exc
         finally:
             conn.close()
         return _decode(status, data)

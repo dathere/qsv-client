@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import QsvDaemonError, QsvError, QsvNotFound
-from . import service
+from . import logs, service
+from ._text import NO_DATASET, describe_pairing
 from .client import DaemonClient
 from .config import DaemonConfig
 from .registry import SchematicSource
@@ -28,6 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--config", type=Path, help="config file (default: daemon.json)")
     s.add_argument("--port", type=int, help="loopback port for browsers (0 disables)")
     s.add_argument("--binary", help="qsv binary to use (overrides daemon.json)")
+    s.add_argument("--log-file", type=Path, help="also log to this file (rotated at 5 MB, 3 kept)")
     s.add_argument("-v", "--verbose", action="store_true")
 
     sub.add_parser("status", help="show what the running daemon is doing")
@@ -40,8 +42,9 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="send this process's stdin to the command (implied when an argument is '-')",
     )
-    r.add_argument("command")
-    r.add_argument("args", nargs=argparse.REMAINDER)
+    # one REMAINDER for the command and its args: argparse drops a `--` that starts a REMAINDER,
+    # and `run search -- -x` must reach qsv with its `--`
+    r.add_argument("argv", nargs=argparse.REMAINDER, metavar="command [args ...]")
 
     reg = sub.add_parser("register", help="let a Data Schematic for this file use the daemon")
     reg.add_argument("data", type=Path)
@@ -102,10 +105,7 @@ def _confirm(prompt: str) -> bool:
 def _serve(ns: argparse.Namespace) -> int:
     from .server import Daemon
 
-    logging.basicConfig(
-        level=logging.INFO if ns.verbose else logging.WARNING,
-        format="%(asctime)s qsv-clientd %(levelname)s %(message)s",
-    )
+    logs.configure_logging(logging.INFO if ns.verbose else logging.WARNING, ns.log_file)
     config = DaemonConfig.load(ns.config)
     if ns.port is not None:
         config.port = ns.port
@@ -153,29 +153,21 @@ def _approve(client: DaemonClient, ns: argparse.Namespace) -> int:
             f"no pending pairing with code {wanted} (codes expire after 5 minutes)", file=sys.stderr
         )
         return 1
-    p = pending[0]
-    ds = p["dataset"]
-    if ds is None:
-        print(
-            "This schematic matches no registered dataset. Register it first:\n"
-            "  qsv-clientd register <data.csv> --schematic <schematic.html>",
-            file=sys.stderr,
-        )
+    text = describe_pairing(pending[0])
+    if not text.can_approve:
+        print(NO_DATASET, file=sys.stderr)
         return 1
-    print(f"Pair code {p['code']} for {ds['title']!r} ({ds['path']})")
-    if ds.get("original_path"):
-        print(f"  (the fetched copy of {ds['original_path']}, which is not being read)")
-    if p["origin"] == "null":
-        print("Origin: null (a page opened from a file, or a sandboxed frame).")
-    else:
-        print(f"WARNING: the request came from {p['origin']!r}, not a local file.")
+    print(text.headline)
+    if text.fetched_note:
+        print(f"  {text.fetched_note}")
+    print(text.origin_line)
     if not ns.yes and not sys.stdin.isatty():
         print("no terminal to confirm on; re-run with --yes to approve", file=sys.stderr)
         return 1
     if not (ns.yes or _confirm("Approve?")):
         print("not approved", file=sys.stderr)
         return 1
-    _print(client.request("POST", f"/v1/pairings/{p['code']}/approve"))
+    _print(client.request("POST", f"/v1/pairings/{text.code}/approve"))
     return 0
 
 
@@ -186,8 +178,15 @@ def main(argv: list[str] | None = None) -> int:
     if argv[:1] in (["register"], ["viz"]) and "--" in argv:
         i = argv.index("--")
         argv, viz_args = argv[:i], argv[i + 1 :]
-    ns = _parser().parse_args(argv)
+    parser = _parser()
+    ns = parser.parse_args(argv)
     ns.viz_args = viz_args
+    if ns.cmd == "run":
+        if ns.argv[:1] == ["--"]:  # `run -- search ...`: ends qsv-clientd's own options
+            del ns.argv[0]
+        if not ns.argv:
+            parser.error("run: the following arguments are required: command")
+        ns.command, ns.args = ns.argv[0], ns.argv[1:]
     try:
         if ns.cmd == "serve":
             return _serve(ns)

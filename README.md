@@ -1,6 +1,7 @@
 # qsv-client
 
 [![PyPI](https://img.shields.io/pypi/v/qsv-client)](https://pypi.org/project/qsv-client/)
+[![codecov](https://codecov.io/gh/dathere/qsv-client/graph/badge.svg)](https://codecov.io/gh/dathere/qsv-client)
 
 Run the [qsv](https://github.com/dathere/qsv) CSV toolkit from Python, without the usual
 subprocess pitfalls:
@@ -21,8 +22,8 @@ subprocess pitfalls:
 - **Sync and asyncio** clients with the same API. No runtime dependencies. Python 3.10+ on
   Linux, macOS and Windows.
 - **A local daemon, `qsv-clientd`,** that runs qsv for your own processes and lets a Data
-  Schematic from `qsv viz smart` work with its live data. See
-  [The qsv-clientd daemon](#the-qsv-clientd-daemon).
+  Schematic from `qsv viz smart` work with its live data, with an optional system tray to
+  run and control it. See [The qsv-clientd daemon](#the-qsv-clientd-daemon).
 
 qsv itself is not bundled, and **qsv 25.0.0 or later** is required. Install it from the
 [qsv releases](https://github.com/dathere/qsv/releases) or a
@@ -144,6 +145,16 @@ from qsv_client.daemon import DaemonClient
 print(DaemonClient().run("count", "data.csv").stdout)
 ```
 
+For a system tray icon that runs and controls the daemon, install the `tray` extra:
+
+```bash
+pipx install 'qsv-client[tray]'
+qsv-clientd-tray
+qsv-clientd-tray --enable-autostart       # start it at login (or tick Start at login)
+```
+
+On Linux the tray needs a desktop with AppIndicator or GTK tray support (see the doc).
+
 See [docs/DAEMON.md](docs/DAEMON.md) for the security model and protocol.
 
 ## Errors
@@ -175,7 +186,8 @@ failures are `QsvError` with kind `unknown`, and the message is taken from stder
 `QsvVersionError` is raised before the command runs; its `exit_code`, `args_run` and
 `stderr` describe the `--capabilities` check. If `--capabilities` succeeds but its output
 isn't recognized, `capabilities` (and the first `run`) raise a plain `QsvError`.
-`QsvNotFound` (no binary) is not a `QsvError`: it is raised when the client is created.
+`QsvNotFound` (no binary) is not a `QsvError` but a `FileNotFoundError`: it is raised when
+the client is created, or by a run if the binary has been removed since.
 
 ## Platform notes
 
@@ -291,11 +303,16 @@ For any wrapper:
 ## Development
 
 ```bash
-uv sync
+uv sync --extra tray                 # the tray extra (pystray, Pillow) for its tests and mypy
 uv run pytest                        # integration tests need qsv: QSV_BIN=/path/to/qsv
 uv run ruff format . && uv run ruff check .
 uv run mypy && uv run mypy --platform win32   # also type-checks the Windows-only code
+uv run pytest --cov                  # branch coverage report
 ```
+
+CI merges coverage from its Linux, macOS and Windows jobs on
+[Codecov](https://codecov.io/gh/dathere/qsv-client). A local run can't reach the merged figure,
+since each OS only runs its own platform-specific code.
 
 ## License
 

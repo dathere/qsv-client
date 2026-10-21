@@ -72,6 +72,14 @@ def local_token_path() -> Path:
     return runtime_dir() / "local-token"
 
 
+def log_path() -> Path:
+    """Where a hosted daemon (the tray) logs. On macOS a subdirectory of ~/Library/Logs, so
+    it doesn't clash with the launchd service's ~/Library/Logs/qsv-clientd.log."""
+    if _home_override() is None and sys.platform == "darwin":
+        return Path.home() / "Library" / "Logs" / "qsv-client" / "qsv-clientd.log"
+    return state_dir() / "qsv-clientd.log"
+
+
 def ensure_private_dir(path: Path) -> Path:
     """Create ``path`` (and parents) and make it readable by the current user only."""
     path.mkdir(parents=True, exist_ok=True)
@@ -135,6 +143,10 @@ class DaemonConfig:
     token_ttl: float = 8 * 3600.0
     allow_fetch: bool = True
     """Let paired schematics ask the daemon to download the latest data (Phase D)."""
+    fetch_max_bytes: int = 10 << 30
+    """Largest download a fetch accepts; a bigger one is refused and deleted."""
+    fetch_timeout: float = 1800.0
+    """Upper bound, in seconds, on downloading one fetch."""
 
     @classmethod
     def load(cls, path: Path | None = None) -> DaemonConfig:

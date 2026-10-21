@@ -19,11 +19,11 @@ CODE_TTL = 300.0
 MAX_PENDING = 10
 MAX_REQUESTS_PER_MINUTE = 5
 # no 0/O, 1/I/L, so a code survives being read aloud or retyped
-_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 
 def _code() -> str:
-    raw = "".join(secrets.choice(_ALPHABET) for _ in range(6))
+    raw = "".join(secrets.choice(CODE_ALPHABET) for _ in range(6))
     return f"{raw[:3]}-{raw[3:]}"
 
 
@@ -93,6 +93,10 @@ class Pairing:
         if len(wanted) == 6:
             wanted = f"{wanted[:3]}-{wanted[3:]}"
         return next((p for p in self.pending.values() if p.code == wanted), None)
+
+    def expires_in(self, pending: PendingPair) -> int:
+        """Whole seconds until ``pending``'s code expires (0 once it has)."""
+        return max(0, int(CODE_TTL - (self._now() - pending.created)))
 
     def approve(self, code: str) -> PendingPair | None:
         pending = self.find_code(code)

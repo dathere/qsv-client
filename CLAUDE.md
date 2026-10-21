@@ -7,10 +7,11 @@ No runtime dependencies. Python 3.10+.
 ## Commands
 
 ```bash
-uv sync                                  # setup
+uv sync --extra tray                     # setup (the tray extra: for its tests and mypy)
 uv run pytest                            # all tests; integration tests need $QSV_BIN or qsv on PATH
 QSV_BIN=/path/to/qsvlite uv run pytest -q tests/test_integration.py   # other binary variants
 uv run ruff format . && uv run ruff check . && uv run mypy            # must be clean before done
+uv run pytest --cov                      # with branch coverage (config in pyproject.toml)
 ```
 
 CI runs lint, format check, and mypy, plus tests on ubuntu/macos x Python 3.10–3.14 against
@@ -18,6 +19,8 @@ qsv, qsvlite, and qsvdp (Linux only).
 On Windows (Python 3.10–3.14) it runs the full suite against qsv, plus the integration tests
 against qsvlite. Windows teardown uses Job Objects via ctypes (`_ProcessTree` in `_process.py`);
 type-check it with `uv run mypy --platform win32` (the lint job runs both).
+Coverage from every test job is merged on Codecov (`codecov.yml`): the total may not drop
+below the base commit's, and new or changed lines need 100% coverage.
 
 ## Layout (`src/qsv_client/`)
 
@@ -30,9 +33,16 @@ type-check it with `uv run mypy --platform win32` (the lint job runs both).
 - `capabilities.py`: parses `qsv --capabilities`.
 - `daemon/`: `qsv-clientd`. `server.py` (routes, local vs browser tier), `_http.py` (minimal
   HTTP/1.1), `allowlist.py` (what paired schematics may run), `pairing.py`, `registry.py`,
-  `fetch.py`, `client.py` (`DaemonClient`/`AsyncDaemonClient`, mirrored by hand), `__main__.py`
-  (CLI). Protocol and security model: `docs/DAEMON.md`. Browsers never supply paths or viz
-  args; anything a browser receives must not contain local paths.
+  `fetch.py`, `client.py` (`DaemonClient`/`AsyncDaemonClient`, mirrored by hand), `host.py`
+  (`DaemonHost`: the daemon on a background thread), `logs.py`, `__main__.py` (CLI).
+  Protocol and security model: `docs/DAEMON.md`. Browsers never supply paths or viz args;
+  anything a browser receives must not contain local paths.
+- `tray/`: `qsv-clientd-tray`, the optional `[tray]` extra (pystray, Pillow). `model.py`
+  (state to menu and icon state, pure), `controller.py` (hosts or attaches to the daemon; all
+  actions on one worker thread; renders and fetches on their own daemon threads), `app.py`
+  (pystray), `icons.py` (Pillow), `notify.py` (notification backends), `_open.py` (open a
+  file in its app), `autostart.py` (start at login per OS), `_lock.py`, `__main__.py`. pystray is imported only in `app.py`, inside functions, and Pillow only in
+  `icons.py`; `tests/test_tray_isolation.py` enforces that the rest imports without them.
 
 ## Invariants
 

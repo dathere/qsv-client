@@ -151,8 +151,12 @@ class QsvTimeout(QsvError):
     kind = "timeout"
 
 
-class QsvNotFound(Exception):
-    """No qsv binary could be found."""
+class QsvNotFound(FileNotFoundError):
+    """No qsv binary could be found.
+
+    A ``FileNotFoundError``, so a handler for that (or ``OSError``) also catches a run whose
+    binary was removed after the client was created.
+    """
 
 
 class QsvVersionError(QsvError):
