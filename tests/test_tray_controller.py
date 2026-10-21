@@ -504,3 +504,14 @@ def test_picking_a_decoy_denies_the_request(
     assert outside.http("GET", f"/v1/pair/{page['request_id']}").json()["status"] == "denied"
     title, message = notes[-1]
     assert title == "Pairing denied" and message.startswith("The code you picked isn't")
+
+
+def test_a_decoy_picked_for_an_expired_request_says_only_that(
+    make_controller: MakeController, outside: DaemonThread
+) -> None:
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    c.submit(model.WRONG_CODE, "ZZZ-999").result(60)
+    assert [title for title, _ in notes] == ["Couldn't deny ZZZ-999"]

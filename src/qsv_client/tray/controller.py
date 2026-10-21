@@ -284,18 +284,19 @@ class Controller:
     def _wrong_code(self, code: str) -> None:
         # the picked code isn't this request's: the page the user is looking at didn't make it
         log.warning("a decoy code was picked for pairing %s; denying it", code)
-        self._decide(code, "deny")
-        self.notify(
-            "Pairing denied",
-            "The code you picked isn't that request's, so it was denied. If the page shows "
-            "that code, its request is another one in the menu; if you misclicked, pair again "
-            "from the page.",
-        )
+        if self._decide(code, "deny"):
+            self.notify(
+                "Pairing denied",
+                "The code you picked isn't that request's, so it was denied. If the page shows "
+                "that code, its request is another one in the menu; if you misclicked, pair "
+                "again from the page.",
+            )
 
-    def _decide(self, code: str, verb: str) -> None:
+    def _decide(self, code: str, verb: str) -> bool:
+        """Approve or deny ``code``; False when it no longer could be (already reported)."""
         client = self._client
         if client is None:  # the daemon went away since the menu was drawn
-            return
+            return False
         path = f"/v1/pairings/{urllib.parse.quote(code, safe='')}/{verb}"
         try:
             client.request("POST", path, wait=_STATUS_WAIT)
@@ -304,6 +305,8 @@ class Controller:
             if exc.status not in (404, 409):
                 raise
             self.notify(f"Couldn't {verb} {code}", str(exc))
-        else:
-            log.info("pairing %s: %s", "approved" if verb == "approve" else "denied", code)
+            self._refresh()
+            return False
+        log.info("pairing %s: %s", "approved" if verb == "approve" else "denied", code)
         self._refresh()
+        return True

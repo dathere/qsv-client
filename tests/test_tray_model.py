@@ -171,7 +171,10 @@ def test_the_tray_never_shows_which_code_is_real() -> None:
     assert "ABC-123" not in model.title(state)
 
 
-def test_the_choices_are_four_distinct_codes_stable_for_a_request() -> None:
+def test_the_choices_are_four_distinct_codes_stable_for_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model, "_CHOICE_SALT", "fixed")  # reproducible positions below
     choices = model.code_choices("ABC-123")
     assert len(set(choices)) == 4 and "ABC-123" in choices
     assert all(len(c) == 7 and c[3] == "-" for c in choices)
