@@ -105,6 +105,7 @@ class Daemon:
         self._writers: set[asyncio.StreamWriter] = set()
         self._tcp_open = 0
         self._fetch_locks: dict[str, asyncio.Lock] = {}
+        self.downloads = fetch.Downloads()
         self.results = ResultStore(self)
         self._started = False
         self._sweeper: asyncio.Task[None] | None = None
@@ -199,6 +200,8 @@ class Daemon:
         raise RuntimeError(f"another qsv-clientd is already listening on {self._socket_path}")
 
     async def close(self) -> None:
+        # first: a fetch's download thread would otherwise hold up its request's cancellation
+        self.downloads.abort_all()
         if self._sweeper is not None:
             self._sweeper.cancel()
         await self._close_servers()

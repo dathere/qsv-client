@@ -6,6 +6,7 @@ are redirected to it by a patched ``urllib.request.urlopen``.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import http.client
 import http.server
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from daemon_helpers import DaemonThread
 
 from qsv_client.daemon import fetch
 from qsv_client.daemon._http import HttpError
@@ -703,3 +705,55 @@ def test_https_connections_go_through_the_watchdog(monkeypatch: pytest.MonkeyPat
     assert isinstance(seen["conn"], http.client.HTTPSConnection)
     assert "context" in seen["kwargs"]
     assert "connect" in vars(seen["conn"])
+
+
+async def test_closing_the_daemon_cuts_off_a_download(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, stream: Callable[..., _Stream]
+) -> None:
+    # a byte every 0.1s for 30s, with all the time in the world: only close() can stop it
+    server = stream([b"name\n"] + [b"x"] * 300, gap=0.1)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _limited(fake_qsv(PLAIN_QSV), home, fetch_timeout=600)
+    ds = _dataset(daemon, data, source_url=server.url, allow_replace=True)
+    task = asyncio.create_task(fetch.fetch_latest(daemon, ds))
+    await asyncio.sleep(0.5)
+    started = time.monotonic()
+    await daemon.close()
+    with pytest.raises(FetchError) as info:
+        await asyncio.wait_for(task, 10)
+    assert time.monotonic() - started < 5
+    assert (info.value.status, info.value.code) == (503, "shutting_down")
+    assert data.read_text() == "name\nold\n"
+    assert _staging_files(daemon, ds) == []
+    # and one that starts once the daemon is closing stops at once
+    with pytest.raises(FetchError, match="shutting down"):
+        await asyncio.wait_for(fetch.fetch_latest(daemon, ds), 10)
+
+
+def test_stopping_a_running_daemon_does_not_wait_for_a_fetch(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, stream: Callable[..., _Stream]
+) -> None:
+    server = stream([b"name\n"] + [b"x"] * 300, gap=0.1)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    d = DaemonThread(_limited(fake_qsv(PLAIN_QSV), home, fetch_timeout=600)).start()
+    try:
+        token = d.daemon.local_token
+        body = {"path": str(data), "source_url": server.url, "allow_replace": True}
+        ds = d.http("POST", "/v1/datasets", body, origin=None, token=token).json()
+        replies: list[int] = []
+
+        def fetch_it() -> None:
+            with contextlib.suppress(OSError, http.client.HTTPException):
+                path = f"/v1/datasets/{ds['id']}/fetch"
+                replies.append(d.http("POST", path, {}, origin=None, token=token).status)
+
+        thread = threading.Thread(target=fetch_it, daemon=True)
+        thread.start()
+        time.sleep(0.5)
+    finally:
+        started = time.monotonic()
+        d.stop()
+    assert time.monotonic() - started < 10  # not the 30s the download would take
+    assert data.read_text() == "name\nold\n"

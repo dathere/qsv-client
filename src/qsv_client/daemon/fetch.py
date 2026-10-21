@@ -90,7 +90,14 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -
             raise FetchError(501, "needs_qsv_get", f"{scheme}:// sources need qsv's `get` command")
         elif scheme in ("http", "https"):
             await _finish_despite_cancel(
-                asyncio.to_thread(_download, url, incoming, max_bytes=max_bytes, timeout=timeout)
+                asyncio.to_thread(
+                    _download,
+                    url,
+                    incoming,
+                    max_bytes=max_bytes,
+                    timeout=timeout,
+                    downloads=daemon.downloads,
+                )
             )
         else:
             raise FetchError(422, "bad_source", f"unsupported source scheme {scheme!r}")
@@ -221,9 +228,12 @@ def _datacite_content_url(doi: str) -> str | None:
     )
 
 
-def _download(url: str, dest: Path, *, max_bytes: int, timeout: float) -> None:
+def _download(
+    url: str, dest: Path, *, max_bytes: int, timeout: float, downloads: Downloads
+) -> None:
     deadline = time.monotonic() + timeout
     watchdog = _Watchdog(timeout)
+    downloads.start(watchdog)
     opener = urllib.request.build_opener(_WatchedHTTP(watchdog), _WatchedHTTPS(watchdog))
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     try:
@@ -243,17 +253,53 @@ def _download(url: str, dest: Path, *, max_bytes: int, timeout: float) -> None:
                         raise _too_large(max_bytes)
                     fh.write(chunk)
         if watchdog.fired:  # the shut socket can read as a clean end of the data
-            raise _timed_out(timeout)
+            raise _cut_off(watchdog, timeout)
     except FetchError:
         dest.unlink(missing_ok=True)
         raise
     except (OSError, http.client.HTTPException) as exc:
         dest.unlink(missing_ok=True)
         if watchdog.fired or time.monotonic() > deadline:
-            raise _timed_out(timeout) from None
+            raise _cut_off(watchdog, timeout) from None
         raise FetchError(502, "download_failed", f"download failed: {exc}") from None
     finally:
         watchdog.cancel()
+        downloads.finish(watchdog)
+
+
+def _cut_off(watchdog: _Watchdog, timeout: float) -> FetchError:
+    if watchdog.aborted:
+        return FetchError(
+            503, "shutting_down", "qsv-clientd is shutting down; the download stopped"
+        )
+    return _timed_out(timeout)
+
+
+class Downloads:
+    """The downloads in progress, so a closing daemon can cut them off. A download runs on a
+    thread its request must wait for (threads can't be cancelled), so without this, closing
+    the daemon (the tray's Quit, or SIGTERM) would wait for it, up to fetch_timeout."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active: set[_Watchdog] = set()
+        self._closed = False
+
+    def start(self, watchdog: _Watchdog) -> None:
+        with self._lock:
+            self._active.add(watchdog)
+            if self._closed:  # began as the daemon closed
+                watchdog.abort()
+
+    def finish(self, watchdog: _Watchdog) -> None:
+        with self._lock:
+            self._active.discard(watchdog)
+
+    def abort_all(self) -> None:
+        with self._lock:
+            self._closed = True
+            for watchdog in self._active:
+                watchdog.abort()
 
 
 class _Watchdog:
@@ -265,6 +311,8 @@ class _Watchdog:
 
     def __init__(self, seconds: float) -> None:
         self.fired = False
+        self.aborted = False
+        """Fired because the daemon is closing, not at the deadline."""
         # the sockets themselves: urllib drops conn.sock once the headers are in, while the
         # response goes on reading the body from the same socket
         self._socks: list[socket.socket] = []
@@ -300,6 +348,10 @@ class _Watchdog:
             self.fired = True
             for sock in self._socks:
                 self._shut(sock)
+
+    def abort(self) -> None:
+        self.aborted = True
+        self._fire()
 
     def cancel(self) -> None:
         self._timer.cancel()
