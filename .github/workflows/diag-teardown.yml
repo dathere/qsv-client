@@ -1,0 +1,44 @@
+# TEMPORARY (diag branch only, never merged): repeat the asyncio.run() teardown tests on the
+# macOS runners with tracing, to see why a killed leader "survives" on Python 3.14.
+name: diag-teardown
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repeat:
+    if: github.head_ref == 'diag/macos-314-teardown'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+        python: ["3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync
+      - name: Repeat the teardown tests 40 times with tracing
+        env:
+          PYTHONPATH: tests
+        run: |
+          failures=0
+          for i in $(seq 1 40); do
+            if ! uv run pytest -q -p no:cacheprovider -p _teardown_diag \
+                tests/test_core_edges.py::test_asyncio_run_cancelling_reap_of_cancelled_run_still_kills \
+                tests/test_process.py::test_asyncio_run_returning_mid_cleanup_still_kills \
+                tests/test_process.py::test_async_cancel_during_timeout_cleanup_still_kills \
+                > "run-$i.log" 2>&1; then
+              failures=$((failures + 1))
+              echo "::group::iteration $i FAILED"
+              cat "run-$i.log"
+              echo "::endgroup::"
+            fi
+          done
+          echo "failures: $failures / 40"
+          sysctl -n hw.ncpu machdep.cpu.brand_string || true
