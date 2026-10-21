@@ -143,6 +143,8 @@ from qsv_client.tray import _console
 fake, marker = sys.argv[1], pathlib.Path(sys.argv[2])
 kernel32 = ctypes.WinDLL("kernel32")
 kernel32.GetConsoleWindow.restype = ctypes.c_void_p
+# a venv's python.exe is a launcher, and the interpreter it starts gets a console of its own
+kernel32.FreeConsole()
 
 def stopped_politely():
     marker.unlink(missing_ok=True)
