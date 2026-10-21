@@ -69,8 +69,8 @@ class FakeController(Controller):
         self.submitted: list[str] = []
         self.polling = False
 
-    def submit(self, action: str) -> Future[None]:
-        self.submitted.append(action)
+    def submit(self, action: str, arg: str | None = None) -> Future[None]:
+        self.submitted.append(action if arg is None else f"{action} {arg}")
         done: Future[None] = Future()
         done.set_result(None)
         return done

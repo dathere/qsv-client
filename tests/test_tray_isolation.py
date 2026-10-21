@@ -28,6 +28,8 @@ SCRIPT = textwrap.dedent(
         "qsv_client.tray",
         "qsv_client.tray.model",
         "qsv_client.tray.controller",
+        "qsv_client.tray.notify",
+        "qsv_client.daemon._text",
         "qsv_client.tray.app",
         "qsv_client.tray._lock",
         "qsv_client.tray.__main__",

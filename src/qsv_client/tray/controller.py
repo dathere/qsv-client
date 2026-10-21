@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import urllib.parse
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
@@ -22,7 +23,8 @@ from ..daemon.host import DaemonHost
 from ..daemon.server import Daemon
 from ..errors import QsvDaemonError
 from . import model
-from .model import Mode, ServiceKind, TrayState
+from .model import Mode, Pending, ServiceKind, TrayState
+from .notify import Notifier, nothing
 
 log = logging.getLogger("qsv_client.tray")
 
@@ -54,6 +56,9 @@ class Controller:
         self._takeover_timeout = takeover_timeout
         self.on_change: Callable[[TrayState], None] = lambda state: None
         """Called with each new state, on the worker thread."""
+        self.notify: Notifier = nothing
+        """Shows a desktop notification, on the worker thread."""
+        self._announced: set[str] = set()
         self._state = TrayState()
         self._lock = threading.Lock()
         # touched only on the worker thread
@@ -62,13 +67,15 @@ class Controller:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="qsv-tray")
         self._stopping = threading.Event()
         self._poller = threading.Thread(target=self._poll, name="qsv-tray-poll", daemon=True)
-        self._actions: Mapping[str, Callable[[], None]] = {
+        self._actions: Mapping[str, Callable[..., None]] = {
             REFRESH: self._refresh,
             model.START: self._start,
             model.RETRY: self._start,
             model.STOP: self._stop,
             model.RESTART: self._restart,
             model.TAKEOVER: self._takeover,
+            model.APPROVE: self._approve,
+            model.DENY: self._deny,
         }
 
     @property
@@ -86,16 +93,19 @@ class Controller:
 
     # -- running actions ---------------------------------------------------------------------
 
-    def submit(self, action: str) -> Future[None]:
-        """Queue an action (a ``model`` action id, or REFRESH) for the worker.
+    def submit(self, action: str, arg: str | None = None) -> Future[None]:
+        """Queue an action (a ``model`` action id, or REFRESH) for the worker; APPROVE and
+        DENY take the pairing code as ``arg``.
 
         START at launch attaches to a daemon that is already running, else hosts one.
         """
-        return self._executor.submit(self._run, action, self._actions[action])
+        handler = self._actions[action]
+        args = () if arg is None else (arg,)
+        return self._executor.submit(self._run, action, lambda: handler(*args), arg)
 
-    def _run(self, action: str, handler: Callable[[], None]) -> None:
+    def _run(self, action: str, handler: Callable[[], None], arg: str | None = None) -> None:
         if action != REFRESH:
-            log.info("tray action: %s", action)
+            log.info("tray action: %s%s", action, f" {arg}" if arg else "")
         try:
             handler()
         except Exception as exc:
@@ -139,16 +149,46 @@ class Controller:
         status: dict[str, Any] = client.request("GET", "/v1/status", wait=_STATUS_WAIT)
         return status
 
+    def _pairings(self, client: DaemonClient, status: Mapping[str, Any]) -> tuple[Pending, ...]:
+        """Requests waiting for a decision, fetched only when the status says there are any."""
+        count = status.get("pending_pairings")
+        if not isinstance(count, int) or count <= 0:
+            return ()
+        items = client.request("GET", "/v1/pairings", wait=_STATUS_WAIT)
+        return model.pending_requests(items)
+
+    def _announce(self, pairings: tuple[Pending, ...]) -> None:
+        """Notify once per new request. A code that left the list (decided, or expired) is
+        forgotten; it can't come back."""
+        codes = {p.text.code for p in pairings}
+        for request in pairings:
+            t = request.text
+            if t.code in self._announced:
+                continue
+            if not t.can_approve:
+                message = f"{t.code}: a schematic that matches no registered dataset"
+            elif t.warning:
+                message = f"{t.code}: {t.title!r}, from {t.origin} (not a local file)"
+            else:
+                message = f"{t.code}: {t.title!r}"
+            self.notify(
+                "Pairing request", message + ". Approve or deny it from the qsv-clientd menu."
+            )
+        self._announced = codes
+
     def _attached(self, client: DaemonClient) -> None:
         status = self._status(client)
+        pairings = self._pairings(client, status)
         self._client = client
         self._set(
             mode=Mode.ATTACHED,
             status=status,
+            pairings=pairings,
             service=self._service_installed(),
             busy=None,
             error=None,
         )
+        self._announce(pairings)
         log.info("attached to qsv-clientd (pid %s)", status.get("pid"))
 
     def _start(self) -> None:
@@ -158,12 +198,15 @@ class Controller:
         if client is not None:
             self._attached(client)
             return
-        self._set(mode=Mode.STARTING, status=None, busy=None, error=None)
+        self._set(mode=Mode.STARTING, status=None, pairings=(), busy=None, error=None)
         # kept before start(): a start that times out may still finish, and must be stopped
         self._host = host = DaemonHost(self._make_daemon())
         host.start()
-        self._client = host.client()
-        self._set(mode=Mode.HOSTED, status=self._status(self._client), service=None)
+        self._client = client = host.client()
+        status = self._status(client)
+        pairings = self._pairings(client, status)
+        self._set(mode=Mode.HOSTED, status=status, pairings=pairings, service=None)
+        self._announce(pairings)
         log.info("hosting qsv-clientd")
 
     def _stop_host(self) -> None:
@@ -178,7 +221,7 @@ class Controller:
     def _stop(self) -> None:
         self._set(busy="stopping…")
         self._stop_host()
-        self._set(mode=Mode.STOPPED, status=None, busy=None)
+        self._set(mode=Mode.STOPPED, status=None, pairings=(), busy=None)
 
     def _restart(self) -> None:
         self._set(busy="restarting…")
@@ -212,13 +255,38 @@ class Controller:
             return
         try:
             status = self._status(client)
+            pairings = self._pairings(client, status)
         except QsvDaemonError as exc:
             if state.mode is Mode.HOSTED:
                 self._set(mode=Mode.ERROR, error=f"qsv-clientd stopped answering: {exc}")
             else:
                 self._client = None
-                self._set(mode=Mode.STOPPED, status=None, service=None)
+                self._set(mode=Mode.STOPPED, status=None, pairings=(), service=None)
                 log.info("the attached qsv-clientd went away")
             return
-        if status != state.status:
-            self._set(status=status)
+        # one update for both, so the dot and the menu change together
+        if status != state.status or pairings != state.pairings:
+            self._set(status=status, pairings=pairings)
+        self._announce(pairings)
+
+    def _approve(self, code: str) -> None:
+        self._decide(code, "approve")
+
+    def _deny(self, code: str) -> None:
+        self._decide(code, "deny")
+
+    def _decide(self, code: str, verb: str) -> None:
+        client = self._client
+        if client is None:  # the daemon went away since the menu was drawn
+            return
+        path = f"/v1/pairings/{urllib.parse.quote(code, safe='')}/{verb}"
+        try:
+            client.request("POST", path, wait=_STATUS_WAIT)
+        except QsvDaemonError as exc:
+            # the code expired, or its dataset was unregistered: say so, it's no tray error
+            if exc.status not in (404, 409):
+                raise
+            self.notify(f"Couldn't {verb} {code}", str(exc))
+        else:
+            log.info("pairing %s: %s", "approved" if verb == "approve" else "denied", code)
+        self._refresh()
