@@ -85,11 +85,7 @@ _WINDOWS_TOOLTIP = 127
 
 
 def _tooltip(text: str) -> str:
-    if sys.platform != "win32" or len(text.encode("utf-16-le")) // 2 <= _WINDOWS_TOOLTIP:
-        return text
-    while len((text + "…").encode("utf-16-le")) // 2 > _WINDOWS_TOOLTIP:
-        text = text[:-1]
-    return text + "…"
+    return notify.fit_windows(text, _WINDOWS_TOOLTIP)
 
 
 def _rebuild_windows_menu_before_it_opens(icon: Any, stale: threading.Event) -> None:

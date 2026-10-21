@@ -75,3 +75,19 @@ def test_no_backend_means_no_notifications(
     assert send is notify.nothing
     send("t", "m")
     assert "no desktop notifications here" in caplog.text
+
+
+def test_windows_balloons_fit_their_buffers(monkeypatch: pytest.MonkeyPatch) -> None:
+    shown: list[tuple[str, str]] = []
+    icon = types.SimpleNamespace(
+        HAS_NOTIFICATION=True, notify=lambda message, title: shown.append((title, message))
+    )
+    monkeypatch.setattr(sys, "platform", "win32")
+    message = "ABC-123: '" + "😀" * 200 + "'. Approve or deny it from the qsv-clientd menu."
+    notify.choose(icon)("T" * 100, message)
+    ((title, sent),) = shown
+    assert title == "T" * 62 + "…"
+    assert sent.startswith("ABC-123: '") and sent.endswith("…")  # the code survives
+    assert len(sent.encode("utf-16-le")) // 2 <= 255
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert notify.fit_windows("x" * 300, 255) == "x" * 300

@@ -23,6 +23,21 @@ Notifier = Callable[[str, str], None]
 """Show (title, message). Never raises: a failed notification is only logged."""
 
 
+_WINDOWS_TITLE = 63
+_WINDOWS_MESSAGE = 255
+"""UTF-16 code units in a Windows balloon (NOTIFYICONDATAW.szInfoTitle and szInfo hold 64
+and 256 WCHARs; pystray raises on longer text)."""
+
+
+def fit_windows(text: str, units: int) -> str:
+    """On Windows, cut ``text`` to ``units`` UTF-16 code units, ending in "…"; elsewhere, as is."""
+    if sys.platform != "win32" or len(text.encode("utf-16-le")) // 2 <= units:
+        return text
+    while len((text + "…").encode("utf-16-le")) // 2 > units:
+        text = text[:-1]
+    return text + "…"
+
+
 def _guarded(backend: str, send: Notifier) -> Notifier:
     def notify(title: str, message: str) -> None:
         try:
@@ -39,7 +54,12 @@ def nothing(title: str, message: str) -> None:
 
 def choose(icon: Any) -> Notifier:
     if getattr(icon, "HAS_NOTIFICATION", False):
-        return _guarded("pystray", lambda title, message: icon.notify(message, title))
+        return _guarded(
+            "pystray",
+            lambda title, message: icon.notify(
+                fit_windows(message, _WINDOWS_MESSAGE), fit_windows(title, _WINDOWS_TITLE)
+            ),
+        )
     if sys.platform.startswith("linux") and (exe := shutil.which("notify-send")):
 
         def notify_send(title: str, message: str) -> None:
