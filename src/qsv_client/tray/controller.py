@@ -32,6 +32,7 @@ from .notify import Notifier, nothing
 log = logging.getLogger("qsv_client.tray")
 
 REFRESH = "refresh"
+_PAIRING_ACTIONS = frozenset({model.APPROVE, model.DENY, model.WRONG_CODE})
 _STATUS_WAIT = 5.0
 
 
@@ -120,7 +121,9 @@ class Controller:
 
     def _run(self, action: str, handler: Callable[[], None], arg: str | None = None) -> None:
         if action != REFRESH:
-            log.info("tray action: %s%s", action, f" {arg}" if arg else "")
+            # a pairing action's argument is the code, which no log may hold (see _announce)
+            shown = arg if arg and action not in _PAIRING_ACTIONS else None
+            log.info("tray action: %s%s", action, f" {shown}" if shown else "")
         try:
             handler()
         except Exception as exc:
@@ -312,7 +315,7 @@ class Controller:
 
     def _wrong_code(self, code: str) -> None:
         # the picked code isn't this request's: the page the user is looking at didn't make it
-        log.warning("a decoy code was picked for pairing %s; denying it", code)
+        log.warning("a decoy code was picked for a pairing request; denying it")
         if self._decide(code, "deny"):
             self.notify(
                 "Pairing denied",
@@ -336,7 +339,7 @@ class Controller:
             self.notify(f"Couldn't {verb} {code}", str(exc))
             self._refresh()
             return False
-        log.info("pairing %s: %s", "approved" if verb == "approve" else "denied", code)
+        log.info("pairing request %s", "approved" if verb == "approve" else "denied")
         self._refresh()
         return True
 

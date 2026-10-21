@@ -26,8 +26,8 @@ qsv-clientd status
 On Windows, `install` prints the `schtasks` command to run.
 
 `serve` logs to stderr (`-v` adds INFO lines: pairing requests and decisions, datasets
-registered and forgotten, renders, fetches, and revoked tokens; tokens themselves are never
-logged). `--log-file PATH` also writes them to `PATH`, rotated at 5 MB with 3 old files
+registered and forgotten, renders, fetches, and revoked tokens; tokens and pairing codes
+are never logged). `--log-file PATH` also writes them to `PATH`, rotated at 5 MB with 3 old files
 kept. The launchd agent already sends stderr to `~/Library/Logs/qsv-clientd.log`, and
 systemd to the journal (`journalctl --user -u qsv-clientd`).
 

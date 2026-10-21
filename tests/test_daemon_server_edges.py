@@ -84,7 +84,7 @@ def _code(reply: Reply) -> str:
     return code
 
 
-def test_info_log_lines_never_hold_tokens(
+def test_info_log_lines_never_hold_tokens_or_codes(
     start_daemon: StartDaemon,
     fake_qsv: Callable[[str], str],
     data: Path,
@@ -93,23 +93,28 @@ def test_info_log_lines_never_hold_tokens(
     caplog.set_level(logging.INFO, logger="qsv_client.daemon")
     d = start_daemon(fake_qsv(""))
     dataset_id = _register(d, data)
-    token = d.pair(_sha(data))
-    denied = d.http("POST", "/v1/pair", {"digest": "0" * 64}).json()["code"]
-    assert _local(d, "POST", f"/v1/pairings/{denied}/deny").status == 200
+    page = d.http("POST", "/v1/pair", {"digest": _sha(data)}).json()
+    assert _local(d, "POST", f"/v1/pairings/{page['code']}/approve").status == 200
+    token = d.http("GET", f"/v1/pair/{page['request_id']}").json()["token"]
+    denied = d.http("POST", "/v1/pair", {"digest": "0" * 64}).json()
+    assert _local(d, "POST", f"/v1/pairings/{denied['code']}/deny").status == 200
     assert _local(d, "POST", "/v1/tokens/revoke", {}).json() == {"revoked": 1}
     assert _local(d, "DELETE", f"/v1/datasets/{dataset_id}").status == 200
     text = caplog.text
     for line in (
         f"dataset registered: {dataset_id} ({data})",
-        f"origin null, dataset {dataset_id}",
-        "pairing approved: code ",
-        f"pairing requested: code {denied}, origin null, dataset None",
-        f"pairing denied: code {denied}, origin null",
+        f"pairing requested: origin null, dataset {dataset_id}",
+        f"pairing approved: origin null, dataset {dataset_id}",
+        "pairing requested: origin null, dataset None",
+        "pairing denied: origin null, dataset None",
         "tokens revoked: 1 (dataset all)",
         f"dataset forgotten: {dataset_id} (0 tokens revoked)",
     ):
         assert line in text
     assert token not in text and d.daemon.local_token not in text
+    # approving means reading the code off the page; a log mustn't make that a lookup
+    for secret in (page["code"], denied["code"], page["request_id"], denied["request_id"]):
+        assert secret not in text
 
 
 def _assert_refused(reply: Reply, status: int, code: str, *private: Path) -> None:

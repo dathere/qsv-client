@@ -568,7 +568,9 @@ class Daemon:
             raise HttpError(404, "not_found", "no pending pairing with that code (expired?)")
         if verb == "deny":
             self.pairing.deny(code)
-            log.info("pairing denied: code %s, origin %s", pending.code, pending.origin)
+            log.info(
+                "pairing denied: origin %s, dataset %s", pending.origin, pending.dataset_id or None
+            )
             return Response.json({"denied": pending.code})
         if not pending.dataset_id or pending.dataset_id not in self.registry.datasets:
             raise HttpError(
@@ -578,12 +580,7 @@ class Daemon:
                 "(qsv-clientd register <data> --schematic <html>) and pair again",
             )
         self.pairing.approve(code)
-        log.info(
-            "pairing approved: code %s, origin %s, dataset %s",
-            pending.code,
-            pending.origin,
-            pending.dataset_id,
-        )
+        log.info("pairing approved: origin %s, dataset %s", pending.origin, pending.dataset_id)
         return Response.json({"approved": pending.code, "dataset_id": pending.dataset_id})
 
     # -- pairing (any tier) ----------------------------------------------------------------
@@ -604,12 +601,9 @@ class Daemon:
         pending = self.pairing.request(ds.id if ds else "", origin)
         if pending is None:
             raise HttpError(429, "rate_limited", "too many pairing requests; try again shortly")
-        log.info(
-            "pairing requested: code %s, origin %s, dataset %s",
-            pending.code,
-            origin,
-            pending.dataset_id or None,
-        )
+        # never the code: approving means reading it off the page (the tray hides which of
+        # four is real), and a log the user can open would make that a lookup
+        log.info("pairing requested: origin %s, dataset %s", origin, pending.dataset_id or None)
         return Response.json(
             {
                 "request_id": pending.request_id,

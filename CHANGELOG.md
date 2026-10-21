@@ -25,7 +25,7 @@ All notable changes to this project are documented here. The format follows
   the code the page shows from four; a wrong pick denies the request.
 - `qsv-clientd serve --log-file PATH` writes the log to a file too (rotated at 5 MB, 3 kept),
   and `-v` logs pairing requests and decisions, datasets registered and forgotten, renders,
-  fetches and revoked tokens. Tokens are never logged.
+  fetches and revoked tokens. Tokens and pairing codes are never logged.
 - `qsv_client.daemon.host.DaemonHost` runs the daemon on a background thread, for programs
   that need the main thread themselves.
 - `GET /v1/pairings` items include `expires_in`, the seconds left before the code expires.

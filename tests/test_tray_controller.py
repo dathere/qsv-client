@@ -744,3 +744,23 @@ def test_one_job_per_dataset_and_forgotten_datasets_lose_force(
     assert c.state.jobs == (job,)  # the running one holds it
     c._set(datasets=())  # forces a refresh to publish the list again
     assert _do(c, REFRESH).force_fetch == {dataset_id}
+
+
+def test_the_tray_logs_no_pairing_codes(
+    make_controller: MakeController,
+    outside: DaemonThread,
+    data: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    _local(outside, "POST", "/v1/datasets", {"path": str(data), "title": "Sales"})
+    c = make_controller()
+    _do(c, model.START)
+    pages = [_ask_to_pair(outside, _sha(data)) for _ in range(3)]
+    _do(c, REFRESH)
+    c.submit(model.APPROVE, pages[0]["code"]).result(60)
+    c.submit(model.DENY, pages[1]["code"]).result(60)
+    c.submit(model.WRONG_CODE, pages[2]["code"]).result(60)
+    assert "tray action: approve\n" in caplog.text + "\n"
+    for page in pages:
+        assert page["code"] not in caplog.text
