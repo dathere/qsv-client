@@ -20,6 +20,8 @@ All notable changes to this project are documented here. The format follows
 - `qsv-clientd-tray`, a system tray icon that runs and controls qsv-clientd, in the optional
   `tray` extra (`pip install 'qsv-client[tray]'`, which adds pystray and Pillow). It hosts the
   daemon itself, or attaches to one already running, and starts, stops and restarts it.
+  It announces pairing requests with a desktop notification and lets you approve or deny
+  them from its menu, with the same checks as `qsv-clientd approve`.
 - `qsv-clientd serve --log-file PATH` writes the log to a file too (rotated at 5 MB, 3 kept),
   and `-v` logs pairing requests and decisions, datasets registered and forgotten, renders,
   fetches and revoked tokens. Tokens are never logged.

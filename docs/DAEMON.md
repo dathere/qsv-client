@@ -77,6 +77,20 @@ version, running jobs and datasets, and lets you start, stop and restart the dae
   until your next login and hosts the daemon in the tray instead. A stopped tray attaches to
   a daemon that starts later.
 
+**Pairing requests.** When a Data Schematic asks to pair, the dot turns magenta, a
+notification names the code and the dataset, and the request appears in the menu under
+**Waiting to pair** with its dataset, path, origin and expiry. Check that the page shows the
+same code, then **Approve** or **Deny**. The rules are those of `qsv-clientd approve`:
+
+- a schematic that matches no registered dataset can only be denied (register it first);
+- a request that didn't come from a local file (any origin but `null`) carries a warning and
+  takes a second confirmation, **Approve despite the warning ▸ Yes**;
+- notifications only inform: approving always takes the menu, with the code in view.
+
+Notifications use pystray's own where it has them (on macOS through `osascript`, so macOS
+shows them as coming from "Script Editor"; Windows; GTK and AppIndicator on Linux), else
+`notify-send` on Linux, else none, and the dot and tooltip still show waiting requests.
+
 One tray runs per user. It logs to `~/Library/Logs/qsv-client/qsv-clientd.log` on macOS, and
 `qsv-clientd.log` in the state directory elsewhere (`-v` adds debug lines).
 
