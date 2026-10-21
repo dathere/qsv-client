@@ -24,8 +24,12 @@ from qsv_client.tray.model import Mode, TrayState
 class FakeMenu:
     SEPARATOR = object()
 
-    def __init__(self, items: Callable[[], tuple[Any, ...]]) -> None:
-        self.items = items
+    def __init__(self, *items: Any) -> None:
+        # pystray takes one callable (a dynamic menu) or the items themselves (a submenu)
+        if len(items) == 1 and callable(items[0]):
+            self.items: Callable[[], tuple[Any, ...]] = items[0]
+        else:
+            self.items = lambda: items
 
 
 class FakeMenuItem:
@@ -35,6 +39,7 @@ class FakeMenuItem:
 
 class FakeIcon:
     HAS_MENU = True
+    HAS_NOTIFICATION = True
     last: FakeIcon | None = None
 
     def __init__(self, name: str, icon: Any, title: str, menu: FakeMenu) -> None:
@@ -42,7 +47,11 @@ class FakeIcon:
         self.visible = False
         self.stopped = False
         self.menu_updates = 0
+        self.notifications: list[tuple[str, str]] = []
         FakeIcon.last = self
+
+    def notify(self, message: str, title: str) -> None:
+        self.notifications.append((title, message))
 
     def run(self, setup: Callable[[FakeIcon], None]) -> None:
         setup(self)  # the real one then loops until stop()
@@ -56,9 +65,16 @@ class FakeIcon:
     def entries(self) -> list[Any]:
         return list(self.menu.items())
 
-    def click(self, text: str) -> Any:
-        (item,) = [i for i in self.entries() if getattr(i, "text", None) == text]
-        return item.action(self, item)
+    def click(self, *path: str) -> Any:
+        """Click through submenus by their texts, then the last item."""
+        entries = self.entries()
+        for text in path:
+            (item,) = [i for i in entries if getattr(i, "text", None) == text]
+            if isinstance(item.action, FakeMenu):
+                entries = list(item.action.items())
+                continue
+            return item.action(self, item)
+        return entries
 
 
 class FakeController(Controller):
@@ -306,3 +322,40 @@ def test_a_long_error_fits_the_windows_tooltip(
 
 def test_check_passes_with_the_extra(fake_pystray: types.ModuleType) -> None:
     app.check()
+
+
+def _request(code: str, origin: str = "null") -> dict[str, Any]:
+    dataset = {"title": "Sales", "path": "/data/sales.csv"}
+    return {"code": code, "origin": origin, "dataset": dataset, "expires_in": 200}
+
+
+def test_deciding_a_request_from_its_submenu(
+    fake_pystray: types.ModuleType, controller: FakeController, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    icon = _run(controller, "linux", monkeypatch)
+    requests = model.pending_requests(
+        [_request("ABC-123"), _request("XYZ-789", origin="https://evil.example")]
+    )
+    controller._set(mode=Mode.HOSTED, status={}, pairings=requests)
+    assert icon.icon is icons.image("attention")
+    texts = [getattr(e, "text", "—") for e in icon.entries()]
+    assert texts[3:6] == ["Waiting to pair:", "ABC-123 · Sales", "XYZ-789 · Sales"]
+    submenu = icon.click("ABC-123 · Sales")
+    assert [getattr(e, "text", "—") for e in submenu][-3:] == [
+        "Check that the page shows ABC-123",
+        "Approve",
+        "Deny",
+    ]
+    icon.click("ABC-123 · Sales", "Approve")
+    icon.click("XYZ-789 · Sales", "Deny")
+    # a page that isn't a local file takes a second confirmation
+    icon.click("XYZ-789 · Sales", "Approve despite the warning", "Yes, approve XYZ-789")
+    assert controller.submitted[-3:] == ["approve ABC-123", "deny XYZ-789", "approve XYZ-789"]
+
+
+def test_notifications_go_through_the_icon(
+    fake_pystray: types.ModuleType, controller: FakeController, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    icon = _run(controller, "linux", monkeypatch)
+    controller.notify("Pairing request", "ABC-123: 'Sales'")
+    assert icon.notifications == [("Pairing request", "ABC-123: 'Sales'")]
