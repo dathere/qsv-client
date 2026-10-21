@@ -259,7 +259,10 @@ def _download(
         raise
     except (OSError, http.client.HTTPException) as exc:
         dest.unlink(missing_ok=True)
-        if watchdog.fired or time.monotonic() > deadline:
+        # a socket timeout of the whole fetch_timeout ends at the deadline too: the clock may
+        # not show it yet (Windows ticks every 15.6ms), and the watchdog may not have fired
+        idle_to_deadline = isinstance(exc, TimeoutError) and timeout <= _HTTP_TIMEOUT
+        if watchdog.fired or idle_to_deadline or time.monotonic() > deadline:
             raise _cut_off(watchdog, timeout) from None
         raise FetchError(502, "download_failed", f"download failed: {exc}") from None
     finally:
