@@ -602,6 +602,29 @@ async def test_any_slow_download_is_a_download_timeout(
     assert _staging_files(daemon, ds) == []
 
 
+@pytest.mark.parametrize(("timeout", "code"), [(0.5, "download_timeout"), (120, "download_failed")])
+def test_a_socket_timeout_before_the_clock_shows_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, timeout: float, code: str
+) -> None:
+    """A socket timeout of the whole fetch_timeout is the deadline, even when the clock and
+    the watchdog lag (Windows); a shorter idle timeout (the 60s socket cap) is a failure."""
+
+    class Opener:
+        def open(self, req: urllib.request.Request, timeout: float) -> Any:
+            raise TimeoutError("timed out")  # at once: before the deadline and the watchdog
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: Opener())
+    with pytest.raises(FetchError) as info:
+        fetch._download(
+            "http://127.0.0.1:9/d.csv",
+            tmp_path / "d.csv",
+            max_bytes=100,
+            timeout=timeout,
+            downloads=fetch.Downloads(),
+        )
+    assert info.value.code == code
+
+
 async def test_a_malformed_response_is_a_download_failure(
     fake_qsv: Callable[[str], str],
     home: Path,
