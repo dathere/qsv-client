@@ -22,7 +22,8 @@ All notable changes to this project are documented here. The format follows
   daemon itself, or attaches to one already running, and starts, stops and restarts it.
   It announces pairing requests with a desktop notification and lets you approve or deny
   them from its menu, with the same checks as `qsv-clientd approve`. Approving means picking
-  the code the page shows from four; a wrong pick denies the request.
+  the code the page shows from four; a wrong pick denies the request. Its Datasets menu
+  opens, re-renders, fetches and forgets registered datasets, and it can revoke all tokens.
 - `qsv-clientd serve --log-file PATH` writes the log to a file too (rotated at 5 MB, 3 kept),
   and `-v` logs pairing requests and decisions, datasets registered and forgotten, renders,
   fetches and revoked tokens. Tokens and pairing codes are never logged.
