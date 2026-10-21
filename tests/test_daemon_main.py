@@ -636,6 +636,19 @@ def test_approve_with_yes(
     assert json.loads(out.split("frame).\n", 1)[1]) == {"approved": True}
 
 
+def test_approve_names_an_untitled_dataset_by_its_file(
+    fake_client: Callable[..., FakeClient], capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_client(
+        {
+            ("GET", "/v1/pairings"): [_pairing(title=None)],
+            ("POST", "/v1/pairings/ABC123/approve"): {},
+        }
+    )
+    assert cli.main(["approve", "ABC123", "-y"]) == 0
+    assert capsys.readouterr().out.startswith("Pair code ABC123 for 'sales.csv' (/data/sales.csv)")
+
+
 def test_approve_warns_about_fetched_copy_and_foreign_origin(
     fake_client: Callable[..., FakeClient], capsys: pytest.CaptureFixture[str]
 ) -> None:

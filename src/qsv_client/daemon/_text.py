@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import PurePath
 from typing import Any
 
 NO_DATASET = (
@@ -45,13 +46,18 @@ class PairingText:
         return self.warning or FILE_ORIGIN
 
 
+def dataset_title(dataset: Mapping[str, Any]) -> str:
+    """A dataset's title, else its file's name (a title is optional when registering)."""
+    return str(dataset.get("title") or PurePath(str(dataset["path"])).name)
+
+
 def describe_pairing(item: Mapping[str, Any]) -> PairingText:
     """Describe one ``GET /v1/pairings`` item."""
     ds = item.get("dataset")
     origin = str(item.get("origin"))
     return PairingText(
         code=str(item["code"]),
-        title=str(ds["title"]) if ds else None,
+        title=dataset_title(ds) if ds else None,
         path=str(ds["path"]) if ds else None,
         fetched_copy_of=(ds.get("original_path") or None) if ds else None,
         origin=origin,
