@@ -124,14 +124,14 @@ def test_the_menu_follows_the_state(
 ) -> None:
     icon = _run(controller, "linux", monkeypatch)
     status = {"pid": 7, "qsv": {"version": "25.1.0"}, "jobs": {"running": 0, "max": 4}}
-    controller._set(mode=Mode.HOSTED, status={**status, "pending_pairings": 1})
-    assert icon.icon is icons.image("attention")
+    controller._set(mode=Mode.HOSTED, status=status)
+    assert icon.icon is icons.image("running")
     assert icon.title.startswith("qsv-clientd: running · qsv 25.1.0")
     assert icon.menu_updates == 1
     entries = icon.entries()
     assert [getattr(e, "text", "—") for e in entries] == [
         "qsv-clientd: running",
-        "qsv 25.1.0 · jobs 0/4 · 0 datasets · 1 pairing request",
+        "qsv 25.1.0 · jobs 0/4 · 0 datasets",
         "—",
         "Stop",
         "Restart (unpairs open schematics)",
