@@ -15,8 +15,9 @@ from typing import Any
 import pytest
 
 from qsv_client.daemon import logs
+from qsv_client.errors import QsvNotFound
 from qsv_client.tray import __main__ as cli
-from qsv_client.tray import _lock, app
+from qsv_client.tray import _lock, app, autostart
 from qsv_client.tray.controller import Controller
 
 
@@ -136,3 +137,38 @@ def test_lock_is_exclusive_until_closed(home: Path) -> None:
         _lock.acquire(path)
     first.close()
     _lock.acquire(path).close()
+
+
+@pytest.mark.parametrize(
+    ("flag", "result"),
+    [("--enable-autostart", "enabled it"), ("--disable-autostart", "disabled it")],
+)
+def test_autostart_flags_work_without_the_extra_or_the_lock(
+    home: Path, monkeypatch: pytest.MonkeyPatch, shown: list[str], flag: str, result: str
+) -> None:
+    monkeypatch.setattr(autostart, "enable", lambda: "enabled it")
+    monkeypatch.setattr(autostart, "disable", lambda: "disabled it")
+    monkeypatch.setitem(sys.modules, "pystray", None)  # no extra
+    held = _lock.acquire(home / "run" / "tray.lock")  # a tray is running
+    try:
+        assert cli.main([flag]) == 0
+    finally:
+        held.close()
+    assert shown == [result]
+
+
+def test_an_autostart_flag_that_fails(
+    home: Path, monkeypatch: pytest.MonkeyPatch, shown: list[str]
+) -> None:
+    def no_qsv() -> str:
+        raise QsvNotFound("qsv not found on PATH")
+
+    monkeypatch.setattr(autostart, "enable", no_qsv)
+    assert cli.main(["--enable-autostart"]) == 1
+    assert shown == ["couldn't change starting at login: qsv not found on PATH"]
+
+
+def test_the_autostart_flags_are_exclusive(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["--enable-autostart", "--disable-autostart"])
+    assert "not allowed with argument" in capsys.readouterr().err
