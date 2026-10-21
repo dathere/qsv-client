@@ -42,3 +42,41 @@ jobs:
           done
           echo "failures: $failures / 40"
           sysctl -n hw.ncpu machdep.cpu.brand_string || true
+
+  full-suite:
+    if: github.head_ref == 'diag/macos-314-teardown'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+      - run: uv sync
+      - name: Download the latest qsv release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/qsv"
+          gh release download --repo dathere/qsv --pattern "qsv-*-aarch64-apple-darwin.zip" --dir "$RUNNER_TEMP/qsv"
+          unzip -o -q "$RUNNER_TEMP"/qsv/*.zip -d "$RUNNER_TEMP/qsv"
+          chmod +x "$RUNNER_TEMP"/qsv/qsv*
+      - name: The full suite, 3 times, with tracing
+        env:
+          PYTHONPATH: tests
+        run: |
+          failures=0
+          for i in 1 2 3; do
+            if ! QSV_BIN="$RUNNER_TEMP/qsv/qsv" uv run pytest -q -p no:cacheprovider -p _teardown_diag \
+                > "suite-$i.log" 2>&1; then
+              failures=$((failures + 1))
+              echo "::group::suite run $i FAILED"
+              grep -E "FAILED|DIAG|load average|killpg|_kill_now|_reap_async|_timeout_cleanup|_wait_dead|test start|^ *PID|^ *[0-9]+ +[0-9]+ +[0-9]+ " "suite-$i.log" || true
+              tail -5 "suite-$i.log"
+              echo "::endgroup::"
+            fi
+          done
+          echo "failures: $failures / 3"

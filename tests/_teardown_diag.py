@@ -110,6 +110,7 @@ def _trace(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             _log(f"_wait_dead({pid}) -> {dead}")
             if not dead:
                 print("\n===== DIAG: leader not dead =====", file=sys.stderr)
+                print(f"load average: {os.getloadavg()}", file=sys.stderr)
                 print("\n".join(EVENTS), file=sys.stderr)
                 print(_ps(pid), file=sys.stderr)
                 time.sleep(5)
