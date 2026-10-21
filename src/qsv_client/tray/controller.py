@@ -7,13 +7,16 @@ only through :class:`DaemonClient`, whether it hosts the daemon or not.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
 import urllib.parse
+import webbrowser
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from ..daemon import service
@@ -23,12 +26,13 @@ from ..daemon.host import DaemonHost
 from ..daemon.server import Daemon
 from ..errors import QsvDaemonError
 from . import model
-from .model import Mode, Pending, ServiceKind, TrayState
+from .model import DatasetView, Job, Mode, Pending, ServiceKind, TrayState
 from .notify import Notifier, nothing
 
 log = logging.getLogger("qsv_client.tray")
 
 REFRESH = "refresh"
+_PAIRING_ACTIONS = frozenset({model.APPROVE, model.DENY, model.WRONG_CODE})
 _STATUS_WAIT = 5.0
 
 
@@ -61,6 +65,7 @@ class Controller:
         self._announced: set[str] = set()
         self._state = TrayState()
         self._lock = threading.Lock()
+        self._emit_lock = threading.Lock()
         # touched only on the worker thread
         self._host: DaemonHost | None = None
         self._client: DaemonClient | None = None
@@ -77,6 +82,12 @@ class Controller:
             model.APPROVE: self._approve,
             model.DENY: self._deny,
             model.WRONG_CODE: self._wrong_code,
+            model.OPEN_SCHEMATIC: self._open_schematic,
+            model.RENDER: lambda dataset_id: self._start_job(model.RENDER, dataset_id),
+            model.FETCH: lambda dataset_id: self._start_job(model.FETCH, dataset_id),
+            model.FETCH_FORCE: lambda dataset_id: self._start_job(model.FETCH_FORCE, dataset_id),
+            model.FORGET: self._forget,
+            model.REVOKE_ALL: self._revoke_all,
         }
 
     @property
@@ -85,12 +96,20 @@ class Controller:
             return self._state
 
     def _set(self, **changes: Any) -> None:
+        self._update(lambda state: replace(state, **changes))
+
+    def _update(self, change: Callable[[TrayState], TrayState]) -> None:
+        """Apply ``change`` to the current state atomically: job threads add and remove
+        their jobs while the worker refreshes."""
         with self._lock:
-            self._state = state = replace(self._state, **changes)
-        try:
-            self.on_change(state)
-        except Exception:
-            log.exception("updating the tray failed")
+            self._state = change(self._state)
+        # one at a time, and always the latest: two threads changing it together must not
+        # leave the GUI showing the older state (a finished job still running, say)
+        with self._emit_lock:
+            try:
+                self.on_change(self.state)
+            except Exception:
+                log.exception("updating the tray failed")
 
     # -- running actions ---------------------------------------------------------------------
 
@@ -106,7 +125,9 @@ class Controller:
 
     def _run(self, action: str, handler: Callable[[], None], arg: str | None = None) -> None:
         if action != REFRESH:
-            log.info("tray action: %s%s", action, f" {arg}" if arg else "")
+            # a pairing action's argument is the code, which no log may hold (see _announce)
+            shown = arg if arg and action not in _PAIRING_ACTIONS else None
+            log.info("tray action: %s%s", action, f" {shown}" if shown else "")
         try:
             handler()
         except Exception as exc:
@@ -185,11 +206,13 @@ class Controller:
     def _attached(self, client: DaemonClient) -> None:
         status = self._status(client)
         pairings = self._pairings(client, status)
+        datasets = self._datasets(client, status)
         self._client = client
         self._set(
             mode=Mode.ATTACHED,
             status=status,
             pairings=pairings,
+            datasets=datasets,
             service=self._service_installed(),
             busy=None,
             error=None,
@@ -204,14 +227,17 @@ class Controller:
         if client is not None:
             self._attached(client)
             return
-        self._set(mode=Mode.STARTING, status=None, pairings=(), busy=None, error=None)
+        self._set(mode=Mode.STARTING, status=None, pairings=(), datasets=(), busy=None, error=None)
         # kept before start(): a start that times out may still finish, and must be stopped
         self._host = host = DaemonHost(self._make_daemon())
         host.start()
         self._client = client = host.client()
         status = self._status(client)
         pairings = self._pairings(client, status)
-        self._set(mode=Mode.HOSTED, status=status, pairings=pairings, service=None)
+        datasets = self._datasets(client, status)
+        self._set(
+            mode=Mode.HOSTED, status=status, pairings=pairings, datasets=datasets, service=None
+        )
         self._announce(pairings)
         log.info("hosting qsv-clientd")
 
@@ -227,7 +253,7 @@ class Controller:
     def _stop(self) -> None:
         self._set(busy="stopping…")
         self._stop_host()
-        self._set(mode=Mode.STOPPED, status=None, pairings=(), busy=None)
+        self._set(mode=Mode.STOPPED, status=None, pairings=(), datasets=(), busy=None)
 
     def _restart(self) -> None:
         self._set(busy="restarting…")
@@ -262,17 +288,27 @@ class Controller:
         try:
             status = self._status(client)
             pairings = self._pairings(client, status)
+            datasets = self._datasets(client, status)
         except QsvDaemonError as exc:
             if state.mode is Mode.HOSTED:
                 self._set(mode=Mode.ERROR, error=f"qsv-clientd stopped answering: {exc}")
             else:
                 self._client = None
-                self._set(mode=Mode.STOPPED, status=None, pairings=(), service=None)
+                self._set(mode=Mode.STOPPED, status=None, pairings=(), datasets=(), service=None)
                 log.info("the attached qsv-clientd went away")
             return
-        # one update for both, so the dot and the menu change together
-        if status != state.status or pairings != state.pairings:
-            self._set(status=status, pairings=pairings)
+        # one update for all, so the dot and the menu change together
+        if (status, pairings, datasets) != (state.status, state.pairings, state.datasets):
+            ids = {ds.id for ds in datasets}
+            self._update(
+                lambda s: replace(
+                    s,
+                    status=status,
+                    pairings=pairings,
+                    datasets=datasets,
+                    force_fetch=frozenset(i for i in s.force_fetch if i in ids),
+                )
+            )
         self._announce(pairings)
 
     def _approve(self, code: str) -> None:
@@ -283,7 +319,7 @@ class Controller:
 
     def _wrong_code(self, code: str) -> None:
         # the picked code isn't this request's: the page the user is looking at didn't make it
-        log.warning("a decoy code was picked for pairing %s; denying it", code)
+        log.warning("a decoy code was picked for a pairing request; denying it")
         if self._decide(code, "deny"):
             self.notify(
                 "Pairing denied",
@@ -304,9 +340,119 @@ class Controller:
             # the code expired, or its dataset was unregistered: say so, it's no tray error
             if exc.status not in (404, 409):
                 raise
-            self.notify(f"Couldn't {verb} {code}", str(exc))
+            # no code: a notifier that fails logs its arguments, and no log may hold one
+            self.notify(f"Couldn't {verb} the pairing request", str(exc))
             self._refresh()
             return False
-        log.info("pairing %s: %s", "approved" if verb == "approve" else "denied", code)
+        log.info("pairing request %s", "approved" if verb == "approve" else "denied")
         self._refresh()
         return True
+
+    # -- datasets ------------------------------------------------------------------------------
+
+    def _datasets(self, client: DaemonClient, status: Mapping[str, Any]) -> tuple[DatasetView, ...]:
+        """Registered datasets, fetched only when the status says there are any."""
+        count = status.get("datasets")
+        if not isinstance(count, int) or count <= 0:
+            return ()
+        return model.dataset_views(client.request("GET", "/v1/datasets", wait=_STATUS_WAIT))
+
+    def _dataset(self, dataset_id: str) -> DatasetView | None:
+        return next((ds for ds in self.state.datasets if ds.id == dataset_id), None)
+
+    def _open_schematic(self, dataset_id: str) -> None:
+        ds = self._dataset(dataset_id)
+        if ds is None or ds.schematic_path is None:
+            return
+        if not webbrowser.open(Path(ds.schematic_path).as_uri()):
+            self.notify(
+                f"Couldn't open {ds.title!r}", f"No browser could open {ds.schematic_path}."
+            )
+
+    def _forget(self, dataset_id: str) -> None:
+        ds, client = self._dataset(dataset_id), self._client
+        if ds is None or client is None:
+            return
+        try:
+            reply = client.request("DELETE", _dataset_path(ds.id), wait=_STATUS_WAIT)
+        except QsvDaemonError as exc:
+            if exc.status != 404:
+                raise
+            self.notify(f"Couldn't forget {ds.title!r}", str(exc))
+        else:
+            revoked = reply.get("revoked", 0)
+            self.notify(
+                f"Forgot {ds.title!r}",
+                f"It is no longer registered; {_tokens(revoked)} revoked.",
+            )
+        self._refresh()
+
+    def _revoke_all(self) -> None:
+        client = self._client
+        if client is None:
+            return
+        reply = client.request("POST", "/v1/tokens/revoke", {}, wait=_STATUS_WAIT)
+        self.notify(
+            "Tokens revoked",
+            f"{_tokens(reply.get('revoked', 0))} revoked; open pages must pair again.",
+        )
+        self._refresh()
+
+    def _start_job(self, kind: str, dataset_id: str) -> None:
+        """Run a render or fetch on its own daemon thread: they can take many minutes, which
+        must hold up neither the menu nor Quit (a daemon thread doesn't delay exit)."""
+        ds, client = self._dataset(dataset_id), self._client
+        if ds is None or client is None or any(j.dataset_id == ds.id for j in self.state.jobs):
+            return
+        verb = "rendering" if kind == model.RENDER else "fetching"
+        job = Job(ds.id, f"{verb} {ds.title!r}…")
+        self._update(lambda s: replace(s, jobs=(*s.jobs, job)))
+        threading.Thread(
+            target=self._job, args=(kind, ds, client, job), name=f"qsv-tray-{kind}", daemon=True
+        ).start()
+
+    def _job(self, kind: str, ds: DatasetView, client: DaemonClient, job: Job) -> None:
+        action = "render" if kind == model.RENDER else "fetch"
+        try:
+            if kind == model.RENDER:
+                reply = client.request("POST", f"{_dataset_path(ds.id)}/render", {}, wait=None)
+                title = f"Re-rendered {ds.title!r}"
+                message = f"Its schematic was rewritten ({reply.get('bytes', 0):,} bytes)."
+            else:
+                body = {"force": True} if kind == model.FETCH_FORCE else {}
+                reply = client.request("POST", f"{_dataset_path(ds.id)}/fetch", body, wait=None)
+                title = f"Fetched {ds.title!r}"
+                message = (
+                    "The latest data was downloaded and is now in use."
+                    if reply.get("changed")
+                    else "It was already up to date."
+                )
+                self._update(lambda s: replace(s, force_fetch=s.force_fetch - {ds.id}))
+        except QsvDaemonError as exc:
+            if self._stopping.is_set():  # Quit stopped the daemon under it: nothing to report
+                return
+            title, message = f"Couldn't {action} {ds.title!r}", str(exc)
+            if exc.code == "columns_missing":
+                self._update(lambda s: replace(s, force_fetch=s.force_fetch | {ds.id}))
+                message += (
+                    " If that's expected, use Fetch latest data, accepting missing columns, in "
+                    "its menu."
+                )
+        except Exception:
+            log.exception("%s of %s failed", action, ds.id)
+            title, message = f"Couldn't {action} {ds.title!r}", "See the tray's log."
+        finally:
+            self._update(lambda s: replace(s, jobs=tuple(j for j in s.jobs if j != job)))
+        if self._stopping.is_set():
+            return
+        self.notify(title, message)
+        with contextlib.suppress(RuntimeError):  # Quit shut the worker down meanwhile
+            self.submit(REFRESH)
+
+
+def _dataset_path(dataset_id: str) -> str:
+    return f"/v1/datasets/{urllib.parse.quote(dataset_id, safe='')}"
+
+
+def _tokens(count: object) -> str:
+    return "1 token" if count == 1 else f"{count} tokens"

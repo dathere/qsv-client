@@ -26,8 +26,8 @@ qsv-clientd status
 On Windows, `install` prints the `schtasks` command to run.
 
 `serve` logs to stderr (`-v` adds INFO lines: pairing requests and decisions, datasets
-registered and forgotten, renders, fetches, and revoked tokens; tokens themselves are never
-logged). `--log-file PATH` also writes them to `PATH`, rotated at 5 MB with 3 old files
+registered and forgotten, renders, fetches, and revoked tokens; tokens and pairing codes
+are never logged). `--log-file PATH` also writes them to `PATH`, rotated at 5 MB with 3 old files
 kept. The launchd agent already sends stderr to `~/Library/Logs/qsv-clientd.log`, and
 systemd to the journal (`journalctl --user -u qsv-clientd`).
 
@@ -96,6 +96,15 @@ request; if that was a misclick, pair again from the page. Otherwise the rules a
 Notifications use pystray's own where it has them (on macOS through `osascript`, so macOS
 shows them as coming from "Script Editor"; Windows; GTK and AppIndicator on Linux), else
 `notify-send` on Linux, else none, and the dot and tooltip still show waiting requests.
+
+**Datasets.** The **Datasets** submenu lists every registered dataset (an untitled one by
+its file's name), with its path and source. For each: **Open schematic** in your browser,
+**Re-render schematic**, **Fetch latest data** (when it has a source URL or PID), and
+**Forget ▸ Yes**, which unregisters it and unpairs its schematics. A render or fetch runs in
+the background: it shows in the menu, the dot turns amber, and a notification tells you how
+it went. A fetch refused because the new data lacks some of the dataset's columns offers
+**Fetch latest data, accepting missing columns** next. **Revoke all tokens ▸ Yes** unpairs
+every open schematic.
 
 One tray runs per user. It logs to `~/Library/Logs/qsv-client/qsv-clientd.log` on macOS, and
 `qsv-clientd.log` in the state directory elsewhere (`-v` adds debug lines).
