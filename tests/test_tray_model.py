@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -53,12 +54,16 @@ def test_hosted() -> None:
         "qsv-clientd: running",
         "qsv 25.1.0 · jobs 1/4 · 3 datasets",
         "—",
+        "Revoke all tokens",
+        "—",
         "Stop",
         "Restart (unpairs open schematics)",
         "—",
         "Quit",
     ]
     assert [s.action for s in model.build_menu(state)] == [
+        None,
+        None,
         None,
         None,
         None,
@@ -92,7 +97,7 @@ def test_odd_status_fields_still_render() -> None:
 def test_attached_to_a_service_offers_the_takeover() -> None:
     state = TrayState(Mode.ATTACHED, _status(), service="launchd")
     assert _texts(state)[0] == "qsv-clientd: attached to pid 4242 (launchd service)"
-    assert model.build_menu(state)[3] == MenuSpec("Stop service and run it here", model.TAKEOVER)
+    assert model.build_menu(state)[5] == MenuSpec("Stop service and run it here", model.TAKEOVER)
 
 
 def test_attached_to_a_foreground_daemon_offers_nothing_to_stop() -> None:
@@ -100,6 +105,8 @@ def test_attached_to_a_foreground_daemon_offers_nothing_to_stop() -> None:
     assert _texts(state) == [
         "qsv-clientd: attached to pid ?",
         "qsv ? · jobs 0/? · 0 datasets",
+        "—",
+        "Revoke all tokens",
         "—",
         "Quit",
     ]
@@ -236,3 +243,110 @@ def test_requests_show_only_while_the_daemon_runs() -> None:
 def test_the_expiry_label_changes_once_a_minute() -> None:
     assert model.expiry_label(299) == model.expiry_label(240) == "expires in 4m"
     assert model.expiry_label(59) == "expires in under a minute"
+
+
+def _dataset(**fields: Any) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "id": "ds1",
+        "path": "/data/sales.csv",
+        "title": "Sales",
+        "schematic_path": "/data/sales.html",
+        "viz_args": [],
+        "source_url": None,
+        "pid": None,
+        "original_path": None,
+    }
+    item.update(fields)
+    return item
+
+
+def test_dataset_views() -> None:
+    (plain, fetched, untitled) = model.dataset_views(
+        [
+            _dataset(),
+            _dataset(
+                id="ds2",
+                path="/cache/x.csv",
+                original_path="/data/orig.csv",
+                source_url=None,
+                pid="doi:10.1/x",
+                schematic_path=None,
+                viz_args=["--title", "x"],
+            ),
+            _dataset(id="ds3", title=None, schematic_path=None),
+        ]
+    )
+    assert plain == model.DatasetView(
+        "ds1", "Sales", "/data/sales.csv", False, "/data/sales.html", None, True
+    )
+    assert (fetched.path, fetched.fetched, fetched.source) == ("/data/orig.csv", True, "doi:10.1/x")
+    assert fetched.can_render and fetched.schematic_path is None  # renders from its viz args
+    assert untitled.title == "sales.csv" and not untitled.can_render
+
+
+def test_a_dataset_menu() -> None:
+    (ds,) = model.dataset_views([_dataset(source_url="https://example.com/sales.csv")])
+    state = TrayState(Mode.HOSTED, _status(), datasets=(ds,))
+    assert _tree(model.dataset_menu(ds, state)) == [
+        "Sales",
+        [
+            "(/data/sales.csv)",
+            "(Source: https://example.com/sales.csv)",
+            "—",
+            "Open schematic -> open-schematic ds1",
+            "Re-render schematic -> render ds1",
+            "Fetch latest data -> fetch ds1",
+            "—",
+            ["Forget", ["Yes, forget 'Sales' and unpair its schematics -> forget ds1"]],
+        ],
+    ]
+    menu = model.build_menu(state)
+    assert _tree(menu[3]) == ["Datasets", [_tree(model.dataset_menu(ds, state))]]
+    assert _tree(menu[4]) == [
+        "Revoke all tokens",
+        ["Yes, unpair every open schematic -> revoke-all None"],
+    ]
+
+
+def test_what_a_dataset_cannot_do_is_greyed_out_or_absent() -> None:
+    (ds,) = model.dataset_views([_dataset(schematic_path=None, original_path="/data/o.csv")])
+    tree = _tree(model.dataset_menu(ds, TrayState(Mode.HOSTED)))
+    assert tree[1][:4] == [
+        "(/data/o.csv)",
+        "((reading its fetched copy))",
+        "—",
+        "(Open schematic) -> open-schematic ds1",  # no schematic registered
+    ]
+    assert "(Re-render schematic) -> render ds1" in tree[1]  # no schematic, no viz arguments
+    assert not any("Fetch" in str(t) for t in tree[1])  # no source to fetch from
+
+
+def test_a_refused_fetch_offers_to_accept_missing_columns() -> None:
+    (ds,) = model.dataset_views([_dataset(pid="doi:10.1/x")])
+    state = TrayState(Mode.HOSTED, datasets=(ds,), force_fetch=frozenset({"ds1"}))
+    assert (
+        "Fetch latest data, accepting missing columns -> fetch-force ds1"
+        in (_tree(model.dataset_menu(ds, state))[1])
+    )
+
+
+def test_a_running_job_shows_and_holds_its_dataset() -> None:
+    (ds,) = model.dataset_views([_dataset(source_url="https://x/s.csv")])
+    job = model.Job("ds1", "rendering 'Sales'…")
+    state = TrayState(Mode.HOSTED, _status(), datasets=(ds,), jobs=(job,))
+    assert _texts(state)[2] == "rendering 'Sales'…"
+    actions = _tree(model.dataset_menu(ds, state))[1]
+    assert "(Re-render schematic) -> render ds1" in actions
+    assert "(Fetch latest data) -> fetch ds1" in actions
+    assert "Open schematic -> open-schematic ds1" in actions  # opening never waits
+    assert model.icon_state(state) == "busy"
+    # a pairing waiting on the user outranks a job in the background
+    assert model.icon_state(replace(state, pairings=_requests(1))) == "attention"
+
+
+def test_datasets_and_jobs_show_only_while_the_daemon_runs() -> None:
+    (ds,) = model.dataset_views([_dataset()])
+    job = model.Job("ds1", "rendering 'Sales'…")
+    state = TrayState(Mode.STOPPED, datasets=(ds,), jobs=(job,))
+    assert _texts(state) == ["qsv-clientd: stopped", "—", "Start", "—", "Quit"]
+    assert model.icon_state(state) == "stopped"

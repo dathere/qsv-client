@@ -149,6 +149,8 @@ def test_the_menu_follows_the_state(
         "qsv-clientd: running",
         "qsv 25.1.0 · jobs 0/4 · 0 datasets",
         "—",
+        "Revoke all tokens",
+        "—",
         "Stop",
         "Restart (unpairs open schematics)",
         "—",
