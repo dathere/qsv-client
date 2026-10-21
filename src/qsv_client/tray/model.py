@@ -33,6 +33,10 @@ FETCH_FORCE = "fetch-force"
 """Fetch, accepting data that lacks some of the dataset's current columns."""
 FORGET = "forget"
 REVOKE_ALL = "revoke-all"
+OPEN_CONFIG = "open-config"
+OPEN_LOG = "open-log"
+AUTOSTART = "autostart"
+"""Toggle starting the tray at login."""
 
 # decoys can't be predicted from outside this process (not that knowing them would help a page)
 _CHOICE_SALT = secrets.token_hex(8)
@@ -65,6 +69,8 @@ class TrayState:
     """Renders and fetches running in the background."""
     force_fetch: frozenset[str] = frozenset()
     """Datasets whose last fetch was refused for missing columns: offer to force it."""
+    autostart: bool | None = None
+    """Whether the tray starts at login; None until known, or where it can't."""
 
 
 @dataclass(frozen=True)
@@ -142,8 +148,10 @@ class MenuSpec:
     enabled: bool = True
     separator: bool = False
     arg: str | None = None
-    """The action's argument (a pairing code)."""
+    """The action's argument (a pairing code, a dataset id)."""
     submenu: tuple[MenuSpec, ...] = ()
+    checked: bool | None = None
+    """A check box's state; None for an item without one."""
 
 
 SEPARATOR = MenuSpec(separator=True)
@@ -305,8 +313,21 @@ def build_menu(state: TrayState) -> list[MenuSpec]:
         items.append(MenuSpec("Revoke all tokens", submenu=(yes,)))
     if lifecycle := _lifecycle(state):
         items += [SEPARATOR, *lifecycle]
+    items += [SEPARATOR, MenuSpec("Open config…", OPEN_CONFIG), log_item(state)]
+    if state.autostart is not None:
+        items.append(MenuSpec("Start at login", AUTOSTART, checked=state.autostart))
     items += [SEPARATOR, MenuSpec("Quit", QUIT)]
     return items
+
+
+def log_item(state: TrayState) -> MenuSpec:
+    """Open log…, where there's a file to open: the tray's own log (where a daemon it hosts
+    logs too), or the launchd service's. Otherwise, where the log is."""
+    if state.mode is Mode.ATTACHED and state.service == "systemd":
+        return _info("Log: journalctl --user -u qsv-clientd")
+    if state.mode is Mode.ATTACHED and state.service is None:
+        return _info("Log: in the terminal running qsv-clientd serve")
+    return MenuSpec("Open log…", OPEN_LOG)
 
 
 def icon_state(state: TrayState) -> IconState:

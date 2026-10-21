@@ -41,7 +41,16 @@ def _texts(state: TrayState) -> list[str]:
 
 def test_stopped() -> None:
     state = TrayState()
-    assert _texts(state) == ["qsv-clientd: stopped", "—", "Start", "—", "Quit"]
+    assert _texts(state) == [
+        "qsv-clientd: stopped",
+        "—",
+        "Start",
+        "—",
+        "Open config…",
+        "Open log…",
+        "—",
+        "Quit",
+    ]
     assert model.build_menu(state)[0] == MenuSpec("qsv-clientd: stopped", enabled=False)
     assert model.build_menu(state)[2].action == model.START
     assert model.icon_state(state) == "stopped"
@@ -59,6 +68,9 @@ def test_hosted() -> None:
         "Stop",
         "Restart (unpairs open schematics)",
         "—",
+        "Open config…",
+        "Open log…",
+        "—",
         "Quit",
     ]
     assert [s.action for s in model.build_menu(state)] == [
@@ -69,6 +81,9 @@ def test_hosted() -> None:
         None,
         model.STOP,
         model.RESTART,
+        None,
+        model.OPEN_CONFIG,
+        model.OPEN_LOG,
         None,
         model.QUIT,
     ]
@@ -108,13 +123,23 @@ def test_attached_to_a_foreground_daemon_offers_nothing_to_stop() -> None:
         "—",
         "Revoke all tokens",
         "—",
+        "Open config…",
+        "Log: in the terminal running qsv-clientd serve",
+        "—",
         "Quit",
     ]
 
 
 def test_starting_and_busy() -> None:
     starting = TrayState(Mode.STARTING)
-    assert _texts(starting) == ["qsv-clientd: starting…", "—", "Quit"]
+    assert _texts(starting) == [
+        "qsv-clientd: starting…",
+        "—",
+        "Open config…",
+        "Open log…",
+        "—",
+        "Quit",
+    ]
     assert model.icon_state(starting) == "busy"
     stopping = TrayState(Mode.HOSTED, _status(), busy="stopping…", pairings=_requests(1))
     assert _texts(stopping)[0] == "qsv-clientd: stopping…"
@@ -124,7 +149,16 @@ def test_starting_and_busy() -> None:
 
 def test_error_offers_retry_and_wins_the_icon() -> None:
     state = TrayState(Mode.ERROR, _status(), error="no qsv found", pairings=_requests(3))
-    assert _texts(state) == ["qsv-clientd: error: no qsv found", "—", "Retry", "—", "Quit"]
+    assert _texts(state) == [
+        "qsv-clientd: error: no qsv found",
+        "—",
+        "Retry",
+        "—",
+        "Open config…",
+        "Open log…",
+        "—",
+        "Quit",
+    ]
     assert model.icon_state(state) == "error"
 
 
@@ -349,5 +383,35 @@ def test_datasets_and_jobs_show_only_while_the_daemon_runs() -> None:
     (ds,) = model.dataset_views([_dataset()])
     job = model.Job("ds1", "rendering 'Sales'…")
     state = TrayState(Mode.STOPPED, datasets=(ds,), jobs=(job,))
-    assert _texts(state) == ["qsv-clientd: stopped", "—", "Start", "—", "Quit"]
+    assert _texts(state) == [
+        "qsv-clientd: stopped",
+        "—",
+        "Start",
+        "—",
+        "Open config…",
+        "Open log…",
+        "—",
+        "Quit",
+    ]
     assert model.icon_state(state) == "stopped"
+
+
+def test_open_log_goes_where_the_log_is() -> None:
+    def log(**fields: Any) -> MenuSpec:
+        return model.log_item(TrayState(**fields))
+
+    opens = MenuSpec("Open log…", model.OPEN_LOG)
+    assert log(mode=Mode.HOSTED) == opens  # the tray's log: the hosted daemon logs there too
+    assert log(mode=Mode.ATTACHED, service="launchd") == opens  # the service's log file
+    assert log(mode=Mode.STOPPED) == log(mode=Mode.ERROR) == opens  # why it stopped
+    assert log(mode=Mode.ATTACHED, service="systemd") == MenuSpec(
+        "Log: journalctl --user -u qsv-clientd", enabled=False
+    )
+
+
+def test_start_at_login_is_a_check_box_where_supported() -> None:
+    assert "Start at login" not in _texts(TrayState())  # not known yet, or unsupported
+    for enabled in (True, False):
+        menu = model.build_menu(TrayState(autostart=enabled))
+        (item,) = [s for s in menu if s.text == "Start at login"]
+        assert item == MenuSpec("Start at login", model.AUTOSTART, checked=enabled)

@@ -154,6 +154,9 @@ def test_the_menu_follows_the_state(
         "Stop",
         "Restart (unpairs open schematics)",
         "—",
+        "Open config…",
+        "Open log…",
+        "—",
         "Quit",
     ]
     assert entries[2] is FakeMenu.SEPARATOR
