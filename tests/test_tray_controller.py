@@ -12,6 +12,7 @@ import threading
 import time
 import webbrowser
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -465,8 +466,8 @@ def test_an_expired_or_unregistered_code_is_a_notification_not_an_error(
     c.submit(model.APPROVE, stranger["code"]).result(60)  # the menu never offers this
     assert c.state.mode is Mode.ATTACHED
     (expired, unregistered) = [n for n in notes if n[0].startswith("Couldn't")]
-    assert expired[0] == "Couldn't approve ZZZ-999" and "expired" in expired[1]
-    assert unregistered[0] == f"Couldn't approve {stranger['code']}"
+    assert expired[0] == "Couldn't approve the pairing request" and "expired" in expired[1]
+    assert unregistered[0] == "Couldn't approve the pairing request"
     assert "register it first" in unregistered[1]
 
 
@@ -518,7 +519,7 @@ def test_a_decoy_picked_for_an_expired_request_says_only_that(
     c.notify = notes
     _do(c, model.START)
     c.submit(model.WRONG_CODE, "ZZZ-999").result(60)
-    assert [title for title, _ in notes] == ["Couldn't deny ZZZ-999"]
+    assert [title for title, _ in notes] == ["Couldn't deny the pairing request"]
 
 
 # -- datasets -----------------------------------------------------------------------------------
@@ -764,3 +765,30 @@ def test_the_tray_logs_no_pairing_codes(
     assert "tray action: approve\n" in caplog.text + "\n"
     for page in pages:
         assert page["code"] not in caplog.text
+
+
+def test_concurrent_changes_reach_the_gui_in_order(make_controller: MakeController) -> None:
+    c = make_controller()
+    job = model.Job("ds1", "rendering 'D'…")
+    seen: list[TrayState] = []
+    calls: list[TrayState] = []
+    first_drawing, release = threading.Event(), threading.Event()
+
+    def on_change(state: TrayState) -> None:
+        calls.append(state)
+        if len(calls) == 1:  # the first redraw is slow
+            first_drawing.set()
+            release.wait(10)
+        seen.append(state)
+
+    c.on_change = on_change
+    adder = threading.Thread(target=c._update, args=(lambda s: replace(s, jobs=(job,)),))
+    adder.start()
+    assert first_drawing.wait(10)
+    remover = threading.Thread(target=c._update, args=(lambda s: replace(s, jobs=()),))
+    remover.start()
+    time.sleep(0.1)  # the job is done, while the GUI still draws it as running
+    release.set()
+    adder.join(10)
+    remover.join(10)
+    assert seen[-1].jobs == ()  # the GUI ends showing the job finished

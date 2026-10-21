@@ -280,7 +280,8 @@ def test_dataset_views() -> None:
         "ds1", "Sales", "/data/sales.csv", False, "/data/sales.html", None, True
     )
     assert (fetched.path, fetched.fetched, fetched.source) == ("/data/orig.csv", True, "doi:10.1/x")
-    assert fetched.can_render and fetched.schematic_path is None  # renders from its viz args
+    # viz arguments alone: the daemon would render to a file it then deletes
+    assert not fetched.can_render and fetched.schematic_path is None
     assert untitled.title == "sales.csv" and not untitled.can_render
 
 

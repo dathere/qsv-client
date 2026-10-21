@@ -65,6 +65,7 @@ class Controller:
         self._announced: set[str] = set()
         self._state = TrayState()
         self._lock = threading.Lock()
+        self._emit_lock = threading.Lock()
         # touched only on the worker thread
         self._host: DaemonHost | None = None
         self._client: DaemonClient | None = None
@@ -101,11 +102,14 @@ class Controller:
         """Apply ``change`` to the current state atomically: job threads add and remove
         their jobs while the worker refreshes."""
         with self._lock:
-            self._state = state = change(self._state)
-        try:
-            self.on_change(state)
-        except Exception:
-            log.exception("updating the tray failed")
+            self._state = change(self._state)
+        # one at a time, and always the latest: two threads changing it together must not
+        # leave the GUI showing the older state (a finished job still running, say)
+        with self._emit_lock:
+            try:
+                self.on_change(self.state)
+            except Exception:
+                log.exception("updating the tray failed")
 
     # -- running actions ---------------------------------------------------------------------
 
@@ -336,7 +340,8 @@ class Controller:
             # the code expired, or its dataset was unregistered: say so, it's no tray error
             if exc.status not in (404, 409):
                 raise
-            self.notify(f"Couldn't {verb} {code}", str(exc))
+            # no code: a notifier that fails logs its arguments, and no log may hold one
+            self.notify(f"Couldn't {verb} the pairing request", str(exc))
             self._refresh()
             return False
         log.info("pairing request %s", "approved" if verb == "approve" else "denied")

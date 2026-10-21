@@ -81,6 +81,8 @@ class DatasetView:
     source: str | None
     """The source URL or PID a fetch downloads from."""
     can_render: bool
+    """It has a schematic file to rewrite: without one (viz arguments alone), the daemon's
+    local render keeps nothing."""
 
 
 def dataset_views(items: Iterable[Mapping[str, Any]]) -> tuple[DatasetView, ...]:
@@ -92,7 +94,7 @@ def dataset_views(items: Iterable[Mapping[str, Any]]) -> tuple[DatasetView, ...]
             fetched=bool(item.get("original_path")),
             schematic_path=item.get("schematic_path") or None,
             source=item.get("source_url") or item.get("pid") or None,
-            can_render=bool(item.get("schematic_path") or item.get("viz_args")),
+            can_render=bool(item.get("schematic_path")),
         )
         for item in items
     )
