@@ -407,7 +407,8 @@ def test_requests_are_listed_announced_once_and_approved(
     state = _do(c, REFRESH)
     (request,) = state.pairings
     assert request.text.code == page["code"] and request.text.title == "Sales"
-    assert request.expires == "expires in 4m"
+    # 300s less however long the fetch took: none at all with Windows' 15.6ms clock ticks
+    assert request.expires in ("expires in 5m", "expires in 4m")
     assert notes == [
         (
             "Pairing request",
