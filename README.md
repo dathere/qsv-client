@@ -21,6 +21,9 @@ subprocess pitfalls:
   environment variables, so an API key never shows up in `ps` output.
 - **Sync and asyncio** clients with the same API. No runtime dependencies. Python 3.10+ on
   Linux, macOS and Windows.
+- **A local daemon, `qsv-clientd`,** that runs qsv for your own processes and lets a Data
+  Schematic from `qsv viz smart` work with its live data, with an optional system tray to
+  run and control it. See [The qsv-clientd daemon](#the-qsv-clientd-daemon).
 
 qsv itself is not bundled, and **qsv 25.0.0 or later** is required. Install it from the
 [qsv releases](https://github.com/dathere/qsv/releases) or a
@@ -125,8 +128,10 @@ client per call costs nothing extra after the first.
 
 `qsv-clientd` (installed with the package) is a per-user daemon that runs qsv for local
 processes, through `DaemonClient` / `AsyncDaemonClient` (the same `run()` as `Qsv`), and for
-open **Data Schematics** from `qsv viz smart`. Once you approve a schematic with a pairing
-code, it can drill into rows, refresh stats, re-render itself and fetch the latest data.
+open **Data Schematics** from `qsv viz smart` (a qsv newer than 26.0.0). Once you approve a
+schematic with a pairing code, it can drill into the rows behind a chart, refresh its
+statistics, re-render itself, run read-only queries and fetch the latest data. Large results
+are paged from the daemon, so every row is reachable.
 
 ```bash
 qsv-clientd install                       # or: qsv-clientd serve
