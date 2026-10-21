@@ -17,6 +17,9 @@ All notable changes to this project are documented here. The format follows
   It uses only the standard library. See `docs/DAEMON.md`.
 - `qsv-clientd` settings `fetch_max_bytes` (default 10 GiB) and `fetch_timeout` (default 30
   minutes), which limit how much a fetch may download and for how long.
+- `qsv-clientd-tray`, a system tray icon that runs and controls qsv-clientd, in the optional
+  `tray` extra (`pip install 'qsv-client[tray]'`, which adds pystray and Pillow). It hosts the
+  daemon itself, or attaches to one already running, and starts, stops and restarts it.
 - `qsv-clientd serve --log-file PATH` writes the log to a file too (rotated at 5 MB, 3 kept),
   and `-v` logs pairing requests and decisions, datasets registered and forgotten, renders,
   fetches and revoked tokens. Tokens are never logged.

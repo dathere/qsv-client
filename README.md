@@ -140,6 +140,15 @@ from qsv_client.daemon import DaemonClient
 print(DaemonClient().run("count", "data.csv").stdout)
 ```
 
+For a system tray icon that runs and controls the daemon, install the `tray` extra:
+
+```bash
+pipx install 'qsv-client[tray]'
+qsv-clientd-tray
+```
+
+On Linux the tray needs a desktop with AppIndicator or GTK tray support (see the doc).
+
 See [docs/DAEMON.md](docs/DAEMON.md) for the security model and protocol.
 
 ## Errors
@@ -288,7 +297,7 @@ For any wrapper:
 ## Development
 
 ```bash
-uv sync
+uv sync --extra tray                 # the tray extra (pystray, Pillow) for its tests and mypy
 uv run pytest                        # integration tests need qsv: QSV_BIN=/path/to/qsv
 uv run ruff format . && uv run ruff check .
 uv run mypy && uv run mypy --platform win32   # also type-checks the Windows-only code
