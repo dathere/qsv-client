@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import http.server
 import json
 import logging
 import shutil
 import tempfile
+import threading
 import time
+import webbrowser
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -19,7 +22,7 @@ from qsv_client.daemon.client import DaemonClient
 from qsv_client.daemon.config import DaemonConfig
 from qsv_client.daemon.host import DaemonHost
 from qsv_client.daemon.server import Daemon
-from qsv_client.errors import QsvDaemonUnavailable, QsvNotFound
+from qsv_client.errors import QsvDaemonError, QsvDaemonUnavailable, QsvNotFound
 from qsv_client.tray import controller as controller_mod
 from qsv_client.tray import model
 from qsv_client.tray.controller import REFRESH, Controller
@@ -516,3 +519,228 @@ def test_a_decoy_picked_for_an_expired_request_says_only_that(
     _do(c, model.START)
     c.submit(model.WRONG_CODE, "ZZZ-999").result(60)
     assert [title for title, _ in notes] == ["Couldn't deny ZZZ-999"]
+
+
+# -- datasets -----------------------------------------------------------------------------------
+
+# enough qsv for render and fetch: viz writes --output; slice gives a file's header row
+DATASET_QSV = """
+cmd = sys.argv[1]
+if cmd == "viz":
+    open(sys.argv[sys.argv.index("--output") + 1], "w").write("<html>re-rendered</html>")
+elif cmd == "slice":
+    print(open(sys.argv[-1]).readline().rstrip("\\n"))
+else:
+    print("1")
+"""
+
+
+class Web:
+    """A loopback HTTP server: GET /data.csv answers ``body``."""
+
+    def __init__(self) -> None:
+        self.body = b"name,n\nalpha,2\n"
+        web = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv")
+                self.send_header("Content-Length", str(len(web.body)))
+                self.end_headers()
+                self.wfile.write(web.body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/data.csv"
+
+
+@pytest.fixture
+def web() -> Iterator[Web]:
+    server = Web()
+    yield server
+    server.httpd.shutdown()
+    server.httpd.server_close()
+
+
+@pytest.fixture
+def registered(
+    outside: DaemonThread, fake_qsv: Callable[[str], str], data: Path, web: Web
+) -> tuple[DaemonThread, str, Path]:
+    """The outside daemon, with a dataset registered (schematic, source URL): its id."""
+    fake_qsv(DATASET_QSV)  # the same path the daemon runs: now it can render and fetch
+    schematic = data.with_suffix(".html")
+    schematic.write_text("<html>first</html>")
+    body = {
+        "path": str(data),
+        "schematic_path": str(schematic),
+        "source_url": web.url,
+        "title": "Sales",
+    }
+    ds = _local(outside, "POST", "/v1/datasets", body)
+    return outside, ds["id"], schematic
+
+
+def _until(c: Controller, done: Callable[[TrayState], bool]) -> TrayState:
+    deadline = time.monotonic() + 30
+    while not done(c.state):
+        assert time.monotonic() < deadline, c.state
+        time.sleep(0.02)
+    return c.state
+
+
+def test_datasets_are_listed_and_re_rendered(
+    make_controller: MakeController, registered: tuple[DaemonThread, str, Path]
+) -> None:
+    _, dataset_id, schematic = registered
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    (ds,) = _do(c, model.START).datasets
+    assert (ds.id, ds.title, ds.schematic_path) == (dataset_id, "Sales", str(schematic))
+    seen: list[TrayState] = []
+    c.on_change = seen.append
+    c.submit(model.RENDER, dataset_id).result(60)
+    _until(c, lambda s: not s.jobs and bool(notes))
+    assert [j.text for s in seen for j in s.jobs][:1] == ["rendering 'Sales'…"]
+    assert notes == [("Re-rendered 'Sales'", "Its schematic was rewritten (24 bytes).")]
+    assert schematic.read_text() == "<html>re-rendered</html>"
+
+
+def test_fetching_and_accepting_missing_columns(
+    make_controller: MakeController, registered: tuple[DaemonThread, str, Path], web: Web
+) -> None:
+    _, dataset_id, _ = registered
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    c.submit(model.FETCH, dataset_id).result(60)
+    _until(c, lambda s: not s.jobs and len(notes) == 1)
+    assert notes[-1] == ("Fetched 'Sales'", "The latest data was downloaded and is now in use.")
+    (ds,) = _until(c, lambda s: s.datasets[0].fetched).datasets
+    assert ds.path.endswith("sales.csv")  # still named by the user's file
+
+    web.body = b"other\nx\n"  # the dataset's columns are gone
+    c.submit(model.FETCH, dataset_id).result(60)
+    state = _until(c, lambda s: not s.jobs and len(notes) == 2)
+    assert notes[-1][0] == "Couldn't fetch 'Sales'"
+    assert "accepting missing columns" in notes[-1][1]
+    assert state.force_fetch == {dataset_id}
+
+    c.submit(model.FETCH_FORCE, dataset_id).result(60)
+    state = _until(c, lambda s: not s.jobs and len(notes) == 3)
+    assert notes[-1][0] == "Fetched 'Sales'" and state.force_fetch == frozenset()
+
+
+def test_opening_a_schematic(
+    make_controller: MakeController,
+    registered: tuple[DaemonThread, str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, dataset_id, schematic = registered
+    opened: list[str] = []
+    answers = [True, False]
+
+    def open_url(url: str) -> bool:
+        opened.append(url)
+        return answers.pop(0)
+
+    monkeypatch.setattr(webbrowser, "open", open_url)
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    c.submit(model.OPEN_SCHEMATIC, dataset_id).result(60)
+    assert opened == [schematic.as_uri()] and notes == []
+    c.submit(model.OPEN_SCHEMATIC, dataset_id).result(60)  # no browser could
+    assert notes == [("Couldn't open 'Sales'", f"No browser could open {schematic}.")]
+
+
+def test_forgetting_a_dataset_and_revoking_tokens(
+    make_controller: MakeController, registered: tuple[DaemonThread, str, Path], data: Path
+) -> None:
+    outside, dataset_id, _ = registered
+    outside.pair(_sha(data))
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    c.submit(model.REVOKE_ALL).result(60)
+    assert notes[-1] == ("Tokens revoked", "1 token revoked; open pages must pair again.")
+    outside.pair(_sha(data))
+    stale = c.state.datasets
+    c.submit(model.FORGET, dataset_id).result(60)
+    assert notes[-1] == ("Forgot 'Sales'", "It is no longer registered; 1 token revoked.")
+    assert c.state.datasets == ()
+    c._set(datasets=stale)  # a menu drawn before the forget
+    c.submit(model.FORGET, dataset_id).result(60)
+    assert notes[-1][0] == "Couldn't forget 'Sales'"
+    assert c.state.mode is Mode.ATTACHED
+    outside.stop()  # not a 404: the daemon is gone, which the tray shows as an error
+    c._set(datasets=stale)
+    c.submit(model.FORGET, dataset_id).result(60)
+    after = c.state
+    assert after.mode is Mode.ERROR
+
+
+def test_dataset_actions_without_a_dataset_or_daemon(make_controller: MakeController) -> None:
+    c = make_controller()
+    (ds,) = model.dataset_views([{"id": "ds1", "path": "/d.csv", "schematic_path": "/d.html"}])
+    for action in (model.RENDER, model.FORGET, model.OPEN_SCHEMATIC, model.REVOKE_ALL):
+        c.submit(action, None if action == model.REVOKE_ALL else "missing").result(60)
+    c._set(mode=Mode.HOSTED, datasets=(ds,))  # listed, but there is no daemon to ask
+    for action in (model.RENDER, model.FORGET, model.REVOKE_ALL):
+        c.submit(action, None if action == model.REVOKE_ALL else "ds1").result(60)
+    assert c.state.jobs == () and c.state.mode is Mode.HOSTED
+
+
+class Stub:
+    """A client whose requests fail as given."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    def request(self, *args: object, **kwargs: object) -> Any:
+        raise self.exc
+
+
+def test_a_job_reports_what_went_wrong_unless_the_tray_is_quitting(
+    make_controller: MakeController, caplog: pytest.LogCaptureFixture
+) -> None:
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    (ds,) = model.dataset_views([{"id": "ds1", "path": "/d.csv", "title": "D"}])
+    job = model.Job("ds1", "rendering 'D'…")
+    c._set(jobs=(job,))
+    with caplog.at_level(logging.ERROR, logger="qsv_client.tray"):
+        c._job(model.RENDER, ds, Stub(RuntimeError("boom")), job)  # type: ignore[arg-type]
+    assert notes == [("Couldn't render 'D'", "See the tray's log.")]
+    assert "render of ds1 failed" in caplog.text and c.state.jobs == ()
+    refused = QsvDaemonError("no schematic or viz arguments registered", status=409)
+    c._job(model.RENDER, ds, Stub(refused), job)  # type: ignore[arg-type]
+    assert notes[-1] == ("Couldn't render 'D'", "no schematic or viz arguments registered")
+    c._stopping.set()  # Quit: the hosted daemon is stopped under the job
+    c._set(jobs=(job,))
+    gone = QsvDaemonUnavailable("qsv-clientd is not running")
+    c._job(model.FETCH, ds, Stub(gone), job)  # type: ignore[arg-type]
+    c._job(model.FETCH, ds, Stub(RuntimeError("late")), job)  # type: ignore[arg-type]
+    assert len(notes) == 2 and c.state.jobs == ()
+
+
+def test_one_job_per_dataset_and_forgotten_datasets_lose_force(
+    make_controller: MakeController, registered: tuple[DaemonThread, str, Path]
+) -> None:
+    _, dataset_id, _ = registered
+    c = make_controller()
+    _do(c, model.START)
+    job = model.Job(dataset_id, "fetching 'Sales'…")
+    c._set(jobs=(job,), force_fetch=frozenset({dataset_id, "gone"}))
+    c.submit(model.FETCH, dataset_id).result(60)
+    assert c.state.jobs == (job,)  # the running one holds it
+    c._set(datasets=())  # forces a refresh to publish the list again
+    assert _do(c, REFRESH).force_fetch == {dataset_id}
