@@ -149,7 +149,9 @@ if sys.platform == "win32":
                 raise
 
         def interrupt(self) -> None:
-            with contextlib.suppress(OSError):
+            # without a console (pythonw) the break can't be sent, and some Pythons report
+            # that as SystemError rather than OSError; either way, the kill follows
+            with contextlib.suppress(OSError, SystemError):
                 os.kill(self.pid, signal.CTRL_BREAK_EVENT)
 
         def kill(self) -> None:

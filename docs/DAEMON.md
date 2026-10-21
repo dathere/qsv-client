@@ -79,6 +79,10 @@ version, running jobs and datasets, and lets you start, stop and restart the dae
   until your next login and hosts the daemon in the tray instead. A stopped tray attaches to
   a daemon that starts later.
 
+On Windows the tray has no console, and the qsv commands it runs open no console windows:
+they share a console that has none, so a timed-out run is still stopped politely
+(`CTRL_BREAK_EVENT`) before it is killed.
+
 **Pairing requests.** When a Data Schematic asks to pair, the dot turns magenta, a
 notification names the dataset, and the request appears in the menu under **Waiting to
 pair** with its dataset, path, origin and expiry. To approve it, open **Approve…** and pick,

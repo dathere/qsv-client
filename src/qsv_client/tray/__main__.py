@@ -9,7 +9,7 @@ import sys
 
 from ..daemon import logs
 from ..daemon.config import log_path, runtime_dir
-from . import _lock, app, autostart
+from . import _console, _lock, app, autostart
 from .controller import Controller, load_daemon
 
 log = logging.getLogger("qsv_client.tray")
@@ -66,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     logs.configure_logging(logging.DEBUG if ns.verbose else logging.INFO, log_path())
     logging.getLogger("PIL").setLevel(logging.INFO)  # its debug lines are PNG chunk dumps
+    _console.attach_hidden()  # before anything starts qsv
     controller = Controller(make_daemon=functools.partial(load_daemon, ns.binary))
     try:
         app.run(controller)

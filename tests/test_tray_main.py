@@ -18,7 +18,7 @@ import pytest
 from qsv_client.daemon import logs
 from qsv_client.errors import QsvNotFound
 from qsv_client.tray import __main__ as cli
-from qsv_client.tray import _lock, app, autostart
+from qsv_client.tray import _console, _lock, app, autostart
 from qsv_client.tray.controller import Controller
 
 
@@ -43,6 +43,8 @@ class Recorder:
         self.runs: list[Controller] = []
         self.logging: list[tuple[int, Path | None]] = []
         self.shutdowns = 0
+        self.consoles: list[int] = []
+        """For each attach_hidden call, how many runs had started."""
         self.raise_in_run: Exception | None = None
 
 
@@ -57,6 +59,7 @@ def fake_gui(home: Path, monkeypatch: pytest.MonkeyPatch) -> Recorder:
             raise rec.raise_in_run
 
     monkeypatch.setattr(app, "run", run)
+    monkeypatch.setattr(_console, "attach_hidden", lambda: rec.consoles.append(len(rec.runs)))
     monkeypatch.setattr(
         logs, "configure_logging", lambda level, file=None: rec.logging.append((level, file))
     )
@@ -74,6 +77,7 @@ def test_runs_the_tray_and_shuts_down(fake_gui: Recorder, home: Path) -> None:
     assert cli.main([]) == 0
     assert len(fake_gui.runs) == 1 and fake_gui.shutdowns == 1
     assert fake_gui.logging == [(logging.INFO, home / "qsv-clientd.log")]
+    assert fake_gui.consoles == [0]  # before the controller could start qsv
     # the lock is released: the next launch runs too
     assert cli.main(["-v"]) == 0
     assert fake_gui.logging[-1] == (logging.DEBUG, home / "qsv-clientd.log")
