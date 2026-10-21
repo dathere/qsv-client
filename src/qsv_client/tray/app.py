@@ -13,7 +13,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from . import model
+from . import model, notify
 from .controller import Controller
 from .model import MenuSpec, TrayState
 
@@ -85,11 +85,7 @@ _WINDOWS_TOOLTIP = 127
 
 
 def _tooltip(text: str) -> str:
-    if sys.platform != "win32" or len(text.encode("utf-16-le")) // 2 <= _WINDOWS_TOOLTIP:
-        return text
-    while len((text + "…").encode("utf-16-le")) // 2 > _WINDOWS_TOOLTIP:
-        text = text[:-1]
-    return text + "…"
+    return notify.fit_windows(text, _WINDOWS_TOOLTIP)
 
 
 def _rebuild_windows_menu_before_it_opens(icon: Any, stale: threading.Event) -> None:
@@ -114,14 +110,17 @@ def _rebuild_windows_menu_before_it_opens(icon: Any, stale: threading.Event) -> 
 def _item(pystray: Any, spec: MenuSpec, controller: Controller) -> Any:
     if spec.separator:
         return pystray.Menu.SEPARATOR
-    action = spec.action
+    if spec.submenu:
+        submenu = pystray.Menu(*(_item(pystray, s, controller) for s in spec.submenu))
+        return pystray.MenuItem(spec.text, submenu)
+    action, arg = spec.action, spec.arg
     if action is None:
         return pystray.MenuItem(spec.text, None, enabled=False)
     if action == model.QUIT:
         # run() returns once the icon stops; the caller then shuts the controller down
         return pystray.MenuItem(spec.text, lambda icon, item: icon.stop())
     return pystray.MenuItem(
-        spec.text, lambda icon, item: controller.submit(action), enabled=spec.enabled
+        spec.text, lambda icon, item: controller.submit(action, arg), enabled=spec.enabled
     )
 
 
@@ -170,6 +169,7 @@ def run(controller: Controller) -> None:
                 "AppIndicator or GTK bindings for Python (see docs/DAEMON.md)"
             )
         _handle_signals_in_loop(icon)
+        controller.notify = notify.choose(icon)
         controller.on_change = lambda state: _on_main_thread(lambda: redraw(state))
         controller.submit(model.START)
         controller.start_polling()

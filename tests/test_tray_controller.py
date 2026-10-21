@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -9,6 +10,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from daemon_helpers import DaemonThread
@@ -359,3 +361,158 @@ def test_the_default_daemon_reads_daemon_json(home: Path, fake_qsv: Callable[[st
     (home / "daemon.json").write_text(json.dumps({"binary": fake_qsv(""), "port": 0}))
     daemon = controller_mod._load_daemon()
     assert daemon.binary == fake_qsv("") and daemon.config.port == 0
+
+
+# -- pairing requests ---------------------------------------------------------------------------
+
+
+class Notes(list[tuple[str, str]]):
+    def __call__(self, title: str, message: str) -> None:
+        self.append((title, message))
+
+
+@pytest.fixture
+def data(tmp_path: Path) -> Path:
+    path = tmp_path / "sales.csv"
+    path.write_text("name,n\nalpha,1\n")
+    return path
+
+
+def _local(d: DaemonThread, method: str, path: str, body: object = None) -> Any:
+    reply = d.http(method, path, body, origin=None, token=d.daemon.local_token)
+    assert reply.status == 200, reply.body
+    return reply.json()
+
+
+def _ask_to_pair(d: DaemonThread, digest: str) -> dict[str, Any]:
+    reply = d.http("POST", "/v1/pair", {"digest": digest})  # as a file:// page would
+    assert reply.status == 200, reply.body
+    request: dict[str, Any] = reply.json()
+    return request
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_requests_are_listed_announced_once_and_approved(
+    make_controller: MakeController, outside: DaemonThread, data: Path
+) -> None:
+    _local(outside, "POST", "/v1/datasets", {"path": str(data), "title": "Sales"})
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    assert _do(c, model.START).pairings == ()
+    page = _ask_to_pair(outside, _sha(data))
+    state = _do(c, REFRESH)
+    (request,) = state.pairings
+    assert request.text.code == page["code"] and request.text.title == "Sales"
+    # 300s less however long the fetch took: none at all with Windows' 15.6ms clock ticks
+    assert request.expires in ("expires in 5m", "expires in 4m")
+    assert notes == [
+        (
+            "Pairing request",
+            "'Sales' wants to pair. To approve, pick the code the page shows in the "
+            "qsv-clientd menu.",
+        )
+    ]
+    assert page["code"] not in repr(notes)  # recognized from the page, never told
+    _do(c, REFRESH)
+    assert len(notes) == 1  # once per request
+    c.submit(model.APPROVE, page["code"]).result(60)
+    assert c.state.pairings == ()
+    poll = outside.http("GET", f"/v1/pair/{page['request_id']}").json()
+    assert poll["status"] == "approved"
+
+
+def test_unregistered_and_non_file_requests_say_so(
+    make_controller: MakeController, outside: DaemonThread, data: Path
+) -> None:
+    _local(outside, "POST", "/v1/datasets", {"path": str(data), "title": "Sales"})
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    stranger = _ask_to_pair(outside, "0" * 64)
+    local = _local(outside, "POST", "/v1/pair", {"digest": _sha(data)})  # origin "local"
+    _do(c, REFRESH)
+    assert sorted(m for _, m in notes) == sorted(
+        [
+            "A schematic that matches no registered dataset wants to pair. Deny it from the "
+            "qsv-clientd menu, or register the dataset first.",
+            "'Sales' wants to pair, from local (not a local file). To approve, pick the code "
+            "the page shows in the qsv-clientd menu.",
+        ]
+    )
+    c.submit(model.DENY, stranger["code"]).result(60)
+    assert [p.text.code for p in c.state.pairings] == [local["code"]]
+    poll = outside.http("GET", f"/v1/pair/{stranger['request_id']}").json()
+    assert poll["status"] == "denied"
+
+
+def test_an_expired_or_unregistered_code_is_a_notification_not_an_error(
+    make_controller: MakeController, outside: DaemonThread
+) -> None:
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    c.submit(model.APPROVE, "ZZZ-999").result(60)
+    stranger = _ask_to_pair(outside, "0" * 64)
+    c.submit(model.APPROVE, stranger["code"]).result(60)  # the menu never offers this
+    assert c.state.mode is Mode.ATTACHED
+    (expired, unregistered) = [n for n in notes if n[0].startswith("Couldn't")]
+    assert expired[0] == "Couldn't approve ZZZ-999" and "expired" in expired[1]
+    assert unregistered[0] == f"Couldn't approve {stranger['code']}"
+    assert "register it first" in unregistered[1]
+
+
+def test_deciding_without_a_daemon(make_controller: MakeController, outside: DaemonThread) -> None:
+    c = make_controller()
+    c.submit(model.DENY, "ABC-123").result(60)  # never started: nothing to tell
+    assert c.state == TrayState()
+    _do(c, model.START)
+    outside.stop()
+    state = c.submit(model.APPROVE, "ABC-123").result(60)
+    assert state is None and c.state.mode is Mode.ERROR  # the daemon went away
+
+
+def test_a_hosted_daemon_lists_requests_too(
+    make_controller: MakeController, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(controller_mod, "DaemonHost", DaemonThread)
+    c = make_controller()
+    _do(c, model.START)
+    assert isinstance(c._host, DaemonThread)
+    page = _ask_to_pair(c._host, "0" * 64)
+    assert [p.text.code for p in _do(c, REFRESH).pairings] == [page["code"]]
+    # and the attention dot goes with the daemon
+    assert _do(c, model.STOP).pairings == ()
+
+
+def test_picking_a_decoy_denies_the_request(
+    make_controller: MakeController, outside: DaemonThread, data: Path
+) -> None:
+    _local(outside, "POST", "/v1/datasets", {"path": str(data), "title": "Sales"})
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    page = _ask_to_pair(outside, _sha(data))
+    _do(c, REFRESH)
+    c.submit(model.WRONG_CODE, page["code"]).result(60)
+    assert c.state.pairings == ()
+    assert outside.http("GET", f"/v1/pair/{page['request_id']}").json()["status"] == "denied"
+    title, message = notes[-1]
+    assert title == "Pairing denied" and message.startswith("The code you picked isn't")
+
+
+def test_a_decoy_picked_for_an_expired_request_says_only_that(
+    make_controller: MakeController, outside: DaemonThread
+) -> None:
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    c.submit(model.WRONG_CODE, "ZZZ-999").result(60)
+    assert [title for title, _ in notes] == ["Couldn't deny ZZZ-999"]
