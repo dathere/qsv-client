@@ -366,8 +366,10 @@ def test_a_stop_that_timed_out_is_tried_again(
 
 def test_the_default_daemon_reads_daemon_json(home: Path, fake_qsv: Callable[[str], str]) -> None:
     (home / "daemon.json").write_text(json.dumps({"binary": fake_qsv(""), "port": 0}))
-    daemon = controller_mod._load_daemon()
+    daemon = controller_mod.load_daemon()
     assert daemon.binary == fake_qsv("") and daemon.config.port == 0
+    (home / "daemon.json").write_text(json.dumps({"binary": "qsv", "port": 0}))  # bare name
+    assert controller_mod.load_daemon(fake_qsv("")).binary == fake_qsv("")  # --binary wins
 
 
 # -- pairing requests ---------------------------------------------------------------------------
@@ -918,3 +920,20 @@ def test_start_at_login_failures_are_notifications(
     with caplog.at_level(logging.WARNING, logger="qsv_client.tray"):
         assert _do(c, model.RETRY).autostart is None  # unknown: the item goes away
     assert "couldn't tell whether the tray starts at login" in caplog.text
+
+
+def test_an_unwritable_config_directory_is_a_notification(
+    make_controller: MakeController, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def read_only(self: Path, *args: Any, **kwargs: Any) -> None:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "write_text", read_only)
+    c = make_controller()
+    opened = _opener(c)
+    notes = Notes()
+    c.notify = notes
+    c._set(mode=Mode.HOSTED)
+    c.submit(model.OPEN_CONFIG).result(60)
+    assert opened == [] and c.state.mode is Mode.HOSTED
+    assert notes[0][0] == "Couldn't create daemon.json" and "Permission denied" in notes[0][1]

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import sys
 
 from ..daemon import logs
 from ..daemon.config import log_path, runtime_dir
 from . import _lock, app, autostart
-from .controller import Controller
+from .controller import Controller, load_daemon
 
 log = logging.getLogger("qsv_client.tray")
 
@@ -21,6 +22,7 @@ def _parser() -> argparse.ArgumentParser:
         prog=TITLE, description="A system tray icon that runs and controls qsv-clientd."
     )
     p.add_argument("-v", "--verbose", action="store_true", help="log debug messages too")
+    p.add_argument("--binary", help="qsv binary to use (overrides daemon.json)")
     login = p.add_mutually_exclusive_group()
     login.add_argument(
         "--enable-autostart", action="store_true", help="start the tray at login, then exit"
@@ -64,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     logs.configure_logging(logging.DEBUG if ns.verbose else logging.INFO, log_path())
     logging.getLogger("PIL").setLevel(logging.INFO)  # its debug lines are PNG chunk dumps
-    controller = Controller()
+    controller = Controller(make_daemon=functools.partial(load_daemon, ns.binary))
     try:
         app.run(controller)
     except Exception as exc:

@@ -36,16 +36,20 @@ _PAIRING_ACTIONS = frozenset({model.APPROVE, model.DENY, model.WRONG_CODE})
 _STATUS_WAIT = 5.0
 
 
-def _load_daemon() -> Daemon:
-    # read daemon.json afresh each time, so a restart picks up edits
-    return Daemon(DaemonConfig.load())
+def load_daemon(binary: str | None = None) -> Daemon:
+    """A daemon from daemon.json, read afresh each time so a restart picks up edits.
+    ``binary`` overrides its ``binary``, as `qsv-clientd serve --binary` does."""
+    config = DaemonConfig.load()
+    if binary is not None:
+        config.binary = binary
+    return Daemon(config)
 
 
 class Controller:
     def __init__(
         self,
         *,
-        make_daemon: Callable[[], Daemon] = _load_daemon,
+        make_daemon: Callable[[], Daemon] = load_daemon,
         attach: Callable[[], DaemonClient] = DaemonClient,
         service_installed: Callable[[], ServiceKind | None] = service.service_installed,
         stop_service: Callable[[], str] = service.stop_service,
@@ -475,9 +479,13 @@ class Controller:
         """Open the default daemon.json, creating it as ``{}`` (the only safe seed: unknown
         keys are errors) so there is something to edit."""
         path = config_dir() / "daemon.json"
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}\n", encoding="utf-8")
+        try:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n", encoding="utf-8")
+        except OSError as exc:  # a read-only config directory: no reason to show an error state
+            self.notify("Couldn't create daemon.json", str(exc))
+            return
         if not self._open(path):
             return
         state = self.state

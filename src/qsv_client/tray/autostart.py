@@ -102,10 +102,11 @@ def enable() -> str:
         path = _plist_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         # not kept alive, so Quit stays quit; written, not loaded, or a second tray starts now
+        # and pass it as --binary too: daemon.json's `binary` may be a bare name, which would
+        # outrank QSV_BIN and which launchd's PATH can't resolve (as `qsv-clientd install`)
+        argv = [*command(), "--binary", env["QSV_BIN"]]
         path.write_text(
-            launchd_plist(
-                command(), env, label=LABEL, keep_alive=False, log=stderr, session_type="Aqua"
-            )
+            launchd_plist(argv, env, label=LABEL, keep_alive=False, log=stderr, session_type="Aqua")
         )
         return f"the tray will start at login ({path})"
     if sys.platform.startswith("linux"):

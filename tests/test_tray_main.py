@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import functools
 import logging
 import shutil
 import sys
@@ -172,3 +173,11 @@ def test_the_autostart_flags_are_exclusive(capsys: pytest.CaptureFixture[str]) -
     with pytest.raises(SystemExit):
         cli.main(["--enable-autostart", "--disable-autostart"])
     assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_binary_overrides_daemon_json(fake_gui: Recorder) -> None:
+    assert cli.main(["--binary", "/opt/q s/qsv"]) == 0
+    make = fake_gui.runs[0]._make_daemon
+    assert isinstance(make, functools.partial) and make.args == ("/opt/q s/qsv",)
+    assert cli.main([]) == 0
+    assert fake_gui.runs[1]._make_daemon.args == (None,)  # type: ignore[attr-defined]

@@ -144,7 +144,7 @@ def install() -> str:
     return (
         "automatic install is not supported on this platform. The system tray can run "
         "qsv-clientd and start at logon instead:\n"
-        "  pip install 'qsv-client[tray]' && qsv-clientd-tray --enable-autostart\n"
+        '  pip install "qsv-client[tray]" && qsv-clientd-tray --enable-autostart\n'
         "or, to start qsv-clientd itself at logon, run:\n"
         f'  schtasks /Create /SC ONLOGON /TN qsv-clientd /TR "{task}"'
     )

@@ -53,7 +53,8 @@ def test_macos(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert autostart.is_enabled() is True
     plist = plistlib.loads(path.read_bytes())
     assert plist["Label"] == autostart.LABEL
-    assert plist["ProgramArguments"] == ["/opt/bin/qsv-clientd-tray"]
+    # --binary too: a bare `binary` in daemon.json would outrank QSV_BIN on launchd's PATH
+    assert plist["ProgramArguments"] == ["/opt/bin/qsv-clientd-tray", "--binary", "/opt/q s/qsv"]
     assert plist["EnvironmentVariables"] == {"QSV_BIN": "/opt/q s/qsv"}  # launchd's PATH lacks qsv
     assert plist["KeepAlive"] is False and plist["RunAtLoad"] is True  # Quit stays quit
     assert plist["LimitLoadToSessionType"] == "Aqua"  # a GUI login only
