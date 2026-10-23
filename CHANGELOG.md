@@ -42,12 +42,12 @@ All notable changes to this project are documented here. The format follows
 - A daemon re-render dropped the schematic's `source`: it renders from the daemon's own copy
   of the data, for which qsv records none. The new page now keeps the previous page's
   `source` while it still names the dataset's source URL. The daemon never adds one itself,
-  since only qsv knows whether a download was public.
+  since only qsv knows whether a download was public. ([#35](https://github.com/dathere/qsv-client/pull/35))
 - `register` printed the schematic's viz arguments, and its "Use these arguments?"
   question, on stdout before the registration's JSON. They are on stderr now, so stdout can
-  be piped to `jq`. So is `approve`'s question.
+  be piped to `jq`. So is `approve`'s question. ([#35](https://github.com/dathere/qsv-client/pull/35))
 - The `fingerprint_mismatch` refusal said "pass force"; it now says to register with
-  `--force`.
+  `--force`. ([#35](https://github.com/dathere/qsv-client/pull/35))
 
 ## [0.5.0] - 2026-10-21
 
