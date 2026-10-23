@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from .. import __version__
+from .._process import _finish_despite_cancel
 from ..client import AsyncQsv, QsvResult, find_qsv
 from ..errors import EXIT_TIMEOUT, SUCCESS_EXIT_CODES, QsvError, QsvTimeout, error_from_run
 from . import fetch
@@ -590,7 +591,8 @@ class Daemon:
             raise HttpError(exc.status, exc.code, str(exc)) from None
         # left 0600 as mkstemp made it: the data may be private (a CKAN token, a signed URL)
         try:
-            _publish_new(staged, path)
+            # off the event loop: without hard links it copies, up to fetch_max_bytes
+            await _finish_despite_cancel(asyncio.to_thread(_publish_new, staged, path))
         finally:
             staged.unlink(missing_ok=True)
         log.info("download finished: %s", path)
@@ -1032,11 +1034,15 @@ def _publish_new(staged: Path, path: Path) -> None:
             fd = os.open(path, flags, 0o600)
         except FileExistsError:
             raise exists from None
+        ours = os.fstat(fd)
         try:
             with os.fdopen(fd, "wb") as out, staged.open("rb") as src:
                 shutil.copyfileobj(src, out)
         except BaseException:
-            path.unlink(missing_ok=True)
+            # only the partial copy: another process may have replaced it meanwhile
+            with contextlib.suppress(OSError):
+                if os.path.samestat(ours, os.stat(path)):
+                    path.unlink()
             raise
 
 

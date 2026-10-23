@@ -714,7 +714,17 @@ def test_registering_a_url_downloads_it_beside_the_schematic(
     start_daemon: StartDaemon,
     tmp_path: Path,
     web_csv: Callable[..., str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    real_publish = server._publish_new
+
+    def publish(staged: Path, path: Path) -> None:
+        # off the event loop: without hard links, publishing copies up to fetch_max_bytes
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
+        real_publish(staged, path)
+
+    monkeypatch.setattr(server, "_publish_new", publish)
     url = web_csv("/inventory.csv", b"name,n\nalpha,1\n")
     d = start_daemon(fake_qsv(GENERIC))
     target = tmp_path / "inventory.csv"
@@ -900,3 +910,26 @@ def test_a_failed_copy_leaves_no_partial_file(
     with pytest.raises(OSError):
         server._publish_new(staged, target)
     assert not target.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows can't replace an open file")
+def test_a_failed_copy_keeps_a_file_that_replaced_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged, target = tmp_path / ".staged.csv", tmp_path / "d.csv"
+    staged.write_text("name\ndownloaded\n")
+    theirs = tmp_path / "theirs.csv"
+    theirs.write_text("name\nmine\n")
+
+    def no_links(src: Path, dst: Path) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    def replaced_then_disk_full(src: Any, dst: Any) -> None:
+        os.replace(theirs, target)  # another process swaps in its own file mid-copy
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setattr(shutil, "copyfileobj", replaced_then_disk_full)
+    with pytest.raises(OSError):
+        server._publish_new(staged, target)
+    assert target.read_text() == "name\nmine\n"
