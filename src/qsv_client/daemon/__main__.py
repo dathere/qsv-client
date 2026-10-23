@@ -7,7 +7,10 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import sys
+import urllib.parse
+import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +20,11 @@ from ._text import NO_DATASET, describe_pairing
 from .client import DaemonClient
 from .config import DaemonConfig
 from .registry import SchematicSource
+
+_CKAN_API_HELP = (
+    "the CKAN site (https://data.example.gov) or its Action API URL, for ckan:// sources"
+)
+_URL_SCHEMES = ("http", "https", "ckan", "dathere", "s3", "gs", "az")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -59,11 +67,30 @@ def _parser() -> argparse.ArgumentParser:
     )
     reg.add_argument("--force", action="store_true", help="register even if fingerprints differ")
     reg.add_argument("-y", "--yes", action="store_true", help="accept embedded viz arguments")
+    reg.add_argument("--ckan-api", help=_CKAN_API_HELP)
 
-    v = sub.add_parser("viz", help="render a schematic through the daemon and register it")
-    v.add_argument("data", type=Path)
-    v.add_argument("-o", "--output", type=Path, required=True)
-    v.add_argument("--source-url")
+    v = sub.add_parser(
+        "viz",
+        help="render a schematic through the daemon and register it",
+        description="Render a Data Schematic through the daemon and register it. DATA may be a "
+        "URL instead of a file: an http(s) download link, ckan://<id>, or a CKAN resource or "
+        "dataset page. The data is then downloaded first, and the URL is where Fetch latest "
+        "gets new data from.",
+    )
+    v.add_argument("data", help="a data file, or a URL to download it from")
+    v.add_argument(
+        "-o", "--output", type=Path, help="the schematic to write (default: DATA's name, .html)"
+    )
+    v.add_argument("--source-url", help="where to fetch the latest data from (for a file DATA)")
+    v.add_argument("--ckan-api", help=_CKAN_API_HELP)
+    v.add_argument(
+        "--save-as",
+        type=Path,
+        help="where to save downloaded data (default: beside the schematic, named after the URL)",
+    )
+    v.add_argument(
+        "--no-open", action="store_true", help="don't open the schematic in your browser"
+    )
 
     sub.add_parser("datasets", help="list registered datasets")
     f = sub.add_parser("forget", help="unregister a dataset and revoke its tokens")
@@ -140,8 +167,55 @@ def _register(client: DaemonClient, ns: argparse.Namespace) -> int:
         "title": ns.title,
         "allow_replace": ns.allow_replace,
         "force": ns.force,
+        "ckan_api": ns.ckan_api,
     }
     _print(client.request("POST", "/v1/datasets", body, wait=None))
+    return 0
+
+
+def _is_url(value: str) -> bool:
+    scheme, sep, _ = value.partition("://")
+    return bool(sep) and scheme.lower() in _URL_SCHEMES
+
+
+def _data_name(url: str) -> str:
+    """A file name for data downloaded from ``url``: its last path segment, as CSV if unsure."""
+    parts = urllib.parse.urlsplit(url)
+    segments = [s for s in parts.path.split("/") if s] or [parts.netloc]
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", urllib.parse.unquote(segments[-1])).strip("._")
+    name = name or "data"
+    if not name.lower().endswith((".csv", ".tsv", ".tab", ".ssv")):
+        name += ".csv"
+    return name
+
+
+def _viz(client: DaemonClient, ns: argparse.Namespace) -> int:
+    body: dict[str, Any] = {"viz_args": ns.viz_args, "ckan_api": ns.ckan_api, "render": True}
+    if _is_url(ns.data):
+        if ns.source_url is not None:
+            print(
+                "qsv-clientd: --source-url is for a file; the URL given is the source",
+                file=sys.stderr,
+            )
+            return 2
+        folder = ns.output.parent if ns.output is not None else Path.cwd()
+        data = (ns.save_as or folder / _data_name(ns.data)).resolve()
+        body.update(path=str(data), source_url=ns.data, download=True)
+    else:
+        data = Path(ns.data).resolve()
+        body.update(path=str(data), source_url=ns.source_url)
+    output = (ns.output or data.with_suffix(".html")).resolve()
+    body["schematic_path"] = str(output)
+    _print(client.request("POST", "/v1/datasets", body, wait=None))
+    if body.get("download"):
+        print(f"Saved the data to {data}", file=sys.stderr)
+    print(f"Wrote the Data Schematic to {output}", file=sys.stderr)
+    opened = not ns.no_open and sys.stdin.isatty() and webbrowser.open(output.as_uri())
+    if not opened:
+        print(f"Open it in your browser: {output.as_uri()}", file=sys.stderr)
+    print(
+        "When the page shows a code, approve it with: qsv-clientd approve <CODE>", file=sys.stderr
+    )
     return 0
 
 
@@ -211,14 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         elif ns.cmd == "register":
             return _register(client, ns)
         elif ns.cmd == "viz":
-            body = {
-                "path": str(ns.data.resolve()),
-                "viz_args": ns.viz_args,
-                "schematic_path": str(ns.output.resolve()),
-                "source_url": ns.source_url,
-                "render": True,
-            }
-            _print(client.request("POST", "/v1/datasets", body, wait=None))
+            return _viz(client, ns)
         elif ns.cmd == "datasets":
             _print(client.request("GET", "/v1/datasets"))
         elif ns.cmd == "forget":

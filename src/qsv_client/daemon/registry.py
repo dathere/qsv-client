@@ -60,9 +60,15 @@ class SchematicSource:
     qsv_version: str | None
     redacted: tuple[str, ...] = ()
     """viz flags whose file values were reduced to a basename; re-supply them to re-render."""
+    source_url: str | None = None
+    """Where the data came from, when qsv rendered it from a ``qsv get`` (``dc:``) download."""
+    ckan_api: str | None = None
+    """The CKAN Action API a ``ckan://`` ``source_url`` was resolved against."""
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> SchematicSource:
+        src = data.get("source")
+        src = src if isinstance(src, dict) else {}
         fp = data.get("fingerprint")
         fingerprint = None
         if (
@@ -82,6 +88,8 @@ class SchematicSource:
             redacted=tuple(r for r in red if isinstance(r, str))
             if isinstance(red := data.get("redacted"), list)
             else (),
+            source_url=_opt_str(src.get("url")),
+            ckan_api=_opt_str(src.get("ckan_api")),
         )
 
     @classmethod
@@ -126,6 +134,9 @@ class Dataset:
     allow_replace: bool = False
     original_path: str | None = None
     """The user's file, when ``path`` points at a fetched copy instead."""
+    ckan_api: str | None = None
+    """The CKAN Action API ``ckan://`` sources resolve against (else the daemon's
+    ``QSV_CKAN_API``)."""
 
     @property
     def fingerprint(self) -> Fingerprint:
@@ -180,8 +191,14 @@ class Registry:
         pid: str | None = None,
         source_url: str | None = None,
         allow_replace: bool = False,
+        ckan_api: str | None = None,
+        dataset_id: str | None = None,
     ) -> Dataset:
-        """Register ``path``, or update its entry; settings not given keep their old values."""
+        """Register ``path``, or update its entry; settings not given keep their old values.
+
+        The schematic's own provenance fills in a source URL (and its CKAN API) not given.
+        ``dataset_id`` is the id a new entry gets (an existing one keeps its own).
+        """
         resolved = str(path.resolve())
         old = next(
             (d for d in self.datasets.values() if resolved in (d.path, d.original_path)), None
@@ -194,8 +211,11 @@ class Registry:
         else:
             same = old is not None and old.schematic_path == schematic
             schematic_uuid = old.schematic_uuid if same and old is not None else None
+        if source_url is None and source is not None and source.source_url:
+            source_url = source.source_url
+            ckan_api = ckan_api or source.ckan_api
         ds = Dataset(
-            id=old.id if old else uuid.uuid4().hex,
+            id=old.id if old else (dataset_id or uuid.uuid4().hex),
             path=resolved,
             algo=fingerprint.algo,
             digest=fingerprint.digest,
@@ -207,6 +227,7 @@ class Registry:
             pid=pid or (source.pid if source else None) or (old.pid if old else None),
             source_url=source_url or (old.source_url if old else None),
             allow_replace=allow_replace or (old.allow_replace if old else False),
+            ckan_api=ckan_api or (old.ckan_api if old else None),
         )
         self.datasets[ds.id] = ds
         self.save()

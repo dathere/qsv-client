@@ -121,11 +121,20 @@ def test_unknown_subcommand(capsys: pytest.CaptureFixture[str]) -> None:
     assert "invalid choice" in capsys.readouterr().err
 
 
-def test_viz_requires_output(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["viz", "data.csv"])
-    assert exc.value.code == 2
-    assert "--output" in capsys.readouterr().err
+def test_viz_output_defaults_beside_the_data(
+    fake_client: Callable[..., FakeClient],
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _no_tty(monkeypatch)
+    fake = fake_client()
+    assert cli.main(["viz", "sub/data.csv"]) == 0
+    body = fake.requests[0][2]
+    assert body is not None
+    assert body["schematic_path"] == str((tmp_path / "sub" / "data.html").resolve())
+    assert "download" not in body
 
 
 def test_argv_defaults_to_sys_argv(
@@ -457,11 +466,21 @@ def test_register_sends_resolved_paths(
                 "title": "T",
                 "allow_replace": True,
                 "force": True,
+                "ckan_api": None,
             },
             None,
         )
     ]
     assert _out_json(capsys) == {"id": "ds1"}
+
+
+def test_register_sends_the_ckan_api(fake_client: Callable[..., FakeClient]) -> None:
+    fake = fake_client()
+    argv = ["register", "d.csv", "--source-url", "ckan://abc", "--ckan-api", "https://c.x"]
+    assert cli.main(argv) == 0
+    body = fake.requests[0][2]
+    assert body is not None
+    assert (body["source_url"], body["ckan_api"]) == ("ckan://abc", "https://c.x")
 
 
 def test_register_viz_args_after_double_dash(
@@ -569,9 +588,11 @@ def test_viz_renders_through_the_daemon(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    _no_tty(monkeypatch)
     fake = fake_client({("POST", "/v1/datasets"): {"id": "ds1"}})
     argv = ["viz", "d.csv", "-o", "out.html", "--source-url", "https://e.x/d.csv"]
     assert cli.main([*argv, "--", "--theme", "dark"]) == 0
+    out = (tmp_path / "out.html").resolve()
     assert fake.requests == [
         (
             "POST",
@@ -579,14 +600,126 @@ def test_viz_renders_through_the_daemon(
             {
                 "path": str((tmp_path / "d.csv").resolve()),
                 "viz_args": ["--theme", "dark"],
-                "schematic_path": str((tmp_path / "out.html").resolve()),
+                "schematic_path": str(out),
                 "source_url": "https://e.x/d.csv",
+                "ckan_api": None,
                 "render": True,
             },
             None,
         )
     ]
-    assert _out_json(capsys) == {"id": "ds1"}
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"id": "ds1"}
+    assert f"Wrote the Data Schematic to {out}\n" in captured.err
+    # no terminal: nothing is opened, the page's address is printed instead
+    assert f"Open it in your browser: {out.as_uri()}\n" in captured.err
+    assert "qsv-clientd approve <CODE>" in captured.err
+    assert "Saved the data" not in captured.err
+
+
+RESOURCE_PAGE = (
+    "https://data.example.gov/dataset/housing/resource/bfdeffc7-ab5e-4e28-9561-d4e84c9674e4"
+)
+
+
+def test_viz_downloads_a_url_first(
+    fake_client: Callable[..., FakeClient],
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _no_tty(monkeypatch)
+    fake = fake_client({("POST", "/v1/datasets"): {"id": "ds1"}})
+    assert cli.main(["viz", RESOURCE_PAGE, "--ckan-api", "https://c.x"]) == 0
+    data = (tmp_path / "bfdeffc7-ab5e-4e28-9561-d4e84c9674e4.csv").resolve()
+    assert fake.requests == [
+        (
+            "POST",
+            "/v1/datasets",
+            {
+                "path": str(data),
+                "viz_args": [],
+                "schematic_path": str(data.with_suffix(".html")),
+                "source_url": RESOURCE_PAGE,
+                "ckan_api": "https://c.x",
+                "render": True,
+                "download": True,
+            },
+            None,
+        )
+    ]
+    assert f"Saved the data to {data}\n" in capsys.readouterr().err
+
+
+def test_viz_saves_a_download_beside_the_output_or_where_asked(
+    fake_client: Callable[..., FakeClient], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_tty(monkeypatch)
+    fake = fake_client()
+    out = tmp_path / "pages" / "x.html"
+    assert cli.main(["viz", "https://e.x/a/b.tsv", "-o", str(out)]) == 0
+    assert cli.main(["viz", "ckan://abc", "--save-as", str(tmp_path / "mine.csv")]) == 0
+    first, second = (r[2] for r in fake.requests)
+    assert first is not None and second is not None
+    assert first["path"] == str((tmp_path / "pages" / "b.tsv").resolve())
+    assert first["schematic_path"] == str(out.resolve())
+    assert second["path"] == str((tmp_path / "mine.csv").resolve())
+    assert second["schematic_path"] == str((tmp_path / "mine.html").resolve())
+
+
+def test_viz_refuses_a_source_url_with_a_url(
+    fake_client: Callable[..., FakeClient], capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = fake_client()
+    assert cli.main(["viz", "https://e.x/d.csv", "--source-url", "https://e.x/e.csv"]) == 2
+    assert fake.requests == []
+    assert "--source-url is for a file" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("argv", "opens", "opened"),
+    [([], True, True), ([], False, False), (["--no-open"], True, None)],
+)
+def test_viz_opens_the_schematic_from_a_terminal(
+    fake_client: Callable[..., FakeClient],
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    opens: bool,
+    opened: bool | None,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", Terminal())
+    seen: list[str] = []
+
+    def open_(url: str) -> bool:
+        seen.append(url)
+        return opens
+
+    monkeypatch.setattr("webbrowser.open", open_)
+    fake_client()
+    out = tmp_path / "d.html"
+    assert cli.main(["viz", str(tmp_path / "d.csv"), *argv]) == 0
+    assert seen == ([] if opened is None else [out.as_uri()])
+    # when nothing opened it, say where it is
+    assert ("Open it in your browser" in capsys.readouterr().err) is not bool(opened)
+
+
+@pytest.mark.parametrize(
+    ("url", "name"),
+    [
+        (RESOURCE_PAGE, "bfdeffc7-ab5e-4e28-9561-d4e84c9674e4.csv"),
+        ("https://h.x/dataset/d/resource/r/download/inventory-2022.csv", "inventory-2022.csv"),
+        ("https://h.x/dataset/housing", "housing.csv"),
+        ("ckan://abc-123", "abc-123.csv"),
+        ("https://h.x/", "h.x.csv"),
+        ("https://h.x/a%20b.TSV?x=1", "a_b.TSV"),
+        ("https://h.x/...", "data.csv"),
+    ],
+)
+def test_data_name(url: str, name: str) -> None:
+    assert cli._data_name(url) == name
 
 
 # -- approve ----------------------------------------------------------------------------------

@@ -400,3 +400,45 @@ def test_contains_regex_is_literal_and_never_a_flag() -> None:
         assert not pattern.startswith("-")
         assert re.search(pattern, f"before {value} after")
         assert not re.search(pattern, value.replace(value[0], "z", 1) + "!" if value else "")
+
+
+@pytest.mark.parametrize(
+    ("source", "url", "api"),
+    [
+        (
+            {"url": "ckan://abc", "ckan_api": "https://c.x/api/3/action"},
+            "ckan://abc",
+            "https://c.x/api/3/action",
+        ),
+        ({"url": "https://h/d.csv"}, "https://h/d.csv", None),
+        ({"url": 5, "ckan_api": ""}, None, None),
+        ("https://h/d.csv", None, None),  # not an object
+    ],
+)
+def test_schematic_source_reads_where_the_data_came_from(
+    source: object, url: str | None, api: str | None
+) -> None:
+    src = SchematicSource.from_json({"schematic_uuid": "u", "source": source})
+    assert (src.source_url, src.ckan_api) == (url, api)
+
+
+def test_register_takes_the_source_url_from_the_schematic(tmp_path: Path) -> None:
+    reg = Registry(tmp_path / "registry.json")
+    data = tmp_path / "d.csv"
+    data.write_text("a\n1\n")
+    fp = Fingerprint.sha256_of(data)
+    page = SchematicSource.from_json(
+        {"source": {"url": "ckan://abc", "ckan_api": "https://c.x/api/3/action"}}
+    )
+    ds = reg.add(data, fingerprint=fp, viz_args=[], source=page)
+    assert (ds.source_url, ds.ckan_api) == ("ckan://abc", "https://c.x/api/3/action")
+    # an explicit source wins, and a schematic without one leaves the registered one alone
+    ds = reg.add(data, fingerprint=fp, viz_args=[], source=page, source_url="https://h/d.csv")
+    assert ds.source_url == "https://h/d.csv"
+    ds = reg.add(data, fingerprint=fp, viz_args=[], source=SchematicSource.from_json({}))
+    assert (ds.source_url, ds.ckan_api) == ("https://h/d.csv", "https://c.x/api/3/action")
+    # entries written before ckan_api existed still load
+    raw = json.loads((tmp_path / "registry.json").read_text())
+    del raw["datasets"][0]["ckan_api"]
+    (tmp_path / "registry.json").write_text(json.dumps(raw))
+    assert Registry(tmp_path / "registry.json").datasets[ds.id].ckan_api is None

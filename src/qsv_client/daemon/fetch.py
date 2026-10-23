@@ -9,6 +9,15 @@ can trigger a fetch but never chooses the URL: both come from the registry.
 - A DOI (``doi:10...``, ``10....``, or a doi.org URL) is resolved with DataCite content
   negotiation, looking for a ``contentUrl``. Most DOIs point at a landing page instead;
   then the user must register ``--source-url``.
+- A CKAN resource page (``<site>/dataset/<name>/resource/<id>``) is read as ``ckan://<id>``
+  on that site, and a CKAN dataset page (``<site>/dataset/<name>``) as its one tabular
+  resource, found with ``package_show``.
+- ``ckan://`` sources resolve against the dataset's own CKAN API (``ckan_api``), else the
+  daemon's ``QSV_CKAN_API``; with neither they are refused rather than sent to qsv's default
+  CKAN site.
+
+Whatever arrives must be data: a web page (a landing page, a sign-in form) is refused before
+it can replace anything.
 """
 
 from __future__ import annotations
@@ -20,6 +29,7 @@ import glob
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import tempfile
@@ -27,6 +37,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -40,8 +51,18 @@ if TYPE_CHECKING:
 
 _QSV_GET_SCHEMES = ("ckan", "dathere", "s3", "gs", "az")
 _DATA_SUFFIXES = (".csv", ".tsv", ".tab", ".ssv", ".txt")
+_TABULAR_FORMATS = ("csv", "tsv", "tab", "ssv", "text/csv", "text/tab-separated-values")
 _HTTP_TIMEOUT = 60.0
 _UA = "qsv-clientd"
+_CKAN_ACTION_PATH = "/api/3/action"
+_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+# CKAN may be mounted below the host's root, so the site is everything before /dataset/
+_CKAN_RESOURCE_PAGE = re.compile(
+    r"^(?P<site>https?://[^?#]+?)/dataset/[^/?#]+/resource/(?P<rid>" + _UUID + r")/?(?:[?#].*)?$"
+)
+_CKAN_DATASET_PAGE = re.compile(
+    r"^(?P<site>https?://[^?#]+?)/dataset/(?P<name>[^/?#]+)/?(?:[?#].*)?$"
+)
 
 
 class FetchError(Exception):
@@ -62,20 +83,44 @@ async def fetch_latest(daemon: Daemon, ds: Dataset, *, force: bool = False) -> d
         return await _fetch_locked(daemon, ds, source, force)
 
 
-async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -> dict[str, Any]:
-    cache = ensure_private_dir(daemon.home / "cache" / ds.id)
+async def download(
+    daemon: Daemon,
+    source: str,
+    staging_dir: Path,
+    *,
+    name: str,
+    ckan_api: str | None = None,
+    ds: Dataset | None = None,
+    what: str = "the source URL",
+) -> tuple[Path, str]:
+    """Download ``source`` into a new private file in ``staging_dir`` and check that it is data.
+
+    Returns the file, which the caller owns (and must remove or move), and how the source was
+    resolved (``url``, ``doi`` or ``ckan``). ``name`` is the qsv cache entry ``get`` uses.
+    ``what`` names the source in errors ("the PID", "the source URL").
+    """
     # threads can't be cancelled, so a disconnect waits for them (_finish_despite_cancel)
-    # before the staging file is removed and the lock released
-    incoming = _private_temp(cache, ".incoming" + _suffix(source))
+    # before the staging file is removed
+    incoming = _private_temp(staging_dir, ".incoming" + _suffix(source))
     try:
-        url, via = await _resolve(source)
+        target = await _resolve(source, ckan_api)
+        url = target.url
         scheme = urllib.parse.urlsplit(url).scheme.lower()
         caps = await daemon._qsv.capabilities()
+        has_get = caps.has_command("get")
         max_bytes, timeout = daemon.config.fetch_max_bytes, daemon.config.fetch_timeout
-        if caps.has_command("get") and (scheme in _QSV_GET_SCHEMES or scheme in ("http", "https")):
-            name = f"qsv-clientd-{ds.id}.csv"
+        if scheme == "ckan" and not has_get:
+            # the prebuilt qsv has no `get`: look the resource up here, then download its data
+            url = await asyncio.to_thread(_ckan_data_url, _ckan_api_for(target), url)
+            scheme = urllib.parse.urlsplit(url).scheme.lower()
+            if scheme not in ("http", "https"):
+                raise FetchError(422, "bad_source", f"the CKAN resource's data is at {url!r}")
+        if has_get and (scheme in _QSV_GET_SCHEMES or scheme in ("http", "https")):
+            argv = ["get", url, "--name", name]
+            if scheme == "ckan":
+                argv += ["--ckan-api", _ckan_api_for(target)]
             try:
-                await daemon._browser_run(ds, ["get", url, "--name", name], timeout=timeout)
+                await daemon._browser_run(ds, argv, timeout=timeout)
                 await daemon._browser_run(
                     ds, ["get", "cache-fetch", name, "--output", str(incoming)], timeout=timeout
                 )
@@ -97,13 +142,37 @@ async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -
                     max_bytes=max_bytes,
                     timeout=timeout,
                     downloads=daemon.downloads,
+                    what=what,
                 )
             )
         else:
             raise FetchError(422, "bad_source", f"unsupported source scheme {scheme!r}")
 
+        # `qsv get` keeps whatever the server sent, a landing page included, and an HTML page
+        # can even parse as CSV, so look before `count` turns it into a cryptic CSV error
+        if _looks_like_html(incoming):
+            raise _web_page(what)
         # every record must parse: a truncated download or ragged rows must not replace good data
         await daemon._browser_run(ds, ["count", str(incoming)])
+    except BaseException:
+        incoming.unlink(missing_ok=True)
+        raise
+    return incoming, target.via
+
+
+async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -> dict[str, Any]:
+    cache = ensure_private_dir(daemon.home / "cache" / ds.id)
+    what = "the source URL" if ds.source_url else "the PID"
+    incoming, via = await download(
+        daemon,
+        source,
+        cache,
+        name=f"qsv-clientd-{ds.id}.csv",
+        ckan_api=ds.ckan_api,
+        ds=ds,
+        what=what,
+    )
+    try:
         # An error page served as text/plain still "parses" as one-column CSV, so also require
         # every column the data has now (new ones are fine): the viz arguments may name any
         headers = await _headers(daemon, ds, incoming)
@@ -178,19 +247,155 @@ def _suffix(source: str) -> str:
     return next((s for s in _DATA_SUFFIXES if path.endswith(s)), ".csv")
 
 
-async def _resolve(source: str) -> tuple[str, str]:
+@dataclass(frozen=True)
+class _Target:
+    url: str
+    via: str
+    ckan_api: str | None
+
+
+async def _resolve(source: str, ckan_api: str | None = None) -> _Target:
     doi = _doi(source)
-    if doi is None:
-        return source, "url"
-    url = await asyncio.to_thread(_datacite_content_url, doi)
-    if url is None:
+    if doi is not None:
+        url = await asyncio.to_thread(_datacite_content_url, doi)
+        if url is None:
+            raise FetchError(
+                422,
+                "pid_not_data",
+                f"DOI {doi} does not advertise a downloadable file; "
+                "register the data URL with --source-url",
+            )
+        return _Target(url, "doi", ckan_api)
+    page = ckan_resource_page(source)
+    if page is not None:
+        rid, api = page
+        return _Target(f"ckan://{rid}", "ckan", api)
+    m = _CKAN_DATASET_PAGE.match(source.strip())
+    if m is not None:
+        api = m["site"] + _CKAN_ACTION_PATH
+        resources = await asyncio.to_thread(_ckan_package_resources, api, m["name"])
+        if resources is not None:  # None: not a CKAN site after all; download it as it is
+            return _Target(f"ckan://{_one_tabular(resources, source)}", "ckan", api)
+    return _Target(source, "url", ckan_api)
+
+
+def _ckan_api_for(target: _Target) -> str:
+    api = target.ckan_api or os.environ.get("QSV_CKAN_API")
+    if not api:
         raise FetchError(
             422,
-            "pid_not_data",
-            f"DOI {doi} does not advertise a downloadable file; "
-            "register the data URL with --source-url",
+            "needs_ckan_api",
+            f"{target.url} does not say which CKAN site it is on; register the dataset "
+            "with --ckan-api <site URL> (or its resource page's URL)",
         )
-    return url, "doi"
+    return api
+
+
+def _ckan_data_url(api: str, url: str) -> str:
+    """The data URL of CKAN resource ``ckan://<id>``, from ``resource_show``, anonymously."""
+    rid = url[len("ckan://") :]
+    if not rid or rid.endswith("?"):
+        raise FetchError(
+            501, "needs_qsv_get", "ckan://<name>? sources need qsv's `get` command; use the id"
+        )
+    req = urllib.request.Request(
+        api.rstrip("/") + "/resource_show?id=" + urllib.parse.quote(rid, safe=""),
+        headers={"Accept": "application/json", "User-Agent": _UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            data = json.load(resp)
+    except (OSError, ValueError) as exc:
+        raise FetchError(
+            502,
+            "download_failed",
+            f"CKAN at {api} did not show resource {rid} ({exc}); a private resource needs "
+            "qsv's `get` command and QSV_CKAN_TOKEN",
+        ) from None
+    result = data.get("result") if isinstance(data, dict) else None
+    data_url = result.get("url") if isinstance(result, dict) else None
+    if not isinstance(data_url, str) or not data_url:
+        raise FetchError(422, "not_data", f"CKAN resource {rid} has no data URL")
+    return data_url
+
+
+def ckan_resource_page(url: str) -> tuple[str, str] | None:
+    """``(resource id, Action API URL)`` for a CKAN resource page URL, else None.
+
+    A resource's ``/download/<file>`` URL is not a page: it serves the data itself.
+    """
+    m = _CKAN_RESOURCE_PAGE.match(url.strip())
+    if m is None:
+        return None
+    return m["rid"].lower(), m["site"] + _CKAN_ACTION_PATH
+
+
+def ckan_api_url(value: str) -> str:
+    """The CKAN Action API URL for ``value``: a site URL gets ``/api/3/action`` appended."""
+    url = value.strip().rstrip("/")
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        raise ValueError(f"the CKAN API must be an http(s) URL, not {value!r}")
+    if "/api/" in parts.path + "/":
+        return url
+    return url + _CKAN_ACTION_PATH
+
+
+def _ckan_package_resources(api: str, name: str) -> list[dict[str, Any]] | None:
+    """The resources of CKAN dataset ``name``, or None when ``api`` doesn't answer as CKAN."""
+    req = urllib.request.Request(
+        api + "/package_show?id=" + urllib.parse.quote(name, safe=""),
+        headers={"Accept": "application/json", "User-Agent": _UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            data = json.load(resp)
+    except (OSError, ValueError):
+        return None
+    result = data.get("result") if isinstance(data, dict) and data.get("success") else None
+    resources = result.get("resources") if isinstance(result, dict) else None
+    if not isinstance(resources, list):
+        return None
+    return [r for r in resources if isinstance(r, dict) and isinstance(r.get("id"), str)]
+
+
+def _one_tabular(resources: list[dict[str, Any]], page: str) -> str:
+    def tabular(r: dict[str, Any]) -> bool:
+        fmt = str(r.get("format") or "").strip().lower()
+        path = urllib.parse.urlsplit(str(r.get("url") or "")).path.lower()
+        return fmt in _TABULAR_FORMATS or path.endswith(_DATA_SUFFIXES)
+
+    found = [r for r in resources if tabular(r)]
+    if len(found) == 1:
+        return str(found[0]["id"])
+    if not found:
+        raise FetchError(
+            422, "not_data", f"the CKAN dataset {page} has no CSV or TSV resource to fetch"
+        )
+    listed = "; ".join(f"{r.get('name') or r['id']}: {r.get('url') or r['id']}" for r in found)
+    raise FetchError(
+        422,
+        "ambiguous_source",
+        f"the CKAN dataset {page} has {len(found)} tabular resources; register the one you "
+        f"want with --source-url ({listed})",
+    )
+
+
+def _looks_like_html(path: Path) -> bool:
+    with path.open("rb") as fh:
+        head = fh.read(1024)
+    head = head.removeprefix(b"\xef\xbb\xbf").lstrip().lower()
+    return head.startswith((b"<!doctype html", b"<html"))
+
+
+def _web_page(what: str) -> FetchError:
+    # "the URL": one given to `qsv-clientd viz`, which has no --source-url to fix it with
+    fix = (
+        "use the data file's download URL instead"
+        if what == "the URL"
+        else "register the data file's download URL with --source-url"
+    )
+    return FetchError(422, "not_data", f"{what} serves a web page, not data; {fix}")
 
 
 def _doi(source: str) -> str | None:
@@ -229,17 +434,25 @@ def _datacite_content_url(doi: str) -> str | None:
 
 
 def _download(
-    url: str, dest: Path, *, max_bytes: int, timeout: float, downloads: Downloads
+    url: str,
+    dest: Path,
+    *,
+    max_bytes: int,
+    timeout: float,
+    downloads: Downloads,
+    what: str = "the source URL",
 ) -> None:
     deadline = time.monotonic() + timeout
     watchdog = _Watchdog(timeout)
     downloads.start(watchdog)
-    opener = urllib.request.build_opener(_WatchedHTTP(watchdog), _WatchedHTTPS(watchdog))
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    opener = urllib.request.build_opener(
+        _WatchedHTTP(watchdog), _WatchedHTTPS(watchdog), _DefaultPortRedirects()
+    )
+    req = urllib.request.Request(_drop_default_port(url), headers={"User-Agent": _UA})
     try:
         with opener.open(req, timeout=min(_HTTP_TIMEOUT, timeout)) as resp:
             if resp.headers.get_content_type() == "text/html":
-                raise FetchError(422, "not_data", "the source URL serves a web page, not data")
+                raise _web_page(what)
             length = resp.headers.get("Content-Length", "")
             if length.isdigit() and int(length) > max_bytes:
                 raise _too_large(max_bytes)
@@ -360,6 +573,34 @@ class _Watchdog:
 
     def cancel(self) -> None:
         self._timer.cancel()
+
+
+def _drop_default_port(url: str) -> str:
+    """``url`` without an explicit default port (``https://h:443/`` → ``https://h/``).
+
+    urllib sends the URL's host and port as ``Host``. A presigned S3 URL (CKAN's S3 storage
+    redirects to one, written with ``:443``) is signed over a ``Host`` without the default
+    port, so sending it with one fails with 403 SignatureDoesNotMatch.
+    """
+    parts = urllib.parse.urlsplit(url)
+    default = {"http": 80, "https": 443}.get(parts.scheme.lower())
+    try:
+        port = parts.port
+    except ValueError:
+        return url
+    if default is None or port != default or parts.hostname is None:
+        return url
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    userinfo = parts.netloc.rpartition("@")[0]
+    netloc = f"{userinfo}@{host}" if userinfo else host
+    return urllib.parse.urlunsplit(parts._replace(netloc=netloc))
+
+
+class _DefaultPortRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> urllib.request.Request | None:
+        return super().redirect_request(req, fp, code, msg, headers, _drop_default_port(newurl))
 
 
 class _WatchedHTTP(urllib.request.HTTPHandler):

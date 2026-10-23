@@ -25,6 +25,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import Path
@@ -506,6 +507,17 @@ class Daemon:
 
     async def _register(self, body: dict[str, Any]) -> Response:
         path = _abs_path(body.get("path"), "path")
+        source_url = _opt(body.get("source_url"))
+        ckan_api = _opt(body.get("ckan_api"))
+        if ckan_api is not None:
+            try:
+                ckan_api = fetch.ckan_api_url(ckan_api)
+            except ValueError as exc:
+                raise HttpError(422, "bad_request", str(exc)) from None
+        dataset_id = None
+        if body.get("download") is True:
+            dataset_id = uuid.uuid4().hex
+            await self._download_new(path, source_url, ckan_api, dataset_id)
         if not path.is_file():
             raise HttpError(422, "not_found", f"no such file: {path}")
         viz_args = _str_list(body.get("viz_args", []), "viz_args")
@@ -541,13 +553,49 @@ class Daemon:
             source=source,
             title=_opt(body.get("title")),
             pid=_opt(body.get("pid")),
-            source_url=_opt(body.get("source_url")),
+            source_url=source_url,
             allow_replace=body.get("allow_replace") is True,
+            ckan_api=ckan_api,
+            dataset_id=dataset_id,
         )
         log.info("dataset registered: %s (%s)", ds.id, ds.path)
         if body.get("render"):
             await self._render_to_disk(ds)
         return Response.json(_private(ds))
+
+    async def _download_new(
+        self, path: Path, source_url: str | None, ckan_api: str | None, dataset_id: str
+    ) -> None:
+        """Download ``source_url`` to ``path``, a file that must not exist yet."""
+        if source_url is None:
+            raise HttpError(422, "bad_request", "download needs a source_url")
+        if path.exists():
+            raise HttpError(409, "exists", f"{path} already exists; register it instead")
+        if not path.parent.is_dir():
+            raise HttpError(422, "not_found", f"no such directory: {path.parent}")
+        # logged by target, not URL: a typed URL may carry a token in its query
+        log.info("download started: %s", path)
+        try:
+            # staged beside the target, so it is moved into place, never copied across devices
+            staged, _via = await fetch.download(
+                self,
+                source_url,
+                path.parent,
+                name=f"qsv-clientd-{dataset_id}.csv",
+                ckan_api=ckan_api,
+                what="the URL",
+            )
+        except fetch.FetchError as exc:
+            log.info("download failed: %s: %s", path, exc.code)
+            raise HttpError(exc.status, exc.code, str(exc)) from None
+        try:
+            if path.exists():  # appeared while downloading: never replace the user's file
+                raise HttpError(409, "exists", f"{path} already exists; register it instead")
+            staged.chmod(0o644)  # mkstemp made it 0600; a downloaded data file is not secret
+            os.replace(staged, path)
+        finally:
+            staged.unlink(missing_ok=True)
+        log.info("download finished: %s", path)
 
     def _pending(self) -> list[dict[str, Any]]:
         out = []
