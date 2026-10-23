@@ -1150,3 +1150,68 @@ def test_stopping_a_running_daemon_does_not_wait_for_a_fetch(
         d.stop()
     assert time.monotonic() - started < 10  # not the 30s the download would take
     assert data.read_text() == "name\nold\n"
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_private_ckan_dataset_page_says_so(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, web: _Routes, status: int
+) -> None:
+    # CKAN refuses an anonymous package_show of a private dataset with 403
+    denied = b'{"success": false, "error": {"__type": "Authorization Error"}}'
+    web.routes["/api/3/action/package_show?id=housing"] = (status, "application/json", denied)
+    web.routes["/dataset/housing"] = (200, "text/html", b"<!doctype html><p>log in</p>")
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, source_url=web.url("/dataset/housing"), allow_replace=True)
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (403, "private_dataset")
+    assert "register the resource's own page URL" in str(info.value)
+    assert data.read_text() == "name\nold\n"
+    assert _staging_files(daemon, ds) == []
+
+
+def test_ckan_metadata_is_size_limited(web: _Routes, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fetch, "_METADATA_MAX_BYTES", 16)
+    web.routes["/m"] = (200, "application/json", b'{"result": "' + b"x" * 16 + b'"}')
+    with pytest.raises(FetchError) as info:
+        fetch._get_json(web.url("/m"), timeout=5, downloads=fetch.Downloads())
+    assert (info.value.status, info.value.code) == (502, "download_failed")
+    web.routes["/m"] = (200, "application/json", b"[1]")
+    assert fetch._get_json(web.url("/m"), timeout=5, downloads=fetch.Downloads()) == [1]
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Pad: "] + [b"a"] * 300,
+        [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n["] + [b""] * 300,
+    ],
+    ids=["trickled-headers", "stalled-body"],
+)
+def test_slow_ckan_metadata_is_a_download_timeout(
+    raw: Callable[[list[bytes], float], _Raw], chunks: list[bytes]
+) -> None:
+    server = raw(chunks, 0.1)
+    started = time.monotonic()
+    with pytest.raises(FetchError) as info:
+        fetch._get_json(server.url, timeout=0.5, downloads=fetch.Downloads())
+    assert time.monotonic() - started < 10
+    assert info.value.code == "download_timeout"
+
+
+def test_a_garbled_ckan_metadata_answer_is_an_oserror(
+    raw: Callable[[list[bytes], float], _Raw],
+) -> None:
+    server = raw([b"NOT HTTP AT ALL\r\n\r\n"], 0)
+    with pytest.raises(OSError):
+        fetch._get_json(server.url, timeout=5, downloads=fetch.Downloads())
+
+
+def test_ckan_metadata_is_refused_once_the_daemon_closes() -> None:
+    downloads = fetch.Downloads()
+    downloads.abort_all()
+    with pytest.raises(FetchError) as info:
+        fetch._get_json("http://127.0.0.1:9/m", timeout=5, downloads=downloads)
+    assert info.value.code == "shutting_down"

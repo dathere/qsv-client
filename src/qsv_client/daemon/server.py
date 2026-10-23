@@ -588,11 +588,9 @@ class Daemon:
         except fetch.FetchError as exc:
             log.info("download failed: %s: %s", path, exc.code)
             raise HttpError(exc.status, exc.code, str(exc)) from None
+        # left 0600 as mkstemp made it: the data may be private (a CKAN token, a signed URL)
         try:
-            if path.exists():  # appeared while downloading: never replace the user's file
-                raise HttpError(409, "exists", f"{path} already exists; register it instead")
-            staged.chmod(0o644)  # mkstemp made it 0600; a downloaded data file is not secret
-            os.replace(staged, path)
+            _publish_new(staged, path)
         finally:
             staged.unlink(missing_ok=True)
         log.info("download finished: %s", path)
@@ -1016,6 +1014,20 @@ def _result_key(request: Request, tier: Tier) -> str:
 
 def _bearer(request: Request) -> str:
     return request.headers.get("authorization", "").removeprefix("Bearer ")
+
+
+def _publish_new(staged: Path, path: Path) -> None:
+    """Move ``staged`` to ``path``, which must not exist: a file that appeared there while
+    downloading is the user's and is never replaced."""
+    exists = HttpError(409, "exists", f"{path} already exists; register it instead")
+    try:
+        os.link(staged, path)  # fails if path exists, atomically
+    except FileExistsError:
+        raise exists from None
+    except OSError:  # no hard links on this file system (FAT, some network shares)
+        if path.exists():
+            raise exists from None
+        os.replace(staged, path)
 
 
 def _private(ds: Dataset) -> dict[str, Any]:

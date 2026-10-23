@@ -35,6 +35,7 @@ import socket
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -53,6 +54,7 @@ _QSV_GET_SCHEMES = ("ckan", "dathere", "s3", "gs", "az")
 _DATA_SUFFIXES = (".csv", ".tsv", ".tab", ".ssv", ".txt")
 _TABULAR_FORMATS = ("csv", "tsv", "tab", "ssv", "text/csv", "text/tab-separated-values")
 _HTTP_TIMEOUT = 60.0
+_METADATA_MAX_BYTES = 8 << 20
 _UA = "qsv-clientd"
 _CKAN_ACTION_PATH = "/api/3/action"
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -103,15 +105,23 @@ async def download(
     # before the staging file is removed
     incoming = _private_temp(staging_dir, ".incoming" + _suffix(source))
     try:
-        target = await _resolve(source, ckan_api)
+        max_bytes, timeout = daemon.config.fetch_max_bytes, daemon.config.fetch_timeout
+        target = await _resolve(source, ckan_api, timeout=timeout, downloads=daemon.downloads)
         url = target.url
         scheme = urllib.parse.urlsplit(url).scheme.lower()
         caps = await daemon._qsv.capabilities()
         has_get = caps.has_command("get")
-        max_bytes, timeout = daemon.config.fetch_max_bytes, daemon.config.fetch_timeout
         if scheme == "ckan" and not has_get:
             # the prebuilt qsv has no `get`: look the resource up here, then download its data
-            url = await asyncio.to_thread(_ckan_data_url, _ckan_api_for(target), url)
+            url = await _finish_despite_cancel(
+                asyncio.to_thread(
+                    _ckan_data_url,
+                    _ckan_api_for(target),
+                    url,
+                    timeout=timeout,
+                    downloads=daemon.downloads,
+                )
+            )
             scheme = urllib.parse.urlsplit(url).scheme.lower()
             if scheme not in ("http", "https"):
                 raise FetchError(422, "bad_source", f"the CKAN resource's data is at {url!r}")
@@ -254,7 +264,9 @@ class _Target:
     ckan_api: str | None
 
 
-async def _resolve(source: str, ckan_api: str | None = None) -> _Target:
+async def _resolve(
+    source: str, ckan_api: str | None, *, timeout: float, downloads: Downloads
+) -> _Target:
     doi = _doi(source)
     if doi is not None:
         url = await asyncio.to_thread(_datacite_content_url, doi)
@@ -273,7 +285,16 @@ async def _resolve(source: str, ckan_api: str | None = None) -> _Target:
     m = _CKAN_DATASET_PAGE.match(source.strip())
     if m is not None:
         api = m["site"] + _CKAN_ACTION_PATH
-        resources = await asyncio.to_thread(_ckan_package_resources, api, m["name"])
+        resources = await _finish_despite_cancel(
+            asyncio.to_thread(
+                _ckan_package_resources,
+                api,
+                m["name"],
+                source,
+                timeout=timeout,
+                downloads=downloads,
+            )
+        )
         if resources is not None:  # None: not a CKAN site after all; download it as it is
             return _Target(f"ckan://{_one_tabular(resources, source)}", "ckan", api)
     return _Target(source, "url", ckan_api)
@@ -291,20 +312,16 @@ def _ckan_api_for(target: _Target) -> str:
     return api
 
 
-def _ckan_data_url(api: str, url: str) -> str:
+def _ckan_data_url(api: str, url: str, *, timeout: float, downloads: Downloads) -> str:
     """The data URL of CKAN resource ``ckan://<id>``, from ``resource_show``, anonymously."""
     rid = url[len("ckan://") :]
     if not rid or rid.endswith("?"):
         raise FetchError(
             501, "needs_qsv_get", "ckan://<name>? sources need qsv's `get` command; use the id"
         )
-    req = urllib.request.Request(
-        api.rstrip("/") + "/resource_show?id=" + urllib.parse.quote(rid, safe=""),
-        headers={"Accept": "application/json", "User-Agent": _UA},
-    )
+    show = api.rstrip("/") + "/resource_show?id=" + urllib.parse.quote(rid, safe="")
     try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-            data = json.load(resp)
+        data = _get_json(show, timeout=timeout, downloads=downloads)
     except (OSError, ValueError) as exc:
         raise FetchError(
             502,
@@ -341,15 +358,25 @@ def ckan_api_url(value: str) -> str:
     return url + _CKAN_ACTION_PATH
 
 
-def _ckan_package_resources(api: str, name: str) -> list[dict[str, Any]] | None:
+def _ckan_package_resources(
+    api: str, name: str, page: str, *, timeout: float, downloads: Downloads
+) -> list[dict[str, Any]] | None:
     """The resources of CKAN dataset ``name``, or None when ``api`` doesn't answer as CKAN."""
-    req = urllib.request.Request(
-        api + "/package_show?id=" + urllib.parse.quote(name, safe=""),
-        headers={"Accept": "application/json", "User-Agent": _UA},
-    )
+    show = api + "/package_show?id=" + urllib.parse.quote(name, safe="")
     try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-            data = json.load(resp)
+        data = _get_json(show, timeout=timeout, downloads=downloads)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            # CKAN's answer for a private dataset, which is no reason to fetch the page itself.
+            # The daemon sends no token here: it would go to a host named only by the URL
+            raise FetchError(
+                403,
+                "private_dataset",
+                f"CKAN would not list the resources of {page} (a private dataset?); register "
+                "the resource's own page URL instead: private data needs qsv's `get` command "
+                "and QSV_CKAN_TOKEN in qsv-clientd's environment",
+            ) from None
+        return None
     except (OSError, ValueError):
         return None
     result = data.get("result") if isinstance(data, dict) and data.get("success") else None
@@ -481,6 +508,37 @@ def _download(
     finally:
         watchdog.cancel()
         downloads.finish(watchdog)
+
+
+def _get_json(url: str, *, timeout: float, downloads: Downloads) -> Any:
+    """``url``'s JSON, read under a download watchdog: bounded in time and size, and cut off
+    when the daemon closes. Fails with OSError (urllib's HTTPError for a 4xx/5xx answer) or
+    ValueError, or FetchError at the deadline or the size limit."""
+    watchdog = _Watchdog(timeout)
+    downloads.start(watchdog)
+    opener = urllib.request.build_opener(_WatchedHTTP(watchdog), _WatchedHTTPS(watchdog))
+    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": _UA})
+    try:
+        with opener.open(req, timeout=min(_HTTP_TIMEOUT, timeout)) as resp:
+            body = resp.read(_METADATA_MAX_BYTES + 1)
+        if watchdog.fired:
+            raise _cut_off(watchdog, timeout)
+    except (OSError, http.client.HTTPException) as exc:
+        # as in _download: a socket timeout of the whole budget is the deadline too
+        idle_to_deadline = isinstance(exc, TimeoutError) and timeout <= _HTTP_TIMEOUT
+        if watchdog.fired or idle_to_deadline:
+            raise _cut_off(watchdog, timeout) from None
+        if isinstance(exc, OSError):
+            raise
+        raise OSError(str(exc)) from None
+    finally:
+        watchdog.cancel()
+        downloads.finish(watchdog)
+    if len(body) > _METADATA_MAX_BYTES:
+        raise FetchError(
+            502, "download_failed", f"{url} answered with over {_METADATA_MAX_BYTES >> 20} MiB"
+        )
+    return json.loads(body)
 
 
 def _cut_off(watchdog: _Watchdog, timeout: float) -> FetchError:

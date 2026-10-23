@@ -11,12 +11,14 @@ All notable changes to this project are documented here. The format follows
 - **`qsv-clientd viz <URL>`** ([#34](https://github.com/dathere/qsv-client/pull/34)) downloads the data first, then renders, registers and opens
   the schematic in one step. The URL can be an http(s) download link, `ckan://<id>`, or a
   CKAN resource page copied from the browser. It is also where Fetch latest gets new data.
-  The data is saved beside the schematic (`--save-as` to choose), and `-o` now defaults to
+  The data is saved beside the schematic (`--save-as` to choose), readable only by you
+  since it may be private, never replacing an existing file. `-o` now defaults to
   the data's name with `.html`. `--no-open` skips the browser.
 - **CKAN pages as sources.** ([#34](https://github.com/dathere/qsv-client/pull/34)) A CKAN resource page (`<site>/dataset/<name>/resource/<id>`) is
   fetched as `ckan://<id>` from that site. A CKAN dataset page with exactly one CSV or TSV
   resource, found with `package_show`, is fetched as that resource; with several, the
-  error lists them.
+  error lists them. A private dataset's page is refused with a message naming the fix
+  (its resource page, with `qsv get` and `QSV_CKAN_TOKEN`).
 - **`--ckan-api`** ([#34](https://github.com/dathere/qsv-client/pull/34)) on `register` and `viz` names a dataset's CKAN site (or its Action API
   URL) for `ckan://` sources.
 - `register --schematic` takes the source URL (and its CKAN site) from a schematic that

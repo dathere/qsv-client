@@ -170,7 +170,8 @@ qsv-clientd viz https://data.example.gov/dataset/housing/resource/<resource id>
 
 **From a CKAN site.** Copy a resource's page address from your browser (or its download
 link) and pass it to `qsv-clientd viz`. The data is saved beside the schematic, named after
-the URL (`--save-as` to choose), and the URL becomes the dataset's source, so Fetch latest
+the URL (`--save-as` to choose) and readable only by you, and the URL becomes the
+dataset's source, so Fetch latest
 gets the resource's current data. A schematic on the CKAN site itself never connects (see
 the qsv side's live-mode notes); this is how to try live mode on CKAN data.
 `ckan://<id>` works too, with `--ckan-api <site URL>`.
@@ -340,7 +341,9 @@ re-rendering. Flags whose value is a file keep only its basename and are listed 
 - **CKAN pages.** A resource page (`<site>/dataset/<name>/resource/<id>`, with or without a
   subpath before `/dataset/`) is fetched as `ckan://<id>` from that site. A dataset page is
   looked up with `package_show`: with exactly one CSV or TSV resource it is fetched as that
-  one; with several, the error lists them, so register one with `--source-url`.
+  one; with several, the error lists them, so register one with `--source-url`. A private
+  dataset's page is refused with a message saying so: the daemon sends no CKAN token to
+  a site named only by a URL, so register the resource's page instead.
 - **`ckan://` sources** resolve against the dataset's CKAN site (`--ckan-api`, which takes a
   site URL or an Action API URL), else `QSV_CKAN_API` in the daemon's environment. With
   neither, the fetch is refused rather than sent to qsv's default CKAN site. Private CKAN

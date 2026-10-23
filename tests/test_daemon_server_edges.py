@@ -24,6 +24,7 @@ import pytest
 from daemon_helpers import DaemonThread, Reply
 
 from qsv_client.daemon import DaemonConfig, server
+from qsv_client.daemon._http import HttpError
 from qsv_client.daemon.pairing import MAX_REQUESTS_PER_MINUTE
 from qsv_client.daemon.server import Daemon
 
@@ -726,7 +727,7 @@ def test_registering_a_url_downloads_it_beside_the_schematic(
     assert (ds["path"], ds["source_url"], ds["ckan_api"]) == (str(target.resolve()), url, None)
     assert html.read_text().startswith("<html>")
     if sys.platform != "win32":
-        assert target.stat().st_mode & 0o777 == 0o644
+        assert target.stat().st_mode & 0o777 == 0o600  # the data may be private
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
 
 
@@ -823,3 +824,26 @@ def test_a_file_that_appears_during_the_download_is_kept(
     _assert_refused(_local(d, "POST", "/v1/datasets", body), 409, "exists")
     assert target.read_text() == "name\nmine\n"
     assert not (tmp_path / ".qsv-clientd-staged.csv").exists()
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_publishing_without_hard_links_still_never_replaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exists: bool
+) -> None:
+    staged, target = tmp_path / ".staged.csv", tmp_path / "d.csv"
+    staged.write_text("name\ndownloaded\n")
+    if exists:
+        target.write_text("name\nmine\n")
+
+    def no_links(src: Path, dst: Path) -> None:
+        raise PermissionError(1, "Operation not permitted")  # FAT, some network shares
+
+    monkeypatch.setattr(os, "link", no_links)
+    if exists:
+        with pytest.raises(HttpError) as err:
+            server._publish_new(staged, target)
+        assert err.value.status == 409
+        assert target.read_text() == "name\nmine\n"
+    else:
+        server._publish_new(staged, target)
+        assert target.read_text() == "name\ndownloaded\n"
