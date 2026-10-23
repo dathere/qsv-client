@@ -8,35 +8,35 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- **`qsv-clientd viz <URL>`** downloads the data first, then renders, registers and opens
+- **`qsv-clientd viz <URL>`** ([#34](https://github.com/dathere/qsv-client/pull/34)) downloads the data first, then renders, registers and opens
   the schematic in one step. The URL can be an http(s) download link, `ckan://<id>`, or a
   CKAN resource page copied from the browser. It is also where Fetch latest gets new data.
   The data is saved beside the schematic (`--save-as` to choose), and `-o` now defaults to
   the data's name with `.html`. `--no-open` skips the browser.
-- **CKAN pages as sources.** A CKAN resource page (`<site>/dataset/<name>/resource/<id>`) is
+- **CKAN pages as sources.** ([#34](https://github.com/dathere/qsv-client/pull/34)) A CKAN resource page (`<site>/dataset/<name>/resource/<id>`) is
   fetched as `ckan://<id>` from that site. A CKAN dataset page with exactly one CSV or TSV
   resource, found with `package_show`, is fetched as that resource; with several, the
   error lists them.
-- **`--ckan-api`** on `register` and `viz` names a dataset's CKAN site (or its Action API
+- **`--ckan-api`** ([#34](https://github.com/dathere/qsv-client/pull/34)) on `register` and `viz` names a dataset's CKAN site (or its Action API
   URL) for `ckan://` sources.
 - `register --schematic` takes the source URL (and its CKAN site) from a schematic that
-  records one, as qsv records it for data downloaded with `qsv get`.
+  records one, as qsv records it for data downloaded with `qsv get`. ([#34](https://github.com/dathere/qsv-client/pull/34))
 
 ### Fixed
 
 - `ckan://` sources were resolved against qsv's default CKAN site (data.dathere.com) unless
   `QSV_CKAN_API` happened to be in the daemon's environment. They now use the dataset's own
-  CKAN site, then `QSV_CKAN_API`, and are refused when neither is set.
+  CKAN site, then `QSV_CKAN_API`, and are refused when neither is set. ([#34](https://github.com/dathere/qsv-client/pull/34))
 - A source that serves a web page (a landing page, a sign-in form) is refused with "serves
   a web page, not data", naming the PID or source URL. Before, a download through `qsv get`
-  kept the page and failed with a CSV parse error.
+  kept the page and failed with a CSV parse error. ([#34](https://github.com/dathere/qsv-client/pull/34))
 - Downloads without `qsv get` (the prebuilt qsv has none) failed with 403 on CKAN sites
   that store data in S3. Their download links redirect to a presigned URL written with
   `:443`, and urllib sent that port in `Host`, which breaks the URL's signature. The default
-  port is now dropped first.
+  port is now dropped first. ([#34](https://github.com/dathere/qsv-client/pull/34))
 - `ckan://` sources, including CKAN resource pages, now work without `qsv get`: the daemon
   looks the resource up with `resource_show` and downloads its data itself. Private
-  resources still need `qsv get` and `QSV_CKAN_TOKEN`.
+  resources still need `qsv get` and `QSV_CKAN_TOKEN`. ([#34](https://github.com/dathere/qsv-client/pull/34))
 
 ## [0.5.0] - 2026-10-21
 
