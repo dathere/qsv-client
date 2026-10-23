@@ -27,7 +27,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -541,18 +541,21 @@ class Daemon:
             html = await asyncio.to_thread(schematic_path.read_text, "utf-8", "replace")
             source = SchematicSource.from_html(html)
             page = source.fingerprint if source is not None else None
-            # a requested render replaces the stale schematic anyway
-            if page is not None and not body.get("force") and not body.get("render"):
+            if source is not None and page is not None:
                 current = fingerprint
                 if page.algo != current.algo:
                     current = await self._fingerprint(path, page.algo)
                 if page.digest != current.digest:
-                    raise HttpError(
-                        409,
-                        "fingerprint_mismatch",
-                        "the schematic was rendered from different data than this file "
-                        "(re-render it, or register it with --force)",
-                    )
+                    # a requested render replaces the stale schematic anyway
+                    if not body.get("force") and not body.get("render"):
+                        raise HttpError(
+                            409,
+                            "fingerprint_mismatch",
+                            "the schematic was rendered from different data than this file "
+                            "(re-render it, or register it with --force)",
+                        )
+                    # its source is where *that* data came from, not this file's
+                    source = replace(source, source_url=None, ckan_api=None)
         ds = self.registry.add(
             path,
             fingerprint=fingerprint,

@@ -1008,3 +1008,54 @@ def test_carried_source_rules() -> None:
     assert server._carried_source(other_site, page, ds) is None
     assert server._page_source(None) is None
     assert server._page_source("/nonexistent/s.html") is None
+
+
+@pytest.mark.parametrize("how", [{"render": True}, {"force": True}])
+def test_a_page_from_other_data_lends_no_source(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    data: Path,
+    tmp_path: Path,
+    how: dict[str, bool],
+) -> None:
+    # `qsv-clientd viz other.csv -o existing.html`, where existing.html charts another dataset
+    schematic = tmp_path / "existing.html"
+    block = {
+        "schematic_uuid": "u-old",
+        "viz_args": [],
+        "fingerprint": {"algo": "sha256", "digest": "0" * 64, "bytes": 1},
+        "source": {"url": "https://other.example/theirs.csv"},
+    }
+    schematic.write_text(
+        '<html><script type="application/json" id="qsv-schematic-source">'
+        + json.dumps(block)
+        + "</script></html>"
+    )
+    d = start_daemon(fake_qsv(PROVENANCE_QSV))
+    ds_id = _register(d, data, schematic_path=str(schematic), **how)
+    listed = {ds["id"]: ds for ds in _local(d, "GET", "/v1/datasets", None).json()}
+    assert listed[ds_id]["source_url"] is None
+    assert _local(d, "POST", f"/v1/datasets/{ds_id}/render", {}).status == 200
+    page = SchematicSource.from_html(schematic.read_text())
+    assert page is not None and page.source_url is None
+
+
+def test_a_page_from_this_data_lends_its_source(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, data: Path, tmp_path: Path
+) -> None:
+    schematic = tmp_path / "s.html"
+    block = {
+        "schematic_uuid": "u-old",
+        "viz_args": [],
+        "fingerprint": {"algo": "sha256", "digest": _sha(data), "bytes": data.stat().st_size},
+        "source": {"url": "https://h.example/d.csv"},
+    }
+    schematic.write_text(
+        '<html><script type="application/json" id="qsv-schematic-source">'
+        + json.dumps(block)
+        + "</script></html>"
+    )
+    d = start_daemon(fake_qsv(PROVENANCE_QSV))
+    ds_id = _register(d, data, schematic_path=str(schematic))
+    listed = {ds["id"]: ds for ds in _local(d, "GET", "/v1/datasets", None).json()}
+    assert listed[ds_id]["source_url"] == "https://h.example/d.csv"
