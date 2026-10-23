@@ -43,7 +43,9 @@ All notable changes to this project are documented here. The format follows
   of the data, for which qsv records none. The new page now keeps the previous page's
   `source` while it still names the dataset's source URL. The daemon never adds one itself,
   since only qsv knows whether a download was public. A page rendered from other data (an
-  existing `-o` file, or one registered with `--force`) lends the dataset no source.
+  existing `-o` file, or one registered with `--force`) lends the dataset no source and no
+  PID. Neither does a BLAKE3 page that a qsv without `blake3` can't check; `--force` registers
+  it again, as before.
   ([#35](https://github.com/dathere/qsv-client/pull/35))
 - `register` printed the schematic's viz arguments, and its "Use these arguments?"
   question, on stdout before the registration's JSON. They are on stderr now, so stdout can

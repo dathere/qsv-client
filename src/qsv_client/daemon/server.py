@@ -542,12 +542,19 @@ class Daemon:
             source = SchematicSource.from_html(html)
             page = source.fingerprint if source is not None else None
             if source is not None and page is not None:
-                current = fingerprint
-                if page.algo != current.algo:
-                    current = await self._fingerprint(path, page.algo)
-                if page.digest != current.digest:
-                    # a requested render replaces the stale schematic anyway
-                    if not body.get("force") and not body.get("render"):
+                # a requested render replaces the stale schematic anyway
+                overridden = bool(body.get("force") or body.get("render"))
+                try:
+                    current = fingerprint
+                    if page.algo != current.algo:
+                        current = await self._fingerprint(path, page.algo)
+                    matches = page.digest == current.digest
+                except HttpError as exc:
+                    if exc.code != "no_blake3" or not overridden:
+                        raise
+                    matches = False  # unverifiable, so treated as other data
+                if not matches:
+                    if not overridden:
                         raise HttpError(
                             409,
                             "fingerprint_mismatch",
@@ -555,7 +562,7 @@ class Daemon:
                             "(re-render it, or register it with --force)",
                         )
                     # its source is where *that* data came from, not this file's
-                    source = replace(source, source_url=None, ckan_api=None)
+                    source = replace(source, source_url=None, ckan_api=None, pid=None)
         ds = self.registry.add(
             path,
             fingerprint=fingerprint,

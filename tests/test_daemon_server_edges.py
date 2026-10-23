@@ -1025,6 +1025,7 @@ def test_a_page_from_other_data_lends_no_source(
         "viz_args": [],
         "fingerprint": {"algo": "sha256", "digest": "0" * 64, "bytes": 1},
         "source": {"url": "https://other.example/theirs.csv"},
+        "pid": "https://doi.example/theirs",
     }
     schematic.write_text(
         '<html><script type="application/json" id="qsv-schematic-source">'
@@ -1034,7 +1035,11 @@ def test_a_page_from_other_data_lends_no_source(
     d = start_daemon(fake_qsv(PROVENANCE_QSV))
     ds_id = _register(d, data, schematic_path=str(schematic), **how)
     listed = {ds["id"]: ds for ds in _local(d, "GET", "/v1/datasets", None).json()}
-    assert listed[ds_id]["source_url"] is None
+    assert (listed[ds_id]["source_url"], listed[ds_id]["pid"]) == (None, None)
+    # a pid given at registration is still kept
+    mine = _register(d, data, schematic_path=str(schematic), pid="https://doi.example/mine", **how)
+    listed = {ds["id"]: ds for ds in _local(d, "GET", "/v1/datasets", None).json()}
+    assert mine == ds_id and listed[mine]["pid"] == "https://doi.example/mine"
     assert _local(d, "POST", f"/v1/datasets/{ds_id}/render", {}).status == 200
     page = SchematicSource.from_html(schematic.read_text())
     assert page is not None and page.source_url is None

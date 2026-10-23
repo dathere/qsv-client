@@ -442,6 +442,25 @@ def test_fingerprints_with_qsv_blake3(
         token=lite.daemon.local_token,
     )
     assert unverifiable.status == 501, unverifiable.body
+    # forced, it registers, but the page it can't verify lends no source
+    page = {
+        "schematic_uuid": "u-b3",
+        "pid": "https://doi.example/theirs",
+        "source": {"url": "https://h/x.csv"},
+    }
+    page["fingerprint"] = {"algo": "blake3", "digest": _b3(data), "bytes": 1}
+    html.write_text(
+        f'<script type="application/json" id="qsv-schematic-source">{json.dumps(page)}</script>'
+    )
+    forced_id = _register(lite, data, schematic_path=str(html), force=True)
+    forced = next(
+        ds
+        for ds in lite.http(
+            "GET", "/v1/datasets", origin=None, token=lite.daemon.local_token
+        ).json()
+        if ds["id"] == forced_id
+    )
+    assert (forced["source_url"], forced["pid"]) == (None, None)
     plain = tmp_path / "plain.csv"
     plain.write_text("x\n1\n")
     lite_id = _register(lite, plain)
