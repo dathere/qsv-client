@@ -26,6 +26,7 @@ from daemon_helpers import DaemonThread, Reply
 from qsv_client.daemon import DaemonConfig, server
 from qsv_client.daemon._http import HttpError
 from qsv_client.daemon.pairing import MAX_REQUESTS_PER_MINUTE
+from qsv_client.daemon.registry import Dataset, SchematicSource
 from qsv_client.daemon.server import Daemon
 
 StartDaemon = Callable[..., DaemonThread]
@@ -933,3 +934,77 @@ def test_a_failed_copy_keeps_a_file_that_replaced_it(
     with pytest.raises(OSError):
         server._publish_new(staged, target)
     assert target.read_text() == "name\nmine\n"
+
+
+# -- a re-render keeps the source qsv recorded ----------------------------------------------
+
+# viz writes a schematic whose provenance block has no source, as qsv does for a plain file
+PROVENANCE_QSV = """
+cmd = sys.argv[1]
+if cmd == "viz":
+    out = sys.argv[sys.argv.index("--output") + 1]
+    block = '{"schematic_uuid":"u-new","viz_args":[]}'
+    open(out, "w").write(
+        '<html><script type="application/json" id="qsv-schematic-source">'
+        + block + '</script></html>'
+    )
+else:
+    sys.stdout.write("name,n\\nalpha,1\\n")
+"""
+
+
+def _page_with_source(path: Path, source: dict[str, str] | None) -> None:
+    block: dict[str, Any] = {"schematic_uuid": "u-old", "viz_args": []}
+    if source is not None:
+        block["source"] = source
+    path.write_text(
+        '<html><script type="application/json" id="qsv-schematic-source">'
+        + json.dumps(block)
+        + "</script></html>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("registered", "kept"),
+    [
+        ({}, True),  # the source comes from the page itself
+        ({"source_url": "https://other.example/d.csv"}, False),  # re-registered elsewhere
+    ],
+)
+def test_a_re_render_keeps_the_source_qsv_recorded(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    data: Path,
+    tmp_path: Path,
+    registered: dict[str, str],
+    kept: bool,
+) -> None:
+    schematic = tmp_path / "s.html"
+    source = {"url": "ckan://abc", "ckan_api": "https://ckan.example/api/3/action"}
+    _page_with_source(schematic, source)
+    d = start_daemon(fake_qsv(PROVENANCE_QSV))
+    ds_id = _register(d, data, schematic_path=str(schematic), force=True, **registered)
+    assert _local(d, "POST", f"/v1/datasets/{ds_id}/render", {}).status == 200
+    page = SchematicSource.from_html(schematic.read_text())
+    assert page is not None and page.schematic_uuid == "u-new"
+    if kept:
+        assert (page.source_url, page.ckan_api) == (source["url"], source["ckan_api"])
+    else:
+        assert page.source_url is None  # the daemon never vouches for a URL itself
+
+
+def test_carried_source_rules() -> None:
+    ds = Dataset(id="d", path="p", algo="blake3", digest="0", size=1, source_url="https://h/d")
+    page = SchematicSource(None, None, (), None, None)
+    old = SchematicSource(None, None, (), None, None, source_url="https://h/d")
+    assert server._carried_source(old, page, ds) == {"url": "https://h/d"}
+    assert server._carried_source(None, page, ds) is None
+    assert server._carried_source(old, None, ds) is None
+    assert server._carried_source(page, page, ds) is None  # nothing to carry
+    assert server._carried_source(old, old, ds) is None  # qsv recorded one itself
+    other_site = SchematicSource(
+        None, None, (), None, None, source_url="https://h/d", ckan_api="https://x/api/3/action"
+    )
+    assert server._carried_source(other_site, page, ds) is None
+    assert server._page_source(None) is None
+    assert server._page_source("/nonexistent/s.html") is None

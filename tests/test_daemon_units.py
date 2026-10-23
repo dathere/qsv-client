@@ -442,3 +442,22 @@ def test_register_takes_the_source_url_from_the_schematic(tmp_path: Path) -> Non
     del raw["datasets"][0]["ckan_api"]
     (tmp_path / "registry.json").write_text(json.dumps(raw))
     assert Registry(tmp_path / "registry.json").datasets[ds.id].ckan_api is None
+
+
+def test_with_source_rewrites_only_the_provenance_block() -> None:
+    from qsv_client.daemon.registry import with_source
+
+    html = (
+        '<p>{"a":1}</p><script type="application/json" id="qsv-schematic-source">'
+        '{"schematic_uuid":"u"}</script>'
+    )
+    out = with_source(html, {"url": "https://h/a?x=1&y=</script>"})
+    assert out.startswith('<p>{"a":1}</p>')
+    assert "</script>" not in out.split('id="qsv-schematic-source">', 1)[1][:-9]
+    src = SchematicSource.from_html(out)
+    assert src is not None and src.source_url == "https://h/a?x=1&y=</script>"
+    assert src.schematic_uuid == "u"
+    for unchanged in ["<html>no block</html>", html.replace('{"schematic_uuid":"u"}', "{bad")]:
+        assert with_source(unchanged, {"url": "u"}) == unchanged
+    not_an_object = html.replace('{"schematic_uuid":"u"}', "[1]")
+    assert with_source(not_an_object, {"url": "u"}) == not_an_object

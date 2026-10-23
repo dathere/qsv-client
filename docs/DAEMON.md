@@ -316,7 +316,8 @@ a registered dataset by it:
 
 When qsv rendered from data it downloaded with `qsv get` (a `dc:` input) without
 credentials, the block also has `"source": {"url", "ckan_api"?}`, and `register --schematic`
-uses it as the dataset's source URL unless you pass `--source-url`.
+uses it as the dataset's source URL unless you pass `--source-url`. A daemon re-render keeps
+that `source` while it still names the dataset's source URL; the daemon never adds one.
 
 The page pairs with `schematic_uuid`, falling back to `fingerprint.digest`. A
 `fingerprint` is `{"algo","digest","bytes"}`. The daemon fingerprints data with BLAKE3,

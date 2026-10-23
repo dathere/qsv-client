@@ -416,6 +416,7 @@ def test_fingerprints_with_qsv_blake3(
         token=d.daemon.local_token,
     )
     assert stale.status == 409
+    assert "register it with --force" in stale.json()["daemon_error"]["message"]
     _write_page(html, {"algo": "sha256", "digest": _sha(data), "bytes": 1})
     ds_id = _register(d, data, schematic_path=str(html))
 

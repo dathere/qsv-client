@@ -57,7 +57,14 @@ from .config import (
     write_private_file,
 )
 from .pairing import Pairing, token_digest
-from .registry import Dataset, Fingerprint, Registry, SchematicSource, validate_viz_args
+from .registry import (
+    Dataset,
+    Fingerprint,
+    Registry,
+    SchematicSource,
+    validate_viz_args,
+    with_source,
+)
 from .results import LOCAL_KEY, ResultStore, Stored, key_for_grant, snapshot
 
 log = logging.getLogger("qsv_client.daemon")
@@ -544,7 +551,7 @@ class Daemon:
                         409,
                         "fingerprint_mismatch",
                         "the schematic was rendered from different data than this file "
-                        "(re-render it, or pass force)",
+                        "(re-render it, or register it with --force)",
                     )
         ds = self.registry.add(
             path,
@@ -869,6 +876,7 @@ class Daemon:
         os.close(fd)
         tmp = Path(tmp_name)
         try:
+            previous = await asyncio.to_thread(_page_source, ds.schematic_path)
             # fingerprint first: the schematic describes the data as it was when rendering began
             fp = await self._fingerprint(Path(ds.path), ds=ds)
             await self._browser_run(
@@ -880,6 +888,10 @@ class Daemon:
             )
             html = tmp.read_bytes()
             source = SchematicSource.from_html(html.decode("utf-8", "replace"))
+            carried = _carried_source(previous, source, ds)
+            if carried is not None:
+                html = with_source(html.decode("utf-8"), carried).encode("utf-8")
+                tmp.write_bytes(html)
             ds.schematic_uuid = source.schematic_uuid if source else None
             ds.fingerprint = fp
             if ds.schematic_path:
@@ -1016,6 +1028,35 @@ def _result_key(request: Request, tier: Tier) -> str:
 
 def _bearer(request: Request) -> str:
     return request.headers.get("authorization", "").removeprefix("Bearer ")
+
+
+def _page_source(schematic_path: str | None) -> SchematicSource | None:
+    path = Path(schematic_path) if schematic_path else None
+    if path is None or not path.is_file():
+        return None
+    return SchematicSource.from_html(path.read_text("utf-8", "replace"))
+
+
+def _carried_source(
+    previous: SchematicSource | None, new: SchematicSource | None, ds: Dataset
+) -> dict[str, str] | None:
+    """The ``source`` a re-rendered page keeps from the page it replaces.
+
+    The daemon re-renders from its own copy of the data, never a ``dc:`` input, so qsv records
+    no source. The previous page's one is kept while it still names the dataset's source: qsv
+    recorded it as public. The daemon never adds one of its own, since it can't tell whether a
+    registered URL is public.
+    """
+    if previous is None or new is None or new.source_url is not None:
+        return None
+    if previous.source_url is None or previous.source_url != ds.source_url:
+        return None
+    if previous.ckan_api is not None and previous.ckan_api != ds.ckan_api:
+        return None
+    carried = {"url": previous.source_url}
+    if previous.ckan_api is not None:
+        carried["ckan_api"] = previous.ckan_api
+    return carried
 
 
 def _publish_new(staged: Path, path: Path) -> None:

@@ -39,6 +39,15 @@ All notable changes to this project are documented here. The format follows
 - `ckan://` sources, including CKAN resource pages, now work without `qsv get`: the daemon
   looks the resource up with `resource_show` and downloads its data itself. Private
   resources still need `qsv get` and `QSV_CKAN_TOKEN`. ([#34](https://github.com/dathere/qsv-client/pull/34))
+- A daemon re-render dropped the schematic's `source`: it renders from the daemon's own copy
+  of the data, for which qsv records none. The new page now keeps the previous page's
+  `source` while it still names the dataset's source URL. The daemon never adds one itself,
+  since only qsv knows whether a download was public.
+- `register` printed the schematic's viz arguments, and its "Use these arguments?"
+  question, on stdout before the registration's JSON. They are on stderr now, so stdout can
+  be piped to `jq`. So is `approve`'s question.
+- The `fingerprint_mismatch` refusal said "pass force"; it now says to register with
+  `--force`.
 
 ## [0.5.0] - 2026-10-21
 
