@@ -896,12 +896,22 @@ def test_cancelled_fetch_leaves_no_staging_files(
             f"Content-Length: {len(req)}\r\n\r\n".encode()
             + req
         )
-        time.sleep(0.2)  # mid-download
-        s.close()
         cache = d.daemon.home / "cache" / ds_id
+
+        def staging() -> list[Path]:
+            if not cache.is_dir():  # the fetch has not started yet
+                return []
+            return [p for p in cache.iterdir() if p.name.startswith(".qsv-clientd")]
+
+        # disconnect mid-download, which a fixed sleep can't promise on a slow runner
         deadline = time.monotonic() + 30
-        while any(p.name.startswith(".qsv-clientd") for p in cache.iterdir()):
-            assert time.monotonic() < deadline, list(cache.iterdir())
+        while not staging():
+            assert time.monotonic() < deadline, "the fetch never started downloading"
+            time.sleep(0.005)
+        s.close()
+        deadline = time.monotonic() + 30
+        while staging():
+            assert time.monotonic() < deadline, staging()
             time.sleep(0.1)
         # the next fetch is not overtaken by the cancelled one
         again = d.http("POST", f"/v1/datasets/{ds_id}/fetch", {}, token=token)

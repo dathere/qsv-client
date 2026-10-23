@@ -171,7 +171,7 @@ async def test_fetch_refuses_other_schemes(
     assert _staging_files(daemon, ds) == []
 
 
-@pytest.mark.parametrize("scheme", ["ckan", "dathere", "s3", "gs", "az"])
+@pytest.mark.parametrize("scheme", ["dathere", "s3", "gs", "az"])  # ckan: see below
 async def test_qsv_get_schemes_need_qsv_get(
     fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, scheme: str
 ) -> None:
@@ -286,6 +286,369 @@ async def test_a_doi_without_data_is_refused(
     assert "10.5072/landing" in str(info.value) and "--source-url" in str(info.value)
     assert len(doi_org) == 1
     assert _staging_files(daemon, ds) == []
+
+
+# -- web pages and CKAN ------------------------------------------------------------------------
+
+HTML_GET_QSV = GET_QSV.replace('"name\\nfetched\\n"', '"\\n  <!DOCTYPE html><p>a,b</p>"')
+RID = "bfdeffc7-ab5e-4e28-9561-d4e84c9674e4"
+
+
+def _get_calls(log: Path) -> list[list[str]]:
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+@pytest.mark.parametrize("field", ["source_url", "pid"])
+async def test_qsv_get_of_a_web_page_is_refused_before_count(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, field: str
+) -> None:
+    assert HTML_GET_QSV != GET_QSV
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + HTML_GET_QSV), home)
+    ds = _dataset(daemon, data, allow_replace=True, **{field: "https://h.x/dataset/x/landing"})
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (422, "not_data")
+    what = "the source URL" if field == "source_url" else "the PID"
+    assert str(info.value).startswith(f"{what} serves a web page, not data")
+    assert "--source-url" in str(info.value)
+    assert data.read_text() == "name\nold\n"
+    assert all(c[0] != "count" for c in _get_calls(log))  # refused before parsing
+    assert _staging_files(daemon, ds) == []
+
+
+async def test_a_web_page_labeled_as_csv_is_refused(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, web: _Routes
+) -> None:
+    web.routes["/d.csv"] = (200, "text/csv", b"<html><body>sign in</body></html>")
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, source_url=web.url("/d.csv"), allow_replace=True)
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (422, "not_data")
+    assert data.read_text() == "name\nold\n"
+    assert _staging_files(daemon, ds) == []
+
+
+@pytest.mark.parametrize(
+    ("ckan_api", "env", "expected"),
+    [
+        ("https://c.x/api/3/action", None, "https://c.x/api/3/action"),
+        (None, "https://env.x/api/3/action", "https://env.x/api/3/action"),
+        ("https://c.x/api/3/action", "https://env.x/api/3/action", "https://c.x/api/3/action"),
+    ],
+)
+async def test_ckan_sources_name_their_ckan_api(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ckan_api: str | None,
+    env: str | None,
+    expected: str,
+) -> None:
+    if env is None:
+        monkeypatch.delenv("QSV_CKAN_API", raising=False)
+    else:
+        monkeypatch.setenv("QSV_CKAN_API", env)
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + GET_QSV), home)
+    ds = _dataset(daemon, data, source_url="ckan://abc", ckan_api=ckan_api)
+    await fetch.fetch_latest(daemon, ds)
+    name = f"qsv-clientd-{ds.id}.csv"
+    assert _get_calls(log)[0] == ["get", "ckan://abc", "--name", name, "--ckan-api", expected]
+
+
+async def test_a_ckan_source_without_a_site_is_refused(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("QSV_CKAN_API", raising=False)
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + GET_QSV), home)
+    ds = _dataset(daemon, data, source_url="ckan://abc")
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (422, "needs_ckan_api")
+    assert "--ckan-api" in str(info.value)
+    # never sent to qsv's default CKAN site
+    assert not log.exists() or all(c[0] != "get" or c[1] != "ckan://abc" for c in _get_calls(log))
+    assert _staging_files(daemon, ds) == []
+
+
+@pytest.mark.parametrize("site", ["https://data.example.gov", "https://h.x/portal"])
+async def test_a_ckan_resource_page_is_fetched_from_its_site(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, site: str
+) -> None:
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + GET_QSV), home)
+    page = f"{site}/dataset/housing/resource/{RID.upper()}/"
+    ds = _dataset(daemon, data, pid=page)
+    result = await fetch.fetch_latest(daemon, ds)
+    assert result["via"] == "ckan"
+    name = f"qsv-clientd-{ds.id}.csv"
+    api = f"{site}/api/3/action"
+    assert _get_calls(log)[0] == ["get", f"ckan://{RID}", "--name", name, "--ckan-api", api]
+
+
+async def test_without_qsv_get_a_ckan_resource_is_looked_up_and_downloaded(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, web: _Routes
+) -> None:
+    web.routes["/files/inventory.csv"] = (200, "text/csv", b"name\nnew\n")
+    show = {"success": True, "result": {"url": web.url("/files/inventory.csv")}}
+    web.routes[f"/api/3/action/resource_show?id={RID}"] = (
+        200,
+        "application/json",
+        json.dumps(show).encode(),
+    )
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)  # the prebuilt qsv: no `get`
+    page = web.url(f"/dataset/housing/resource/{RID}")
+    ds = _dataset(daemon, data, source_url=page, allow_replace=True)
+    result = await fetch.fetch_latest(daemon, ds)
+    assert result["via"] == "ckan"
+    assert data.read_text() == "name\nnew\n"
+
+
+@pytest.mark.parametrize(
+    ("source", "show", "status", "code", "text"),
+    [
+        (
+            "ckan://abc",
+            None,
+            502,
+            "download_failed",
+            "needs qsv's `get` command and QSV_CKAN_TOKEN",
+        ),
+        ("ckan://abc", {"result": {}}, 422, "not_data", "has no data URL"),
+        (
+            "ckan://abc",
+            {"result": {"url": "file:///etc/passwd"}},
+            422,
+            "bad_source",
+            "file:///etc/passwd",
+        ),
+        ("ckan://housing?", None, 501, "needs_qsv_get", "use the id"),
+    ],
+)
+async def test_without_qsv_get_ckan_lookups_that_fail(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    web: _Routes,
+    source: str,
+    show: dict[str, Any] | None,
+    status: int,
+    code: str,
+    text: str,
+) -> None:
+    if show is not None:
+        web.routes["/api/3/action/resource_show?id=abc"] = (
+            200,
+            "application/json",
+            json.dumps(show).encode(),
+        )
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, source_url=source, ckan_api=web.url("/api/3/action"))
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (status, code)
+    assert text in str(info.value)
+    assert data.read_text() == "name\nold\n"
+    assert _staging_files(daemon, ds) == []
+
+
+async def test_without_qsv_get_a_ckan_source_still_needs_its_site(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("QSV_CKAN_API", raising=False)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, source_url="ckan://abc")
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (422, "needs_ckan_api")
+
+
+def _package(*resources: dict[str, Any]) -> Route:
+    body = {"success": True, "result": {"resources": list(resources)}}
+    return (200, "application/json", json.dumps(body).encode())
+
+
+async def test_a_ckan_dataset_page_with_one_table_is_fetched(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, web: _Routes
+) -> None:
+    web.routes["/api/3/action/package_show?id=housing"] = _package(
+        {"id": "pdf-1", "format": "PDF", "url": "https://h/a.pdf"},
+        {"id": "csv-1", "format": "", "url": "https://h/inventory.CSV"},
+        {"name": "no id"},
+    )
+    log = tmp_path / "argv.log"
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + GET_QSV), home)
+    ds = _dataset(daemon, data, pid=web.url("/dataset/housing"))
+    result = await fetch.fetch_latest(daemon, ds)
+    assert result["via"] == "ckan"
+    call = _get_calls(log)[0]
+    assert call[:2] == ["get", "ckan://csv-1"]
+    assert call[-2:] == ["--ckan-api", web.url("/api/3/action")]
+
+
+@pytest.mark.parametrize(
+    ("resources", "code", "text"),
+    [
+        ([{"id": "a", "format": "PDF"}], "not_data", "has no CSV or TSV resource"),
+        (
+            [
+                {"id": "a", "name": "2022", "format": "CSV", "url": "https://h/22.csv"},
+                {"id": "b", "format": "tsv"},
+            ],
+            "ambiguous_source",
+            "has 2 tabular resources; register the one you want with --source-url "
+            "(2022: https://h/22.csv; b: b)",
+        ),
+    ],
+)
+async def test_a_ckan_dataset_page_needs_exactly_one_table(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    web: _Routes,
+    resources: list[dict[str, Any]],
+    code: str,
+    text: str,
+) -> None:
+    web.routes["/api/3/action/package_show?id=housing"] = _package(*resources)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, pid=web.url("/dataset/housing"))
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (422, code)
+    assert text in str(info.value)
+    assert _staging_files(daemon, ds) == []
+
+
+@pytest.mark.parametrize(
+    "package_show",
+    [
+        None,  # 404: not CKAN
+        (200, "application/json", b"{not json"),
+        (200, "application/json", b'{"success": false}'),
+        (200, "application/json", b'{"success": true, "result": {"resources": "x"}}'),
+    ],
+)
+async def test_a_dataset_url_that_is_not_ckan_is_downloaded_as_it_is(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    web: _Routes,
+    package_show: Route | None,
+) -> None:
+    if package_show is not None:
+        web.routes["/api/3/action/package_show?id=housing"] = package_show
+    web.routes["/dataset/housing"] = (200, "text/csv", b"name\nnew\n")
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, source_url=web.url("/dataset/housing"), allow_replace=True)
+    result = await fetch.fetch_latest(daemon, ds)
+    assert result["via"] == "url"
+    assert data.read_text() == "name\nnew\n"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (f"https://d.x/dataset/h/resource/{RID}", (RID, "https://d.x/api/3/action")),
+        (f" http://d.x/a/b/dataset/h/resource/{RID}?x=1 ", (RID, "http://d.x/a/b/api/3/action")),
+        (f"https://d.x/dataset/h/resource/{RID}/download/f.csv", None),
+        ("https://d.x/dataset/h/resource/not-a-uuid", None),
+        (f"ckan://{RID}", None),
+    ],
+)
+def test_ckan_resource_page(url: str, expected: tuple[str, str] | None) -> None:
+    assert fetch.ckan_resource_page(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://data.example.gov", "https://data.example.gov/api/3/action"),
+        (" https://h.x/portal/ ", "https://h.x/portal/api/3/action"),
+        ("https://h.x/api/3/action/", "https://h.x/api/3/action"),
+        ("HTTP://h.x/api", "HTTP://h.x/api"),
+    ],
+)
+def test_ckan_api_url(value: str, expected: str) -> None:
+    assert fetch.ckan_api_url(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("head", "html"),
+    [
+        (b"\xef\xbb\xbf \r\n<!DOCTYPE HTML>", True),
+        (b"<html lang=en>", True),
+        (b"name,html\n<html>,1\n", False),  # data that mentions html
+        (b"", False),
+    ],
+)
+def test_looks_like_html(tmp_path: Path, head: bytes, html: bool) -> None:
+    path = tmp_path / "f"
+    path.write_bytes(head)
+    assert fetch._looks_like_html(path) is html
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://s3.amazonaws.com:443/b/k.csv?X-Amz-Signature=s",
+            "https://s3.amazonaws.com/b/k.csv?X-Amz-Signature=s",
+        ),
+        ("HTTP://h.x:80/a", "http://h.x/a"),
+        ("https://u:p@h.x:443/a", "https://u:p@h.x/a"),
+        ("https://[::1]:443/a", "https://[::1]/a"),
+        ("https://h.x:8443/a", "https://h.x:8443/a"),
+        ("http://h.x:443/a", "http://h.x:443/a"),
+        ("https://h.x/a", "https://h.x/a"),
+        ("https://h.x:bad/a", "https://h.x:bad/a"),
+        ("ftp://h.x:21/a", "ftp://h.x:21/a"),
+    ],
+)
+def test_drop_default_port(url: str, expected: str) -> None:
+    assert fetch._drop_default_port(url) == expected
+
+
+def test_redirects_drop_the_default_port() -> None:
+    import email.message
+
+    req = urllib.request.Request("https://data.example.gov/download/d.csv")
+    new = fetch._DefaultPortRedirects().redirect_request(
+        req, None, 302, "Found", email.message.Message(), "https://s3.amazonaws.com:443/b/k?sig=1"
+    )
+    assert new is not None and new.full_url == "https://s3.amazonaws.com/b/k?sig=1"
+
+
+@pytest.mark.parametrize("value", ["data.example.gov", "ftp://h.x", "https://"])
+def test_ckan_api_url_needs_an_http_url(value: str) -> None:
+    with pytest.raises(ValueError, match="must be an http"):
+        fetch.ckan_api_url(value)
 
 
 # -- helpers --------------------------------------------------------------------------------
@@ -787,3 +1150,68 @@ def test_stopping_a_running_daemon_does_not_wait_for_a_fetch(
         d.stop()
     assert time.monotonic() - started < 10  # not the 30s the download would take
     assert data.read_text() == "name\nold\n"
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_private_ckan_dataset_page_says_so(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, web: _Routes, status: int
+) -> None:
+    # CKAN refuses an anonymous package_show of a private dataset with 403
+    denied = b'{"success": false, "error": {"__type": "Authorization Error"}}'
+    web.routes["/api/3/action/package_show?id=housing"] = (status, "application/json", denied)
+    web.routes["/dataset/housing"] = (200, "text/html", b"<!doctype html><p>log in</p>")
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, source_url=web.url("/dataset/housing"), allow_replace=True)
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (403, "private_dataset")
+    assert "register the resource's own page URL" in str(info.value)
+    assert data.read_text() == "name\nold\n"
+    assert _staging_files(daemon, ds) == []
+
+
+def test_ckan_metadata_is_size_limited(web: _Routes, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fetch, "_METADATA_MAX_BYTES", 16)
+    web.routes["/m"] = (200, "application/json", b'{"result": "' + b"x" * 16 + b'"}')
+    with pytest.raises(FetchError) as info:
+        fetch._get_json(web.url("/m"), timeout=5, downloads=fetch.Downloads())
+    assert (info.value.status, info.value.code) == (502, "download_failed")
+    web.routes["/m"] = (200, "application/json", b"[1]")
+    assert fetch._get_json(web.url("/m"), timeout=5, downloads=fetch.Downloads()) == [1]
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Pad: "] + [b"a"] * 300,
+        [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n["] + [b""] * 300,
+    ],
+    ids=["trickled-headers", "stalled-body"],
+)
+def test_slow_ckan_metadata_is_a_download_timeout(
+    raw: Callable[[list[bytes], float], _Raw], chunks: list[bytes]
+) -> None:
+    server = raw(chunks, 0.1)
+    started = time.monotonic()
+    with pytest.raises(FetchError) as info:
+        fetch._get_json(server.url, timeout=0.5, downloads=fetch.Downloads())
+    assert time.monotonic() - started < 10
+    assert info.value.code == "download_timeout"
+
+
+def test_a_garbled_ckan_metadata_answer_is_an_oserror(
+    raw: Callable[[list[bytes], float], _Raw],
+) -> None:
+    server = raw([b"NOT HTTP AT ALL\r\n\r\n"], 0)
+    with pytest.raises(OSError):
+        fetch._get_json(server.url, timeout=5, downloads=fetch.Downloads())
+
+
+def test_ckan_metadata_is_refused_once_the_daemon_closes() -> None:
+    downloads = fetch.Downloads()
+    downloads.abort_all()
+    with pytest.raises(FetchError) as info:
+        fetch._get_json("http://127.0.0.1:9/m", timeout=5, downloads=downloads)
+    assert info.value.code == "shutting_down"

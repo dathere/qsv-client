@@ -24,6 +24,7 @@ import pytest
 from daemon_helpers import DaemonThread, Reply
 
 from qsv_client.daemon import DaemonConfig, server
+from qsv_client.daemon._http import HttpError
 from qsv_client.daemon.pairing import MAX_REQUESTS_PER_MINUTE
 from qsv_client.daemon.server import Daemon
 
@@ -671,3 +672,264 @@ def test_remove_runtime_files(home: Path) -> None:
     server.remove_runtime_files()
     assert not run.exists()
     server.remove_runtime_files()  # nothing left to remove: still fine
+
+
+# -- registering a URL: download first ------------------------------------------------------
+
+
+@pytest.fixture
+def web_csv() -> Iterator[Callable[[str, bytes], str]]:
+    """A loopback server; ``serve(path, body)`` answers ``path`` and returns its URL."""
+    import http.server
+    import threading
+
+    routes: dict[str, tuple[str, bytes]] = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            ctype, body = routes.get(self.path, ("text/plain", b""))
+            self.send_response(200 if self.path in routes else 404)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def serve(path: str, body: bytes, ctype: str = "text/csv") -> str:
+        routes[path] = (ctype, body)
+        return f"http://127.0.0.1:{httpd.server_address[1]}{path}"
+
+    yield serve
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def test_registering_a_url_downloads_it_beside_the_schematic(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    tmp_path: Path,
+    web_csv: Callable[..., str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_publish = server._publish_new
+
+    def publish(staged: Path, path: Path) -> None:
+        # off the event loop: without hard links, publishing copies up to fetch_max_bytes
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
+        real_publish(staged, path)
+
+    monkeypatch.setattr(server, "_publish_new", publish)
+    url = web_csv("/inventory.csv", b"name,n\nalpha,1\n")
+    d = start_daemon(fake_qsv(GENERIC))
+    target = tmp_path / "inventory.csv"
+    html = tmp_path / "inventory.html"
+    body = {"path": str(target), "source_url": url, "schematic_path": str(html)}
+    reply = _local(d, "POST", "/v1/datasets", {**body, "download": True, "render": True})
+    assert reply.status == 200, reply.body
+    ds = reply.json()
+    assert target.read_bytes() == b"name,n\nalpha,1\n"
+    assert (ds["path"], ds["source_url"], ds["ckan_api"]) == (str(target.resolve()), url, None)
+    assert html.read_text().startswith("<html>")
+    if sys.platform != "win32":
+        assert target.stat().st_mode & 0o777 == 0o600  # the data may be private
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
+GET_GENERIC = """
+import json
+if sys.argv[1:] == ["--capabilities"]:
+    print(json.dumps({"binary": "qsv", "version": "26.0.0", "error_formats": ["text", "json"],
+                      "commands": ["get", "count", "viz", "slice"]}))
+    sys.exit(0)
+with open(LOG, "a") as fh:
+    fh.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1:3] == ["get", "cache-fetch"]:
+    open(sys.argv[sys.argv.index("--output") + 1], "w").write("name\\nfetched\\n")
+elif sys.argv[1] == "viz":
+    open(sys.argv[sys.argv.index("--output") + 1], "w").write("<html></html>")
+else:
+    print(1)
+"""
+
+
+def test_a_downloaded_dataset_keeps_its_qsv_cache_entry(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, tmp_path: Path
+) -> None:
+    log = tmp_path / "argv.log"
+    d = start_daemon(fake_qsv(f"LOG = {str(log)!r}\n" + GET_GENERIC))
+    target = tmp_path / "d.csv"
+    body = {
+        "path": str(target),
+        "source_url": "ckan://abc",
+        "ckan_api": "https://data.example.gov/",
+        "download": True,
+    }
+    reply = _local(d, "POST", "/v1/datasets", body)
+    assert reply.status == 200, reply.body
+    ds = reply.json()
+    assert ds["ckan_api"] == "https://data.example.gov/api/3/action"
+    first = json.loads(log.read_text().splitlines()[0])
+    # the entry later fetches revalidate is the one this download made
+    name = f"qsv-clientd-{ds['id']}.csv"
+    assert first == ["get", "ckan://abc", "--name", name, "--ckan-api", ds["ckan_api"]]
+    assert target.read_text() == "name\nfetched\n"
+
+
+def test_registering_a_url_refusals(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    data: Path,
+    tmp_path: Path,
+    web_csv: Callable[..., str],
+) -> None:
+    d = start_daemon(fake_qsv(GENERIC))
+    page = web_csv("/landing", b"<!doctype html><title>x</title>", "text/csv")
+    new = tmp_path / "new.csv"
+
+    def register(**body: object) -> Reply:
+        return _local(d, "POST", "/v1/datasets", {"download": True, **body})
+
+    _assert_refused(register(path=str(new)), 422, "bad_request")
+    reply = register(path=str(data), source_url=page)
+    _assert_refused(reply, 409, "exists")
+    assert data.read_text() == "name,n\nalpha,1\nbeta,2\n"
+    reply = register(path=str(tmp_path / "nowhere" / "d.csv"), source_url=page)
+    _assert_refused(reply, 422, "not_found")
+    reply = register(path=str(new), source_url=page)
+    _assert_refused(reply, 422, "not_data")
+    message = reply.json()["daemon_error"]["message"]
+    assert message == (
+        "the URL serves a web page, not data; use the data file's download URL instead"
+    )
+    reply = register(path=str(new), source_url=page, ckan_api="ftp://x")
+    _assert_refused(reply, 422, "bad_request")
+    assert not new.exists()
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+    assert _local(d, "GET", "/v1/datasets").json() == []
+
+
+def test_a_file_that_appears_during_the_download_is_kept(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "d.csv"
+
+    async def download(daemon: Daemon, source: str, staging: Path, **kw: Any) -> tuple[Path, str]:
+        staged = staging / ".qsv-clientd-staged.csv"
+        staged.write_text("name\ndownloaded\n")
+        target.write_text("name\nmine\n")  # the user saved their own file meanwhile
+        return staged, "url"
+
+    monkeypatch.setattr("qsv_client.daemon.fetch.download", download)
+    d = start_daemon(fake_qsv(GENERIC))
+    body = {"path": str(target), "source_url": "https://e.x/d.csv", "download": True}
+    _assert_refused(_local(d, "POST", "/v1/datasets", body), 409, "exists")
+    assert target.read_text() == "name\nmine\n"
+    assert not (tmp_path / ".qsv-clientd-staged.csv").exists()
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_publishing_without_hard_links_still_never_replaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exists: bool
+) -> None:
+    staged, target = tmp_path / ".staged.csv", tmp_path / "d.csv"
+    staged.write_text("name\ndownloaded\n")
+    if exists:
+        target.write_text("name\nmine\n")
+
+    def no_links(src: Path, dst: Path) -> None:
+        raise PermissionError(1, "Operation not permitted")  # FAT, some network shares
+
+    monkeypatch.setattr(os, "link", no_links)
+    if exists:
+        with pytest.raises(HttpError) as err:
+            server._publish_new(staged, target)
+        assert err.value.status == 409
+        assert target.read_text() == "name\nmine\n"
+    else:
+        server._publish_new(staged, target)
+        assert target.read_text() == "name\ndownloaded\n"
+        if sys.platform != "win32":
+            assert target.stat().st_mode & 0o777 == 0o600  # the data may be private
+
+
+def test_publishing_without_hard_links_never_replaces_a_racing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged, target = tmp_path / ".staged.csv", tmp_path / "d.csv"
+    staged.write_text("name\ndownloaded\n")
+
+    def no_links(src: Path, dst: Path) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    # another process creates the file just before the publishing step: after any check for it
+    real_exists, real_open = Path.exists, os.open
+
+    def exists(self: Path, **kw: Any) -> bool:
+        found = real_exists(self, **kw)
+        if self == target:
+            target.write_text("name\nmine\n")
+        return found
+
+    def open_(path: Any, flags: int, mode: int = 0o777) -> int:
+        if Path(path) == target and not real_exists(target):
+            target.write_text("name\nmine\n")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(os, "open", open_)
+    with pytest.raises(HttpError) as err:
+        server._publish_new(staged, target)
+    assert err.value.status == 409
+    assert target.read_text() == "name\nmine\n"
+
+
+def test_a_failed_copy_leaves_no_partial_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged, target = tmp_path / ".staged.csv", tmp_path / "d.csv"
+    staged.write_text("name\ndownloaded\n")
+
+    def no_links(src: Path, dst: Path) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    def disk_full(src: Any, dst: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setattr(shutil, "copyfileobj", disk_full)
+    with pytest.raises(OSError):
+        server._publish_new(staged, target)
+    assert not target.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows can't replace an open file")
+def test_a_failed_copy_keeps_a_file_that_replaced_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged, target = tmp_path / ".staged.csv", tmp_path / "d.csv"
+    staged.write_text("name\ndownloaded\n")
+    theirs = tmp_path / "theirs.csv"
+    theirs.write_text("name\nmine\n")
+
+    def no_links(src: Path, dst: Path) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    def replaced_then_disk_full(src: Any, dst: Any) -> None:
+        os.replace(theirs, target)  # another process swaps in its own file mid-copy
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setattr(shutil, "copyfileobj", replaced_then_disk_full)
+    with pytest.raises(OSError):
+        server._publish_new(staged, target)
+    assert target.read_text() == "name\nmine\n"

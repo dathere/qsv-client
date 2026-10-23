@@ -164,7 +164,17 @@ qsv viz smart data.csv -o data.html
 qsv-clientd register data.csv --schematic data.html [--source-url URL] [-- <viz args>]
 # or render through the daemon, which registers it in one step:
 qsv-clientd viz data.csv -o data.html -- --dict-info
+# or start from a URL: the daemon downloads it, renders, registers and opens the page
+qsv-clientd viz https://data.example.gov/dataset/housing/resource/<resource id>
 ```
+
+**From a CKAN site.** Copy a resource's page address from your browser (or its download
+link) and pass it to `qsv-clientd viz`. The data is saved beside the schematic, named after
+the URL (`--save-as` to choose) and readable only by you, and the URL becomes the
+dataset's source, so Fetch latest
+gets the resource's current data. A schematic on the CKAN site itself never connects (see
+the qsv side's live-mode notes); this is how to try live mode on CKAN data.
+`ckan://<id>` works too, with `--ckan-api <site URL>`.
 
 Open `data.html`. When it finds the daemon it offers to connect and shows a code such as
 `K7Q-4MZ`; run `qsv-clientd approve K7Q-4MZ`, which tells you which dataset and which
@@ -289,7 +299,7 @@ size or modification time, as with an edit or a fetch with `--allow-replace`. A 
 |---|---|
 | `GET /v1/status` | → daemon, qsv and job information |
 | `POST /v1/run` | `{"command","args","cwd"?,"env"?,"stdin_b64"?,"stdout_path"?,"timeout"?}` → `{"result":{"args","exit_code","stdout_b64","stderr","duration","stdout_path"}}` or `{"error": <QsvError.to_dict()>}` (timeouts, version errors) or `{"os_error": {"errno","strerror","filename"}}`. The run itself uses `check=False`; the client applies `check` |
-| `GET /v1/datasets`, `POST /v1/datasets`, `DELETE /v1/datasets/<id>` | list / register (`path`, `viz_args`, `schematic_path`, `title`, `pid`, `source_url`, `allow_replace`, `force`, `render`) / forget |
+| `GET /v1/datasets`, `POST /v1/datasets`, `DELETE /v1/datasets/<id>` | list / register (`path`, `viz_args`, `schematic_path`, `title`, `pid`, `source_url`, `ckan_api`, `allow_replace`, `force`, `render`, `download`) / forget. With `download`, `source_url` is downloaded to `path` first (409 `exists` if `path` exists) |
 | `GET /v1/pairings`, `POST /v1/pairings/<code>/approve\|deny` | pending pairings (`code`, `origin`, `dataset`, `approved`, `denied`, `expires_in` seconds) / decide |
 | `POST /v1/tokens/revoke` | `{"dataset_id"?}` → `{"revoked": n}` |
 
@@ -303,6 +313,10 @@ a registered dataset by it:
   "schematic_uuid":"…","fingerprint":{"algo":"blake3","digest":"…","bytes":123},
   "rows":4,"viz_args":["--dict-info"],"redacted":[],"pid":"https://doi.org/…"}</script>
 ```
+
+When qsv rendered from data it downloaded with `qsv get` (a `dc:` input) without
+credentials, the block also has `"source": {"url", "ckan_api"?}`, and `register --schematic`
+uses it as the dataset's source URL unless you pass `--source-url`.
 
 The page pairs with `schematic_uuid`, falling back to `fingerprint.digest`. A
 `fingerprint` is `{"algo","digest","bytes"}`. The daemon fingerprints data with BLAKE3,
@@ -324,6 +338,19 @@ re-rendering. Flags whose value is a file keep only its basename and are listed 
 - **DOIs.** A DOI is resolved through DataCite content negotiation, looking for a
   `contentUrl`. Most DOIs resolve to a landing page instead, so register `--source-url` for
   those.
+- **CKAN pages.** A resource page (`<site>/dataset/<name>/resource/<id>`, with or without a
+  subpath before `/dataset/`) is fetched as `ckan://<id>` from that site. A dataset page is
+  looked up with `package_show`: with exactly one CSV or TSV resource it is fetched as that
+  one; with several, the error lists them, so register one with `--source-url`. A private
+  dataset's page is refused with a message saying so: the daemon sends no CKAN token to
+  a site named only by a URL, so register the resource's page instead.
+- **`ckan://` sources** resolve against the dataset's CKAN site (`--ckan-api`, which takes a
+  site URL or an Action API URL), else `QSV_CKAN_API` in the daemon's environment. With
+  neither, the fetch is refused rather than sent to qsv's default CKAN site. Private CKAN
+  resources need `QSV_CKAN_TOKEN` in the daemon's environment.
+- **Web pages are refused.** A download that is an HTML page (by its Content-Type, or by
+  its first bytes, since `qsv get` keeps whatever the server sent) fails with 422 `not_data`
+  before anything is replaced.
 
 A download is limited to `fetch_max_bytes` (10 GiB by default) and `fetch_timeout` (30
 minutes, for the whole download, headers included; looking up the host's address is bounded

@@ -25,12 +25,14 @@ import shutil
 import signal
 import sys
 import tempfile
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from .. import __version__
+from .._process import _finish_despite_cancel
 from ..client import AsyncQsv, QsvResult, find_qsv
 from ..errors import EXIT_TIMEOUT, SUCCESS_EXIT_CODES, QsvError, QsvTimeout, error_from_run
 from . import fetch
@@ -506,6 +508,17 @@ class Daemon:
 
     async def _register(self, body: dict[str, Any]) -> Response:
         path = _abs_path(body.get("path"), "path")
+        source_url = _opt(body.get("source_url"))
+        ckan_api = _opt(body.get("ckan_api"))
+        if ckan_api is not None:
+            try:
+                ckan_api = fetch.ckan_api_url(ckan_api)
+            except ValueError as exc:
+                raise HttpError(422, "bad_request", str(exc)) from None
+        dataset_id = None
+        if body.get("download") is True:
+            dataset_id = uuid.uuid4().hex
+            await self._download_new(path, source_url, ckan_api, dataset_id)
         if not path.is_file():
             raise HttpError(422, "not_found", f"no such file: {path}")
         viz_args = _str_list(body.get("viz_args", []), "viz_args")
@@ -541,13 +554,48 @@ class Daemon:
             source=source,
             title=_opt(body.get("title")),
             pid=_opt(body.get("pid")),
-            source_url=_opt(body.get("source_url")),
+            source_url=source_url,
             allow_replace=body.get("allow_replace") is True,
+            ckan_api=ckan_api,
+            dataset_id=dataset_id,
         )
         log.info("dataset registered: %s (%s)", ds.id, ds.path)
         if body.get("render"):
             await self._render_to_disk(ds)
         return Response.json(_private(ds))
+
+    async def _download_new(
+        self, path: Path, source_url: str | None, ckan_api: str | None, dataset_id: str
+    ) -> None:
+        """Download ``source_url`` to ``path``, a file that must not exist yet."""
+        if source_url is None:
+            raise HttpError(422, "bad_request", "download needs a source_url")
+        if path.exists():
+            raise HttpError(409, "exists", f"{path} already exists; register it instead")
+        if not path.parent.is_dir():
+            raise HttpError(422, "not_found", f"no such directory: {path.parent}")
+        # logged by target, not URL: a typed URL may carry a token in its query
+        log.info("download started: %s", path)
+        try:
+            # staged beside the target, so it is moved into place, never copied across devices
+            staged, _via = await fetch.download(
+                self,
+                source_url,
+                path.parent,
+                name=f"qsv-clientd-{dataset_id}.csv",
+                ckan_api=ckan_api,
+                what="the URL",
+            )
+        except fetch.FetchError as exc:
+            log.info("download failed: %s: %s", path, exc.code)
+            raise HttpError(exc.status, exc.code, str(exc)) from None
+        # left 0600 as mkstemp made it: the data may be private (a CKAN token, a signed URL)
+        try:
+            # off the event loop: without hard links it copies, up to fetch_max_bytes
+            await _finish_despite_cancel(asyncio.to_thread(_publish_new, staged, path))
+        finally:
+            staged.unlink(missing_ok=True)
+        log.info("download finished: %s", path)
 
     def _pending(self) -> list[dict[str, Any]]:
         out = []
@@ -968,6 +1016,34 @@ def _result_key(request: Request, tier: Tier) -> str:
 
 def _bearer(request: Request) -> str:
     return request.headers.get("authorization", "").removeprefix("Bearer ")
+
+
+def _publish_new(staged: Path, path: Path) -> None:
+    """Move ``staged`` to ``path``, which must not exist: a file that appeared there while
+    downloading is the user's and is never replaced."""
+    exists = HttpError(409, "exists", f"{path} already exists; register it instead")
+    try:
+        os.link(staged, path)  # fails if path exists, atomically
+    except FileExistsError:
+        raise exists from None
+    except OSError:  # no hard links on this file system (FAT, some network shares)
+        # copied into a file created exclusively (which also fails if path exists), 0600 as
+        # the staged file is
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            raise exists from None
+        ours = os.fstat(fd)
+        try:
+            with os.fdopen(fd, "wb") as out, staged.open("rb") as src:
+                shutil.copyfileobj(src, out)
+        except BaseException:
+            # only the partial copy: another process may have replaced it meanwhile
+            with contextlib.suppress(OSError):
+                if os.path.samestat(ours, os.stat(path)):
+                    path.unlink()
+            raise
 
 
 def _private(ds: Dataset) -> dict[str, Any]:
