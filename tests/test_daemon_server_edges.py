@@ -847,3 +847,56 @@ def test_publishing_without_hard_links_still_never_replaces(
     else:
         server._publish_new(staged, target)
         assert target.read_text() == "name\ndownloaded\n"
+        if sys.platform != "win32":
+            assert target.stat().st_mode & 0o777 == 0o600  # the data may be private
+
+
+def test_publishing_without_hard_links_never_replaces_a_racing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged, target = tmp_path / ".staged.csv", tmp_path / "d.csv"
+    staged.write_text("name\ndownloaded\n")
+
+    def no_links(src: Path, dst: Path) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    # another process creates the file just before the publishing step: after any check for it
+    real_exists, real_open = Path.exists, os.open
+
+    def exists(self: Path, **kw: Any) -> bool:
+        found = real_exists(self, **kw)
+        if self == target:
+            target.write_text("name\nmine\n")
+        return found
+
+    def open_(path: Any, flags: int, mode: int = 0o777) -> int:
+        if Path(path) == target and not real_exists(target):
+            target.write_text("name\nmine\n")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(os, "open", open_)
+    with pytest.raises(HttpError) as err:
+        server._publish_new(staged, target)
+    assert err.value.status == 409
+    assert target.read_text() == "name\nmine\n"
+
+
+def test_a_failed_copy_leaves_no_partial_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged, target = tmp_path / ".staged.csv", tmp_path / "d.csv"
+    staged.write_text("name\ndownloaded\n")
+
+    def no_links(src: Path, dst: Path) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    def disk_full(src: Any, dst: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "link", no_links)
+    monkeypatch.setattr(shutil, "copyfileobj", disk_full)
+    with pytest.raises(OSError):
+        server._publish_new(staged, target)
+    assert not target.exists()

@@ -1025,9 +1025,19 @@ def _publish_new(staged: Path, path: Path) -> None:
     except FileExistsError:
         raise exists from None
     except OSError:  # no hard links on this file system (FAT, some network shares)
-        if path.exists():
+        # copied into a file created exclusively (which also fails if path exists), 0600 as
+        # the staged file is
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
             raise exists from None
-        os.replace(staged, path)
+        try:
+            with os.fdopen(fd, "wb") as out, staged.open("rb") as src:
+                shutil.copyfileobj(src, out)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
 
 
 def _private(ds: Dataset) -> dict[str, Any]:
