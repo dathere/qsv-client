@@ -104,6 +104,26 @@ class SchematicSource:
         return cls.from_json(data) if isinstance(data, dict) else None
 
 
+def with_source(html: str, source: dict[str, str]) -> str:
+    """``html`` with ``source`` set in its ``qsv-schematic-source`` block (unchanged without one).
+
+    Escaped as qsv writes the block, so a ``</script>`` in a value can't end it early.
+    """
+    match = _SOURCE_RE.search(html)
+    if match is None:
+        return html
+    try:
+        data = json.loads(match.group(1))
+    except ValueError:
+        return html
+    if not isinstance(data, dict):
+        return html
+    data["source"] = source
+    body = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    body = body.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return html[: match.start(1)] + body + html[match.end(1) :]
+
+
 def _opt_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 

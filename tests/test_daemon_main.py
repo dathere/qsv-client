@@ -84,12 +84,14 @@ class Terminal(io.StringIO):
 
 
 def _tty(monkeypatch: pytest.MonkeyPatch, answer: str) -> list[str]:
-    """Make stdin a terminal whose user types ``answer``; return the prompts shown."""
+    """Make stdin a terminal whose user types ``answer``; return one entry per question asked
+    (the prompt itself is on stderr)."""
     prompts: list[str] = []
     monkeypatch.setattr(sys, "stdin", Terminal())
 
     def fake_input(prompt: str = "") -> str:
-        prompts.append(prompt)
+        assert prompt == ""  # prompts go to stderr: stdout may be piped JSON
+        prompts.append(answer)
         return answer
 
     monkeypatch.setattr("builtins.input", fake_input)
@@ -507,14 +509,16 @@ def test_register_accepts_embedded_viz_args_with_yes(
     body = fake.requests[0][2]
     assert body is not None
     assert body["viz_args"] == ["--theme", "dark"]
-    out = capsys.readouterr().out
-    assert out.startswith("The schematic was rendered with: qsv viz smart --theme dark\n")
+    out, err = capsys.readouterr()
+    assert err == "The schematic was rendered with: qsv viz smart --theme dark\n"
+    assert json.loads(out) == {"id": "ds1"}  # stdout is the JSON alone, ready to pipe
 
 
 @pytest.mark.parametrize(("answer", "accepted"), [("y", True), (" YES ", True), ("n", False)])
 def test_register_asks_about_embedded_viz_args(
     fake_client: Callable[..., FakeClient],
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     answer: str,
     accepted: bool,
@@ -523,7 +527,11 @@ def test_register_asks_about_embedded_viz_args(
     html = _schematic(tmp_path / "s.html", viz_args=["--theme", "dark"])
     fake = fake_client()
     assert cli.main(["register", str(tmp_path / "d.csv"), "--schematic", str(html)]) == 0
-    assert prompts == ["Use these arguments when the daemon re-renders it? [y/N] "]
+    assert len(prompts) == 1
+    assert capsys.readouterr().err == (
+        "The schematic was rendered with: qsv viz smart --theme dark\n"
+        "Use these arguments when the daemon re-renders it? [y/N] "
+    )
     body = fake.requests[0][2]
     assert body is not None
     assert body["viz_args"] == (["--theme", "dark"] if accepted else [])
@@ -553,8 +561,8 @@ def test_register_explains_redacted_viz_args(
     assert body is not None
     # even with --yes: the paths are gone, so the arguments cannot be reused
     assert body["viz_args"] == []
-    out = capsys.readouterr().out
-    assert "file paths were removed from the schematic: --logo, --css." in out
+    err = capsys.readouterr().err
+    assert "file paths were removed from the schematic: --logo, --css." in err
 
 
 @pytest.mark.parametrize("kind", ["no-source", "no-viz-args", "missing-file"])
@@ -818,11 +826,13 @@ def test_approve_asks_on_a_terminal(
         {("GET", "/v1/pairings"): [_pairing()], ("POST", "/v1/pairings/ABC123/approve"): {}}
     )
     assert cli.main(["approve", "ABC123"]) == (0 if approved else 1)
-    assert prompts == ["Approve? [y/N] "]
+    assert len(prompts) == 1
     sent = [r[:2] for r in fake.requests]
     assert (("POST", "/v1/pairings/ABC123/approve") in sent) is approved
+    err = capsys.readouterr().err
+    assert err.startswith("Approve? [y/N] ")
     if not approved:
-        assert capsys.readouterr().err == "not approved\n"
+        assert err == "Approve? [y/N] not approved\n"
 
 
 # -- against a real daemon ------------------------------------------------------------------

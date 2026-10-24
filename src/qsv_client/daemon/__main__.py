@@ -126,7 +126,9 @@ def _print(data: Any) -> None:
 def _confirm(prompt: str) -> bool:
     if not sys.stdin.isatty():
         return False
-    return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+    # on stderr: input() would write it to stdout, into a pipe reading this command's JSON
+    print(f"{prompt} [y/N] ", end="", file=sys.stderr, flush=True)
+    return input().strip().lower() in ("y", "yes")
 
 
 def _serve(ns: argparse.Namespace) -> int:
@@ -149,12 +151,17 @@ def _register(client: DaemonClient, ns: argparse.Namespace) -> int:
     if ns.schematic is not None and ns.schematic.is_file() and not viz_args:
         source = SchematicSource.from_html(ns.schematic.read_text("utf-8", "replace"))
         if source is not None and source.viz_args:
-            print("The schematic was rendered with: qsv viz smart " + " ".join(source.viz_args))
+            # stdout is the registration's JSON alone, so it can be piped
+            print(
+                "The schematic was rendered with: qsv viz smart " + " ".join(source.viz_args),
+                file=sys.stderr,
+            )
             if source.redacted:
                 print(
                     "These flags' file paths were removed from the schematic: "
                     + ", ".join(source.redacted)
-                    + ". To re-render, register again with the full arguments after --."
+                    + ". To re-render, register again with the full arguments after --.",
+                    file=sys.stderr,
                 )
             elif ns.yes or _confirm("Use these arguments when the daemon re-renders it?"):
                 viz_args = list(source.viz_args)
