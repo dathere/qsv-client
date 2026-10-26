@@ -25,8 +25,9 @@ subprocess pitfalls:
   Schematic from `qsv viz smart` work with its live data, with an optional system tray to
   run and control it. See [The qsv-clientd daemon](#the-qsv-clientd-daemon).
 
-qsv itself is not bundled, and **qsv 25.0.0 or later** is required. Install it from the
-[qsv releases](https://github.com/dathere/qsv/releases) or a
+qsv itself is not bundled, and **qsv 25.0.0 or later** is required; live Data Schematics
+need **qsv 27.0.0 or later** (with an older qsv, `qsv-clientd serve` and the tray say so).
+Install it from the [qsv releases](https://github.com/dathere/qsv/releases) or a
 [package manager](https://github.com/dathere/qsv#installation-options).
 
 ## Install
@@ -135,9 +136,16 @@ are paged from the daemon, so every row is reachable.
 
 ```bash
 qsv-clientd install                       # or: qsv-clientd serve
-qsv-clientd register data.csv --schematic data.html
+qsv-clientd viz data.csv                  # render, register and open data.html
+qsv-clientd viz https://data.example.gov/dataset/housing/resource/<resource id>
 qsv-clientd approve K7Q-4MZ               # the code the schematic shows
 ```
+
+`viz` with a URL (an http(s) download link, a CKAN resource page, or `ckan://<id>`)
+downloads the data first and remembers the URL, so Fetch latest gets the current data. An
+existing schematic can be registered with `qsv-clientd register data.csv --schematic
+data.html`. Settings go in `daemon.toml` (where it lives is in the doc); the tray's Open
+config… creates it with every setting documented and commented out.
 
 ```python
 from qsv_client.daemon import DaemonClient
