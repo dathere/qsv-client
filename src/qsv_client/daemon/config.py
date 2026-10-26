@@ -5,16 +5,12 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from ..capabilities import parse_version
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # Python 3.10
-    import tomli as tomllib
 
 DEFAULT_PORT = 14470
 """Loopback port for browsers (Data Schematics). qsv pro's API uses 14462."""

@@ -9,7 +9,7 @@ description = "Run the qsv CSV toolkit (25.0.0+) from Python: timeouts that kill
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "datHere" }]
 keywords = ["qsv", "csv", "data-wrangling", "subprocess"]
 classifiers = [
@@ -23,11 +23,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Typing :: Typed",
 ]
-dependencies = ["tomli>=2.0; python_version < '3.11'"]  # tomllib before 3.11
+dependencies = []
 
 [project.optional-dependencies]
 # the system tray for qsv-clientd: `pip install 'qsv-client[tray]'`
-tray = ["pystray>=0.19.5,<0.20", "Pillow>=10"]
+tray = ["pystray>=0.19.5,<0.20", "Pillow>=13"]
 
 [project.scripts]
 qsv-clientd = "qsv_client.daemon.__main__:main"
@@ -87,7 +87,7 @@ ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]

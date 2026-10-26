@@ -632,7 +632,7 @@ class AsyncQsv(_Base):
             lock = _async_probe_lock(key)
             try:
                 await asyncio.wait_for(lock.acquire(), limit)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 raise _probe_wait_timeout(self.binary, limit) from None
             try:
                 cached = _caps_cache.get(key)

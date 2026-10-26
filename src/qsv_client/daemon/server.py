@@ -295,13 +295,13 @@ class Daemon:
             try:
                 try:
                     request = await asyncio.wait_for(read_head(reader), _HEAD_TIMEOUT)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     raise HttpError(408, "timeout", "request head not received in time") from None
                 tier = self._tier(request, transport)
                 limit = _LOCAL_BODY_LIMIT if tier == "local" else _BROWSER_BODY_LIMIT
                 try:
                     await asyncio.wait_for(read_body(reader, request, limit), _BODY_TIMEOUT)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     raise HttpError(408, "timeout", "request body not received in time") from None
                 if request.method == "OPTIONS":
                     response = Response(204)
@@ -333,7 +333,7 @@ class Daemon:
             # Stay in _writers until done, so a shutdown that starts meanwhile can abort us
             try:
                 await asyncio.wait_for(writer.wait_closed(), _FLUSH_TIMEOUT)
-            except (asyncio.TimeoutError, ConnectionError):
+            except (TimeoutError, ConnectionError):
                 writer.transport.abort()
             except BaseException:  # cancelled by shutdown: don't leave the transport flushing
                 writer.transport.abort()
@@ -999,7 +999,7 @@ class Daemon:
         else:
             try:
                 await asyncio.wait_for(self.jobs.acquire(), wait)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 raise QsvTimeout(
                     f"timed out after {wait}s waiting for one of the daemon's "
                     f"{self.config.max_jobs} job slots; qsv did not run",

@@ -12,7 +12,7 @@ callers:
   the latest data from its source URL or PID. Without the daemon the schematic works exactly
   as before.
 
-It needs nothing beyond the Python standard library, and runs on Python 3.10+ like the rest
+It needs nothing beyond the Python standard library, and runs on Python 3.11+ like the rest
 of the package.
 
 ## Running it
