@@ -169,6 +169,11 @@ class DaemonConfig:
         try:
             data = tomllib.loads(path.read_text(encoding="utf-8"))
         except tomllib.TOMLDecodeError as exc:
+            if path.suffix.lower() == ".json":  # a config from before 0.6.0
+                raise ValueError(
+                    f"{path}: the config is TOML now ({CONFIG_FILE}, one `key = value` per "
+                    f"line), not JSON: {exc}"
+                ) from None
             raise ValueError(f"{path}: {exc}") from None
         known = {f.name: f for f in fields(cls)}
         unknown = sorted(set(data) - set(known))

@@ -151,6 +151,13 @@ def test_config_must_be_valid_toml(tmp_path: Path, text: str) -> None:
         DaemonConfig.load(path)
 
 
+def test_a_json_config_says_the_format_changed(tmp_path: Path) -> None:
+    path = tmp_path / "old.json"
+    path.write_text('{"port": 0}')
+    with pytest.raises(ValueError, match=r"old\.json: the config is TOML now \(daemon\.toml"):
+        DaemonConfig.load(path)
+
+
 def test_config_rejects_unknown_and_mistyped_settings(tmp_path: Path) -> None:
     path = tmp_path / "daemon.toml"
     path.write_text("port = 1\nprot = 2\n")
