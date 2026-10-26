@@ -1,24 +1,49 @@
-"""Where qsv-clientd keeps its files, and its JSON configuration."""
+"""Where qsv-clientd keeps its files, and its TOML configuration."""
 
 from __future__ import annotations
 
 import json
 import os
 import sys
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+
+from ..capabilities import parse_version
 
 DEFAULT_PORT = 14470
 """Loopback port for browsers (Data Schematics). qsv pro's API uses 14462."""
 
 API_VERSION = 1
 
+LIVE_SCHEMATICS_QSV = "27.0.0"
+"""The first qsv whose Data Schematics connect to qsv-clientd."""
+
+
+def schematics_notice(qsv_version: object) -> str | None:
+    """Why schematics won't go live with this qsv, or None when they will (or it can't tell)."""
+    if not isinstance(qsv_version, str):
+        return None
+    try:
+        older = parse_version(qsv_version) < parse_version(LIVE_SCHEMATICS_QSV)
+    except ValueError:
+        return None
+    if not older:
+        return None
+    return (
+        f"qsv {qsv_version} writes Data Schematics that can't connect to qsv-clientd. "
+        f"Live schematics need qsv {LIVE_SCHEMATICS_QSV} or later."
+    )
+
 
 def _home_override() -> Path | None:
     # one directory for everything; used by tests and for running several daemons side by side
     home = os.environ.get("QSV_CLIENTD_HOME")
     return Path(home) if home else None
+
+
+CONFIG_FILE = "daemon.toml"
 
 
 def config_dir() -> Path:
@@ -64,8 +89,13 @@ def socket_path_error(path: str | os.PathLike[str], exc: OSError) -> str | None:
     return (
         f"the socket path {os.fspath(path)} is too long for a Unix socket "
         f"({len(os.fsencode(path))} bytes); set QSV_CLIENTD_SOCKET, or `socket` in "
-        "daemon.json, to a shorter path"
+        f"{CONFIG_FILE}, to a shorter path"
     )
+
+
+def config_path() -> Path:
+    """The default config file, ``daemon.toml`` in :func:`config_dir`."""
+    return config_dir() / CONFIG_FILE
 
 
 def local_token_path() -> Path:
@@ -118,7 +148,7 @@ _TYPE_CHECKS: dict[str, Callable[[object], bool]] = {
 
 @dataclass
 class DaemonConfig:
-    """Settings read from ``daemon.json`` in :func:`config_dir` (every key is optional)."""
+    """Settings read from :func:`config_path` (every key is optional)."""
 
     binary: str | None = None
     """qsv binary (or sandbox wrapper); default: ``$QSV_BIN``, then PATH, like ``Qsv``."""
@@ -150,12 +180,18 @@ class DaemonConfig:
 
     @classmethod
     def load(cls, path: Path | None = None) -> DaemonConfig:
-        path = path or config_dir() / "daemon.json"
+        path = path or config_path()
         if not path.exists():
             return cls()
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError(f"{path}: expected a JSON object")
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError as exc:
+            if path.suffix.lower() == ".json":  # a config from before 0.6.0
+                raise ValueError(
+                    f"{path}: the config is TOML now ({CONFIG_FILE}, one `key = value` per "
+                    f"line), not JSON: {exc}"
+                ) from None
+            raise ValueError(f"{path}: {exc}") from None
         known = {f.name: f for f in fields(cls)}
         unknown = sorted(set(data) - set(known))
         if unknown:
@@ -168,3 +204,93 @@ class DaemonConfig:
 
     def socket_path(self) -> Path:
         return Path(self.socket) if self.socket else default_socket_path()
+
+
+# what config_template says about each setting, and an example for those without a default
+_HELP: dict[str, tuple[str, str | None]] = {
+    "binary": (
+        "The qsv binary (or a sandbox wrapper): a path, or a name to look up on PATH.\n"
+        "Default: $QSV_BIN, then qsv on PATH.",
+        '"/usr/local/bin/qsv"',
+    ),
+    "port": (
+        "Loopback TCP port for Data Schematics (and local clients on Windows).\n"
+        "0 turns the browser listener off.",
+        None,
+    ),
+    "socket": (
+        "Unix socket path for local clients (macOS and Linux). Default: qsvd.sock in the\n"
+        "runtime directory. It must fit a socket address: about 104 bytes on macOS, 108 on Linux.",
+        '"/path/to/qsvd.sock"',
+    ),
+    "max_jobs": (
+        "How many qsv runs at once, at least 1. Default: half your CPU cores.",
+        None,
+    ),
+    "max_timeout": (
+        "Seconds. The longest a local run may take, and its timeout when it sets none.",
+        None,
+    ),
+    "inherit_env": (
+        "true: qsv runs get the daemon's environment. false: they start from an empty one.",
+        None,
+    ),
+    "kill_grace": (
+        "Seconds between asking a timed-out run to stop and killing it.",
+        None,
+    ),
+    "browser": ("true or false: let paired Data Schematics use the daemon.", None),
+    "browser_origins": (
+        'Origins allowed to pair, such as "https://example.org".\n'
+        '"null" is what a schematic opened as a file (file://) sends.',
+        None,
+    ),
+    "browser_timeout": ("Seconds. How long a qsv run started for a schematic may take.", None),
+    "browser_max_output": (
+        "Bytes. The most output a schematic gets back from one run (default 4 MiB).",
+        None,
+    ),
+    "browser_max_result": (
+        "Bytes. The largest result a schematic can read page by page (default 1 GiB).",
+        None,
+    ),
+    "browser_max_render": (
+        "Bytes. The largest re-rendered schematic sent back to a page (default 64 MiB).",
+        None,
+    ),
+    "token_ttl": ("Seconds a schematic stays paired (default 8 hours).", None),
+    "allow_fetch": (
+        "true or false: let paired schematics ask the daemon to download the latest data.",
+        None,
+    ),
+    "fetch_max_bytes": (
+        "Bytes. The largest download a fetch accepts (default 10 GiB).",
+        None,
+    ),
+    "fetch_timeout": ("Seconds. The longest one fetch's download may take.", None),
+}
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    return json.dumps(value)  # a string or a list of strings: valid TOML too
+
+
+def config_template() -> str:
+    """A ``daemon.toml`` with every setting commented out: its default (or an example) and
+    the values it takes. Lines left commented keep following the daemon's own defaults."""
+    defaults = DaemonConfig()
+    lines = [
+        "# qsv-clientd settings. Every setting is optional: one left commented out keeps its",
+        '# default. To change one, delete the "# " before it, then restart the daemon.',
+        "# More: https://github.com/dathere/qsv-client/blob/main/docs/DAEMON.md",
+    ]
+    for f in fields(DaemonConfig):
+        help_text, example = _HELP[f.name]
+        default = getattr(defaults, f.name)
+        value = example if default is None else _toml_value(default)
+        lines += ["", *(f"# {line}" for line in help_text.splitlines()), f"# {f.name} = {value}"]
+    return "\n".join(lines) + "\n"

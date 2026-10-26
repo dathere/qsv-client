@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qsv-client"
-version = "0.5.0"
-description = "Run the qsv CSV toolkit (25.0.0+) from Python: timeouts that kill the whole process tree, typed errors, capability detection, and a local daemon (with an optional system tray) for live Data Schematics."
+version = "0.6.0"
+description = "Run the qsv CSV toolkit (25.0.0+) from Python: timeouts that kill the whole process tree, typed errors, capability detection, and a local daemon (with an optional system tray) for live Data Schematics (qsv 27.0.0+)."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "datHere" }]
 keywords = ["qsv", "csv", "data-wrangling", "subprocess"]
 classifiers = [
@@ -27,7 +27,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # the system tray for qsv-clientd: `pip install 'qsv-client[tray]'`
-tray = ["pystray>=0.19.5,<0.20", "Pillow>=10"]
+tray = ["pystray>=0.19.5,<0.20", "Pillow>=13"]
 
 [project.scripts]
 qsv-clientd = "qsv_client.daemon.__main__:main"
@@ -87,7 +87,7 @@ ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]

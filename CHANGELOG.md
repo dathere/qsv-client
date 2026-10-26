@@ -6,14 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-26
+
+This release accompanies qsv 27.0.0, the first qsv whose Data Schematics connect to
+`qsv-clientd`. `qsv-clientd viz <URL>` turns a download link or a CKAN page into a live
+schematic in one step, and `qsv-clientd` remembers where the data came from, so Fetch latest
+gets the current version.
+
 ### Added
 
 - **`qsv-clientd viz <URL>`** ([#34](https://github.com/dathere/qsv-client/pull/34)) downloads the data first, then renders, registers and opens
   the schematic in one step. The URL can be an http(s) download link, `ckan://<id>`, or a
   CKAN resource page copied from the browser. It is also where Fetch latest gets new data.
   The data is saved beside the schematic (`--save-as` to choose), readable only by you
-  since it may be private, never replacing an existing file. `-o` now defaults to
-  the data's name with `.html`. `--no-open` skips the browser.
+  since it may be private, never replacing an existing file. A qsv with `get` also keeps a
+  copy in its own cache (`~/.qsv-cache` by default, or `QSV_CACHE_DIR`), which follows
+  your umask. `-o` now defaults to the data's name with `.html`. `--no-open` skips the
+  browser.
 - **CKAN pages as sources.** ([#34](https://github.com/dathere/qsv-client/pull/34)) A CKAN resource page (`<site>/dataset/<name>/resource/<id>`) is
   fetched as `ckan://<id>` from that site. A CKAN dataset page with exactly one CSV or TSV
   resource, found with `package_show`, is fetched as that resource; with several, the
@@ -23,6 +32,23 @@ All notable changes to this project are documented here. The format follows
   URL) for `ckan://` sources.
 - `register --schematic` takes the source URL (and its CKAN site) from a schematic that
   records one, as qsv records it for data downloaded with `qsv get`. ([#34](https://github.com/dathere/qsv-client/pull/34))
+- With a qsv older than 27.0.0, whose schematics can't connect, `qsv-clientd serve` logs a
+  warning and the tray shows a notification once, instead of leaving schematics silently
+  offline. Everything else still works with qsv 25.0.0 or later.
+
+### Changed
+
+- **Python 3.11 or later is required**; 3.10 is no longer supported. The `[tray]` extra now
+  needs Pillow 13.0.0, which fixes its known vulnerabilities and requires Python 3.11.
+  (The tray opens only its own bundled icon, so they weren't reachable through it.)
+- **The daemon's config is now `daemon.toml`**, not `daemon.json`, so it can carry comments.
+  The tray's Open config… creates it with every setting commented out, each with its
+  default and the values it takes; nothing changes until you uncomment a line. A
+  `daemon.json` from an earlier release is no longer read: move its settings across
+  (`serve --config` with an old JSON file says so). It is read with the standard
+  library's `tomllib`, so qsv-client still has no runtime dependencies.
+- The docs now name the release that brings live Data Schematics: qsv 27.0.0 or later
+  (before, "a qsv newer than 26.0.0"). Other uses still need only qsv 25.0.0.
 
 ### Fixed
 
@@ -278,7 +304,8 @@ First release. ([#1](https://github.com/dathere/qsv-client/pull/1))
   environment variables, so keys never appear on the command line.
 - Type hints (`py.typed`), no runtime dependencies, Python 3.10+.
 
-[Unreleased]: https://github.com/dathere/qsv-client/compare/0.5.0...HEAD
+[Unreleased]: https://github.com/dathere/qsv-client/compare/0.6.0...HEAD
+[0.6.0]: https://github.com/dathere/qsv-client/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/dathere/qsv-client/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/dathere/qsv-client/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/dathere/qsv-client/compare/0.2.0...0.3.0

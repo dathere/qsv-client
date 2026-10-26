@@ -507,7 +507,7 @@ def test_client_uses_configured_socket(
 ) -> None:
     home = Path(os.environ["QSV_CLIENTD_HOME"])
     sock = home / "custom.sock"
-    (home / "daemon.json").write_text(json.dumps({"socket": str(sock)}))
+    (home / "daemon.toml").write_text(f"socket = {json.dumps(str(sock))}\n")
     start_daemon(_script(fake_qsv, ECHO), socket=str(sock))
     if sys.platform != "win32":
         assert DaemonClient()._target.socket_path == str(sock)

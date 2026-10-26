@@ -1,7 +1,7 @@
 # Tech stack
 
-- Python >=3.10 (ruff `target-version = py310`; CI matrix 3.10–3.14 on ubuntu + macos). Use `from __future__ import annotations`; no 3.11+ only stdlib features.
-- No runtime dependencies — keep it that way (stdlib `subprocess`/`asyncio` only).
+- Python >=3.11 (ruff `target-version = py311`; CI matrix 3.11–3.14 on ubuntu + macos). Use `from __future__ import annotations`; no 3.12+ only stdlib features.
+- No runtime dependencies — keep it that way (stdlib `subprocess`/`asyncio` only). daemon.toml is read with stdlib `tomllib`.
 - Package/env manager: uv (`uv.lock` committed); dev deps in `[dependency-groups].dev`: pytest, pytest-asyncio, mypy, ruff.
 - Build: hatchling, src layout (`src/qsv_client`). License AGPL-3.0-or-later.
 - pytest: `asyncio_mode = "auto"` (async tests need no marker).

@@ -207,8 +207,8 @@ def test_serve_logs_to_a_file(fake_daemon: list[dict[str, Any]], tmp_path: Path)
 def test_serve_flags_override_the_config_file(
     fake_daemon: list[dict[str, Any]], tmp_path: Path
 ) -> None:
-    config = tmp_path / "custom.json"
-    config.write_text(json.dumps({"port": 1234, "binary": "/from/file/qsv"}))
+    config = tmp_path / "custom.toml"
+    config.write_text('port = 1234\nbinary = "/from/file/qsv"\n')
     assert cli.main(["serve", "--config", str(config), "-v"]) == 0
     assert FakeDaemon.instances[-1].config.port == 1234
     assert FakeDaemon.instances[-1].config.binary == "/from/file/qsv"
@@ -222,8 +222,8 @@ def test_serve_flags_override_the_config_file(
 def test_serve_reports_a_bad_config(
     fake_daemon: list[dict[str, Any]], tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    config = tmp_path / "daemon.json"
-    config.write_text(json.dumps({"prot": 1}))
+    config = tmp_path / "daemon.toml"
+    config.write_text("prot = 1\n")
     assert cli.main(["serve", "--config", str(config)]) == 1
     assert "unknown setting(s): prot" in capsys.readouterr().err
     assert FakeDaemon.instances == []

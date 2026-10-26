@@ -1,6 +1,6 @@
 # qsv-client — core
 
-Python library that runs the qsv CSV toolkit binary as a subprocess (qsv not bundled). Zero runtime deps. Sync `Qsv` + asyncio `AsyncQsv` with identical API.
+Python library that runs the qsv CSV toolkit binary as a subprocess (qsv not bundled). Zero runtime deps (daemon.toml is read with stdlib `tomllib`). Sync `Qsv` + asyncio `AsyncQsv` with identical API.
 
 Related: stack/versions `mem:tech_stack`; dev/test/run commands `mem:suggested_commands`; code style & sync/async mirroring rules `mem:conventions`; done-checklist (ruff/mypy/pytest as CI runs them) `mem:task_completion`.
 

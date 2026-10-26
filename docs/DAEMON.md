@@ -12,7 +12,7 @@ callers:
   the latest data from its source URL or PID. Without the daemon the schematic works exactly
   as before.
 
-It needs nothing beyond the Python standard library, and runs on Python 3.10+ like the rest
+It needs nothing beyond the Python standard library, and runs on Python 3.11+ like the rest
 of the package.
 
 ## Running it
@@ -39,7 +39,7 @@ closes it, and `client()` returns a `DaemonClient` for it. A host starts once: t
 stop it and build a new `Daemon` and `DaemonHost`.
 
 Services don't read your shell profile, so `install` finds qsv the way the daemon would
-(`binary` in `daemon.json`, then `$QSV_BIN`, then your PATH) and writes that absolute path
+(`binary` in `daemon.toml`, then `$QSV_BIN`, then your PATH) and writes that absolute path
 into the service as `QSV_BIN`. It fails if no qsv is found. Run `install` again after
 moving qsv. Other `QSV_*` settings in your shell are not copied, because the service file
 is world-readable and they can hold secrets such as `QSV_LLM_APIKEY`. Set those in the
@@ -47,9 +47,11 @@ service's environment yourself if runs through the daemon need them. A Windows s
 task gets your user environment variables, as set with `setx`, not those of the current
 shell.
 
-Configuration is optional: `daemon.json` in the config directory
+Configuration is optional: `daemon.toml` in the config directory
 (`~/.config/qsv-client/` on Linux, `~/Library/Application Support/qsv-client/` on macOS,
-`%APPDATA%\qsv-client\` on Windows). Keys: `binary`, `port` (default `14470`; `0` turns the
+`%APPDATA%\qsv-client\` on Windows), one `key = value` per line, with `#` comments. The
+tray's **Open config…** creates it with every setting commented out, each with its default
+and the values it takes. Keys: `binary`, `port` (default `14470`; `0` turns the
 browser listener off), `socket`, `max_jobs`, `max_timeout`, `inherit_env`, `kill_grace`,
 `browser`, `browser_origins` (default `["null"]`), `browser_timeout`, `browser_max_output`,
 `browser_max_result`, `browser_max_render`, `token_ttl`, `allow_fetch`, `fetch_max_bytes`
@@ -71,7 +73,7 @@ when a schematic is waiting to be paired, red on an error. The menu shows the st
 version, running jobs and datasets, and lets you start, stop and restart the daemon.
 
 - **Hosted:** when no daemon is running, the tray runs one itself, on a background thread,
-  with your `daemon.json`. Quitting the tray stops it. Restart reads `daemon.json` again, and
+  with your `daemon.toml`. Quitting the tray stops it. Restart reads `daemon.toml` again, and
   unpairs every open schematic, since tokens are kept in memory.
 - **Attached:** when a daemon is already running (the service `install` set up, or
   `qsv-clientd serve`), the tray only shows it. Quitting leaves it running. If that daemon
@@ -112,8 +114,9 @@ it went. A fetch refused because the new data lacks some of the dataset's column
 **Fetch latest data, accepting missing columns** next. **Revoke all tokens ▸ Yes** unpairs
 every open schematic.
 
-**Files.** **Open config…** opens the default `daemon.json` in the config directory (not a
-`--config` file a foreground `serve` may use), creating it as `{}` if it's missing, and says
+**Files.** **Open config…** opens the default `daemon.toml` in the config directory (not a
+`--config` file a foreground `serve` may use), creating it if it's missing with every setting
+commented out, so nothing changes until you uncomment one, and says
 how changes apply: **Restart** when the tray hosts the daemon, otherwise a restart of the
 service or of `serve`. **Open log…** opens the tray's log, which a daemon it hosts writes to
 as well, or the launchd service's `~/Library/Logs/qsv-clientd.log`. For a systemd service the
@@ -309,7 +312,7 @@ size or modification time, as with an edit or a fetch with `--allow-replace`. A 
 a registered dataset by it:
 
 ```html
-<script type="application/json" id="qsv-schematic-source">{"schema":1,"qsv_version":"26.0.0",
+<script type="application/json" id="qsv-schematic-source">{"schema":1,"qsv_version":"27.0.0",
   "schematic_uuid":"…","fingerprint":{"algo":"blake3","digest":"…","bytes":123},
   "rows":4,"viz_args":["--dict-info"],"redacted":[],"pid":"https://doi.org/…"}</script>
 ```

@@ -1064,3 +1064,18 @@ def test_a_page_from_this_data_lends_its_source(
     ds_id = _register(d, data, schematic_path=str(schematic))
     listed = {ds["id"]: ds for ds in _local(d, "GET", "/v1/datasets", None).json()}
     assert listed[ds_id]["source_url"] == "https://h.example/d.csv"
+
+
+@pytest.mark.parametrize(("version", "noted"), [("26.0.0", True), ("27.0.0", False)])
+def test_serve_warns_when_qsv_schematics_cannot_go_live(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    caplog: pytest.LogCaptureFixture,
+    version: str,
+    noted: bool,
+) -> None:
+    caps = json.dumps({"binary": "qsv", "version": version, "error_formats": ["text", "json"]})
+    body = f'if sys.argv[1:] == ["--capabilities"]:\n    print({caps!r})\n    sys.exit(0)\n'
+    with caplog.at_level(logging.WARNING, logger="qsv_client.daemon"):
+        start_daemon(fake_qsv(body))
+    assert any("can't connect" in r.getMessage() for r in caplog.records) is noted

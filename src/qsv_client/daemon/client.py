@@ -77,7 +77,7 @@ class _Target:
 
 
 def _configured_socket() -> Path:
-    """The socket the daemon was configured with (daemon.json), else the default."""
+    """The socket the daemon was configured with (daemon.toml), else the default."""
     try:
         return DaemonConfig.load().socket_path()
     except (OSError, ValueError, TypeError):
@@ -304,7 +304,7 @@ class AsyncDaemonClient:
             status, data = await asyncio.wait_for(self._exchange(method, path, payload), wait)
         except (FileNotFoundError, ConnectionRefusedError) as exc:
             raise QsvDaemonUnavailable(f"qsv-clientd is not running at {t.describe()}") from exc
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise QsvDaemonError("qsv-clientd did not answer in time") from None
         except OSError as exc:
             raise QsvDaemonError(_os_error_message(t, exc)) from exc

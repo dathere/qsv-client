@@ -53,9 +53,9 @@ def test_posix_openers(
     new_session: bool,
 ) -> None:
     monkeypatch.setattr(sys, "platform", platform)
-    _open.open_path(tmp_path / "daemon.json")
+    _open.open_path(tmp_path / "daemon.toml")
     (proc,) = popen
-    assert proc.argv == [*argv, str(tmp_path / "daemon.json")]
+    assert proc.argv == [*argv, str(tmp_path / "daemon.toml")]
     assert proc.kwargs["start_new_session"] is new_session
     assert proc.kwargs["stdout"] == subprocess.DEVNULL
     assert _reaped(proc)  # no zombie left behind
@@ -79,9 +79,9 @@ def test_windows_falls_back_to_notepad(
 
     monkeypatch.setattr(os, "startfile", no_association, raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
-    _open.open_path(tmp_path / "daemon.json")
+    _open.open_path(tmp_path / "daemon.toml")
     (proc,) = popen
-    assert proc.argv == ["notepad.exe", str(tmp_path / "daemon.json")]
+    assert proc.argv == ["notepad.exe", str(tmp_path / "daemon.toml")]
     assert proc.kwargs["start_new_session"] is False
 
 
@@ -92,4 +92,4 @@ def test_a_missing_opener_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     monkeypatch.setattr(subprocess, "Popen", missing)
     monkeypatch.setattr(sys, "platform", "linux")
     with pytest.raises(OSError):
-        _open.open_path(tmp_path / "daemon.json")
+        _open.open_path(tmp_path / "daemon.toml")

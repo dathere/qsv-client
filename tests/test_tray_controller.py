@@ -20,7 +20,7 @@ import pytest
 from daemon_helpers import DaemonThread
 
 from qsv_client.daemon.client import DaemonClient
-from qsv_client.daemon.config import DaemonConfig
+from qsv_client.daemon.config import DaemonConfig, config_template
 from qsv_client.daemon.host import DaemonHost
 from qsv_client.daemon.server import Daemon
 from qsv_client.errors import QsvDaemonError, QsvDaemonUnavailable, QsvNotFound
@@ -39,9 +39,20 @@ def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _qsv_reporting(version: str) -> str:
+    """A fake qsv body whose --capabilities reports ``version``."""
+    caps = json.dumps({"binary": "qsv", "version": version, "error_formats": ["text", "json"]})
+    return f"""
+        if sys.argv[1:] == ["--capabilities"]:
+            print({caps!r})
+            sys.exit(0)
+    """
+
+
 @pytest.fixture
 def make_daemon(home: Path, fake_qsv: Callable[[str], str]) -> Callable[[], Daemon]:
-    binary = fake_qsv("")
+    # the first qsv whose schematics go live: older ones add a notification
+    binary = fake_qsv(_qsv_reporting("27.0.0"))
     return lambda: Daemon(DaemonConfig(binary=binary), home=home, tcp_port=0)
 
 
@@ -99,7 +110,7 @@ def test_hosts_a_daemon_when_none_is_running(make_controller: MakeController, ho
     c.on_change = seen.append
     state = _do(c, model.START)
     assert state.mode is Mode.HOSTED and state.status is not None
-    assert state.status["qsv"]["version"] == "25.0.0"
+    assert state.status["qsv"]["version"] == "27.0.0"
     assert [s.mode for s in seen] == [Mode.STARTING, Mode.HOSTED]
     assert DaemonClient().available()
     assert (home / "run" / "local-token").exists()
@@ -364,11 +375,11 @@ def test_a_stop_that_timed_out_is_tried_again(
     assert c._host is None and not (home / "run" / "local-token").exists()
 
 
-def test_the_default_daemon_reads_daemon_json(home: Path, fake_qsv: Callable[[str], str]) -> None:
-    (home / "daemon.json").write_text(json.dumps({"binary": fake_qsv(""), "port": 0}))
+def test_the_default_daemon_reads_daemon_toml(home: Path, fake_qsv: Callable[[str], str]) -> None:
+    (home / "daemon.toml").write_text(f"binary = {json.dumps(fake_qsv(''))}\nport = 0\n")
     daemon = controller_mod.load_daemon()
     assert daemon.binary == fake_qsv("") and daemon.config.port == 0
-    (home / "daemon.json").write_text(json.dumps({"binary": "qsv", "port": 0}))  # bare name
+    (home / "daemon.toml").write_text('binary = "qsv"\nport = 0\n')  # bare name
     assert controller_mod.load_daemon(fake_qsv("")).binary == fake_qsv("")  # --binary wins
 
 
@@ -378,6 +389,26 @@ def test_the_default_daemon_reads_daemon_json(home: Path, fake_qsv: Callable[[st
 class Notes(list[tuple[str, str]]):
     def __call__(self, title: str, message: str) -> None:
         self.append((title, message))
+
+
+def test_a_qsv_older_than_27_is_noted_once(
+    make_controller: MakeController, home: Path, fake_qsv: Callable[[str], str]
+) -> None:
+    binary = fake_qsv(_qsv_reporting("26.0.0"))
+    c = make_controller(
+        make_daemon=lambda: Daemon(DaemonConfig(binary=binary), home=home, tcp_port=0)
+    )
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    _do(c, model.RESTART)
+    assert notes == [
+        (
+            "Data Schematics won't go live",
+            "qsv 26.0.0 writes Data Schematics that can't connect to qsv-clientd. "
+            "Live schematics need qsv 27.0.0 or later.",
+        )
+    ]
 
 
 @pytest.fixture
@@ -826,18 +857,19 @@ def test_open_config_creates_it_and_says_how_changes_apply(
     c.notify = notes
     c._set(**fields)
     c.submit(model.OPEN_CONFIG).result(60)
-    assert opened == [home / "daemon.json"]
-    assert (home / "daemon.json").read_text() == "{}\n"  # unknown keys are errors: {} only
+    assert opened == [home / "daemon.toml"]
+    assert (home / "daemon.toml").read_text() == config_template()
+    assert DaemonConfig.load() == DaemonConfig()  # all commented out: nothing changes
     ((title, message),) = notes
-    assert title == "Editing daemon.json" and hint in message
+    assert title == "Editing daemon.toml" and hint in message
 
 
 def test_open_config_keeps_an_existing_file(make_controller: MakeController, home: Path) -> None:
-    (home / "daemon.json").write_text('{"port": 0}')
+    (home / "daemon.toml").write_text("port = 0\n")
     c = make_controller()
     _opener(c)
     c.submit(model.OPEN_CONFIG).result(60)
-    assert (home / "daemon.json").read_text() == '{"port": 0}'
+    assert (home / "daemon.toml").read_text() == "port = 0\n"
 
 
 def test_a_file_that_wont_open_is_a_notification(
@@ -853,7 +885,7 @@ def test_a_file_that_wont_open_is_a_notification(
     c._open_path = no_opener
     c.submit(model.OPEN_CONFIG).result(60)
     assert notes == [
-        ("Couldn't open daemon.json", "[Errno 2] No such file or directory: 'xdg-open'")
+        ("Couldn't open daemon.toml", "[Errno 2] No such file or directory: 'xdg-open'")
     ]
     assert c.state.mode is Mode.STOPPED
 
@@ -936,4 +968,4 @@ def test_an_unwritable_config_directory_is_a_notification(
     c._set(mode=Mode.HOSTED)
     c.submit(model.OPEN_CONFIG).result(60)
     assert opened == [] and c.state.mode is Mode.HOSTED
-    assert notes[0][0] == "Couldn't create daemon.json" and "Permission denied" in notes[0][1]
+    assert notes[0][0] == "Couldn't create daemon.toml" and "Permission denied" in notes[0][1]

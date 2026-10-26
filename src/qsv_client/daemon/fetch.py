@@ -138,6 +138,8 @@ async def download(
                 if exc.code == "qsv_timeout":
                     raise _timed_out(timeout) from None
                 raise
+            # qsv puts a new file at --output with the umask's mode (often 0644), not our 0600
+            incoming.chmod(0o600)
             # qsv downloads it, so the size can only be checked once it is here
             if incoming.stat().st_size > max_bytes:
                 raise _too_large(max_bytes)
