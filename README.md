@@ -128,7 +128,7 @@ client per call costs nothing extra after the first.
 
 `qsv-clientd` (installed with the package) is a per-user daemon that runs qsv for local
 processes, through `DaemonClient` / `AsyncDaemonClient` (the same `run()` as `Qsv`), and for
-open **Data Schematics** from `qsv viz smart` (a qsv newer than 26.0.0). Once you approve a
+open **Data Schematics** from `qsv viz smart` (qsv 27.0.0 or later). Once you approve a
 schematic with a pairing code, it can drill into the rows behind a chart, refresh its
 statistics, re-render itself, run read-only queries and fetch the latest data. Large results
 are paged from the daemon, so every row is reachable.

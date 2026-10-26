@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-26
+
+This release accompanies qsv 27.0.0, the first qsv whose Data Schematics connect to
+`qsv-clientd`. `qsv-clientd viz <URL>` turns a download link or a CKAN page into a live
+schematic in one step, and a schematic remembers where its data came from, so Fetch latest
+can get new data.
+
 ### Added
 
 - **`qsv-clientd viz <URL>`** ([#34](https://github.com/dathere/qsv-client/pull/34)) downloads the data first, then renders, registers and opens
@@ -23,6 +30,11 @@ All notable changes to this project are documented here. The format follows
   URL) for `ckan://` sources.
 - `register --schematic` takes the source URL (and its CKAN site) from a schematic that
   records one, as qsv records it for data downloaded with `qsv get`. ([#34](https://github.com/dathere/qsv-client/pull/34))
+
+### Changed
+
+- The docs now name the release that brings live Data Schematics: qsv 27.0.0 or later
+  (before, "a qsv newer than 26.0.0"). Other uses still need only qsv 25.0.0.
 
 ### Fixed
 
@@ -278,7 +290,8 @@ First release. ([#1](https://github.com/dathere/qsv-client/pull/1))
   environment variables, so keys never appear on the command line.
 - Type hints (`py.typed`), no runtime dependencies, Python 3.10+.
 
-[Unreleased]: https://github.com/dathere/qsv-client/compare/0.5.0...HEAD
+[Unreleased]: https://github.com/dathere/qsv-client/compare/0.6.0...HEAD
+[0.6.0]: https://github.com/dathere/qsv-client/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/dathere/qsv-client/compare/0.4.0...0.5.0
 [0.4.0]: https://github.com/dathere/qsv-client/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/dathere/qsv-client/compare/0.2.0...0.3.0
