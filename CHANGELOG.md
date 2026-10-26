@@ -35,6 +35,11 @@ gets the current version.
 
 ### Changed
 
+- **The daemon's config is now `daemon.toml`**, not `daemon.json`, so it can carry comments.
+  The tray's Open config… creates it with every setting commented out, each with its
+  default and the values it takes; nothing changes until you uncomment a line. A
+  `daemon.json` from an earlier release is no longer read: move its settings across. On
+  Python 3.10 this adds `tomli`, the only runtime dependency (3.11+ uses `tomllib`).
 - The docs now name the release that brings live Data Schematics: qsv 27.0.0 or later
   (before, "a qsv newer than 26.0.0"). Other uses still need only qsv 25.0.0.
 

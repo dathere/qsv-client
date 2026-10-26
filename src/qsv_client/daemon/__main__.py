@@ -34,9 +34,9 @@ def _parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="run the daemon in the foreground")
-    s.add_argument("--config", type=Path, help="config file (default: daemon.json)")
+    s.add_argument("--config", type=Path, help="config file (default: daemon.toml)")
     s.add_argument("--port", type=int, help="loopback port for browsers (0 disables)")
-    s.add_argument("--binary", help="qsv binary to use (overrides daemon.json)")
+    s.add_argument("--binary", help="qsv binary to use (overrides daemon.toml)")
     s.add_argument("--log-file", type=Path, help="also log to this file (rotated at 5 MB, 3 kept)")
     s.add_argument("-v", "--verbose", action="store_true")
 

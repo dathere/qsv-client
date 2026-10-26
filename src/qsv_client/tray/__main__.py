@@ -22,7 +22,7 @@ def _parser() -> argparse.ArgumentParser:
         prog=TITLE, description="A system tray icon that runs and controls qsv-clientd."
     )
     p.add_argument("-v", "--verbose", action="store_true", help="log debug messages too")
-    p.add_argument("--binary", help="qsv binary to use (overrides daemon.json)")
+    p.add_argument("--binary", help="qsv binary to use (overrides daemon.toml)")
     login = p.add_mutually_exclusive_group()
     login.add_argument(
         "--enable-autostart", action="store_true", help="start the tray at login, then exit"
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         # before the checks below: writing a login item needs neither the extra nor the lock
         try:
             done = autostart.enable() if ns.enable_autostart else autostart.disable()
-        except Exception as exc:  # no qsv to pin, a bad daemon.json, a permission error
+        except Exception as exc:  # no qsv to pin, a bad daemon.toml, a permission error
             _message_box(f"couldn't change starting at login: {exc}")
             return 1
         _message_box(done)

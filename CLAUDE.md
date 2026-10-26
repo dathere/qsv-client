@@ -2,7 +2,8 @@
 
 Python library that runs the [qsv](https://github.com/dathere/qsv) CSV toolkit as a subprocess
 (qsv itself is not bundled). Sync `Qsv` and asyncio `AsyncQsv` clients with the same API.
-No runtime dependencies. Python 3.10+.
+No runtime dependencies, except `tomli` on Python 3.10 (`tomllib` from 3.11) for the daemon's
+config. Python 3.10+.
 
 ## Commands
 
@@ -72,7 +73,8 @@ below the base commit's, and new or changed lines need 100% coverage.
 
 - `Qsv` and `AsyncQsv` are mirrored by hand. Apply every change to both. In `AsyncQsv`,
   `capabilities` and `version` are coroutines, not properties.
-- Keep it dependency-free and 3.10-compatible (`from __future__ import annotations`).
+- Keep it dependency-free (beyond `tomli` on 3.10) and 3.10-compatible
+  (`from __future__ import annotations`).
 - mypy is strict and covers `tests/` too. Ruff line length is 100.
 - New error kind: add a subclass in `errors.py`, map it in `_KIND_TO_CLASS` (and
   `_EXIT_CODE_TO_CLASS` if it has its own exit code), export it from `__init__.py`, and update

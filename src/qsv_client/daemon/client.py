@@ -77,7 +77,7 @@ class _Target:
 
 
 def _configured_socket() -> Path:
-    """The socket the daemon was configured with (daemon.json), else the default."""
+    """The socket the daemon was configured with (daemon.toml), else the default."""
     try:
         return DaemonConfig.load().socket_path()
     except (OSError, ValueError, TypeError):

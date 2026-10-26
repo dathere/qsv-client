@@ -230,40 +230,42 @@ def test_registry_refuses_output_flag(tmp_path: Path) -> None:
 
 
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:
-    path = tmp_path / "daemon.json"
-    path.write_text('{"port": 1, "prot": 2}')
+    path = tmp_path / "daemon.toml"
+    path.write_text("port = 1\nprot = 2\n")
     with pytest.raises(ValueError, match="prot"):
         DaemonConfig.load(path)
-    path.write_text('{"port": 1234}')
+    path.write_text("port = 1234\n")
     assert DaemonConfig.load(path).port == 1234
 
 
 @pytest.mark.parametrize(
     "setting",
     [
-        '{"max_jobs": "2"}',
-        '{"max_timeout": "60"}',
-        '{"browser": 1}',
-        '{"port": true}',
-        '{"browser_origins": "null"}',
-        '{"binary": 5}',
+        'max_jobs = "2"',
+        'max_timeout = "60"',
+        "browser = 1",
+        "port = true",
+        'browser_origins = "null"',
+        "binary = 5",
+        "max_jobs = 2.0",
     ],
 )
 def test_config_rejects_wrong_types(tmp_path: Path, setting: str) -> None:
-    path = tmp_path / "daemon.json"
+    path = tmp_path / "daemon.toml"
     path.write_text(setting)
     with pytest.raises(ValueError, match="must be"):
         DaemonConfig.load(path)
 
 
 def test_config_accepts_every_field_type(tmp_path: Path) -> None:
-    path = tmp_path / "daemon.json"
+    path = tmp_path / "daemon.toml"
     path.write_text(
-        '{"binary": null, "port": 0, "max_timeout": 30, "kill_grace": 1.5, "browser": false,'
-        ' "browser_origins": ["null"]}'
+        'binary = "qsv"\nport = 0\nmax_timeout = 30\nkill_grace = 1.5\nbrowser = false\n'
+        'browser_origins = ["null"]\n'
     )
     config = DaemonConfig.load(path)
-    assert config.max_timeout == 30 and config.kill_grace == 1.5 and config.browser is False
+    assert config.binary == "qsv" and config.max_timeout == 30 and config.kill_grace == 1.5
+    assert config.browser is False
     # a new setting needs a type check, or loading it would raise KeyError
     from dataclasses import fields
 
@@ -371,7 +373,7 @@ def test_service_overrides_configured_binary_and_paths(
     lite.chmod(lite.stat().st_mode | stat.S_IXUSR)
     home = tmp_path / "home"
     home.mkdir()
-    (home / "daemon.json").write_text('{"binary": "qsvlite"}')  # a bare name
+    (home / "daemon.toml").write_text('binary = "qsvlite"\n')  # a bare name
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("QSV_CLIENTD_HOME", "home")  # relative
     monkeypatch.setenv("PATH", str(lite.parent))

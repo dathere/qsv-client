@@ -21,7 +21,7 @@ from typing import Any
 
 from ..daemon import service
 from ..daemon.client import DaemonClient
-from ..daemon.config import DaemonConfig, config_dir, log_path
+from ..daemon.config import DaemonConfig, config_path, config_template, log_path
 from ..daemon.host import DaemonHost
 from ..daemon.server import Daemon
 from ..errors import QsvDaemonError
@@ -37,7 +37,7 @@ _STATUS_WAIT = 5.0
 
 
 def load_daemon(binary: str | None = None) -> Daemon:
-    """A daemon from daemon.json, read afresh each time so a restart picks up edits.
+    """A daemon from daemon.toml, read afresh each time so a restart picks up edits.
     ``binary`` overrides its ``binary``, as `qsv-clientd serve --binary` does."""
     config = DaemonConfig.load()
     if binary is not None:
@@ -476,15 +476,15 @@ class Controller:
         return True
 
     def _open_config(self) -> None:
-        """Open the default daemon.json, creating it as ``{}`` (the only safe seed: unknown
-        keys are errors) so there is something to edit."""
-        path = config_dir() / "daemon.json"
+        """Open the default daemon.toml, creating it with every setting commented out, so
+        there is something to edit and nothing changes until a line is uncommented."""
+        path = config_path()
         try:
             if not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("{}\n", encoding="utf-8")
+                path.write_text(config_template(), encoding="utf-8")
         except OSError as exc:  # a read-only config directory: no reason to show an error state
-            self.notify("Couldn't create daemon.json", str(exc))
+            self.notify(f"Couldn't create {path.name}", str(exc))
             return
         if not self._open(path):
             return
@@ -493,7 +493,7 @@ class Controller:
             hint = _APPLY_TO_SERVICE.format(state.service)
         else:
             hint = _APPLY_CONFIG.get(state.mode, _APPLY_ON_START)
-        self.notify("Editing daemon.json", hint)
+        self.notify(f"Editing {path.name}", hint)
 
     def _open_log(self) -> None:
         state = self.state
@@ -520,7 +520,7 @@ class Controller:
                 log.info(self._disable_autostart())
             else:
                 log.info(self._enable_autostart())
-        except Exception as exc:  # no qsv to pin, a bad daemon.json, a permission error
+        except Exception as exc:  # no qsv to pin, a bad daemon.toml, a permission error
             log.warning("changing Start at login failed", exc_info=True)
             self.notify("Couldn't change Start at login", str(exc) or type(exc).__name__)
         self._read_autostart()

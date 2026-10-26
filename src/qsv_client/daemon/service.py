@@ -20,7 +20,7 @@ LABEL = "com.dathere.qsv-clientd"
 def _command(binary: str) -> list[str]:
     exe = shutil.which("qsv-clientd")
     base = [exe] if exe else [sys.executable, "-m", "qsv_client.daemon"]
-    # --binary overrides daemon.json's `binary`, which could be a bare name the service's
+    # --binary overrides daemon.toml's `binary`, which could be a bare name the service's
     # restricted PATH can't resolve (an explicit binary also outranks QSV_BIN)
     return [*base, "serve", "--binary", binary]
 
@@ -29,7 +29,7 @@ def service_environment() -> dict[str, str]:
     """What the service needs from this shell, which launchd/systemd won't otherwise give it.
 
     Services don't read shell profiles (launchd's PATH is just /usr/bin:/bin:/usr/sbin:/sbin),
-    so qsv is resolved now, the way the daemon would (daemon.json ``binary``, ``$QSV_BIN``,
+    so qsv is resolved now, the way the daemon would (daemon.toml ``binary``, ``$QSV_BIN``,
     PATH), and pinned as QSV_BIN. Raises QsvNotFound if there is no qsv to pin. Other QSV_*
     settings are deliberately not copied: the service file is world-readable and they can
     hold secrets such as QSV_LLM_APIKEY.

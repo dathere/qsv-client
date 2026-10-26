@@ -126,7 +126,7 @@ def test_runtime_port_ignores_bad_runtime_info(home: Path, content: str) -> None
 
 
 def test_malformed_config_falls_back_to_the_default_socket(home: Path) -> None:
-    (home / "daemon.json").write_text("{not json")
+    (home / "daemon.toml").write_text("port = = 1")
     assert _configured_socket() == default_socket_path()
 
 

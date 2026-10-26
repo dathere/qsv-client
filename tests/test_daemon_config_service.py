@@ -1,4 +1,4 @@
-"""Where qsv-clientd keeps its files on each platform, daemon.json, and the service installer.
+"""Where qsv-clientd keeps its files on each platform, daemon.toml, and the service installer.
 
 Nothing real is touched: ``Path.home`` points into tmp_path, ``sys.platform`` is patched to
 each supported OS, and launchctl/systemctl calls are recorded instead of run.
@@ -7,10 +7,12 @@ each supported OS, and launchctl/systemctl calls are recorded instead of run.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import shutil
 import subprocess
 import sys
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -141,20 +143,20 @@ def test_write_private_file_is_owner_only(tmp_path: Path) -> None:
         assert target.parent.stat().st_mode & 0o777 == 0o700
 
 
-@pytest.mark.parametrize("text", ["[]", '"port"', "14470", "null"])
-def test_config_must_be_an_object(tmp_path: Path, text: str) -> None:
-    path = tmp_path / "daemon.json"
+@pytest.mark.parametrize("text", ["port = ", "port = 1\nport = 2", "{}", "[port"])
+def test_config_must_be_valid_toml(tmp_path: Path, text: str) -> None:
+    path = tmp_path / "daemon.toml"
     path.write_text(text)
-    with pytest.raises(ValueError, match="expected a JSON object"):
+    with pytest.raises(ValueError, match=r"daemon\.toml: "):
         DaemonConfig.load(path)
 
 
 def test_config_rejects_unknown_and_mistyped_settings(tmp_path: Path) -> None:
-    path = tmp_path / "daemon.json"
-    path.write_text('{"port": 1, "prot": 2}')
+    path = tmp_path / "daemon.toml"
+    path.write_text("port = 1\nprot = 2\n")
     with pytest.raises(ValueError, match=r"unknown setting.*prot"):
         DaemonConfig.load(path)
-    for bad in ('{"port": true}', '{"port": "1"}', '{"browser_origins": ["null", 1]}'):
+    for bad in ("port = true", 'port = "1"', 'browser_origins = ["null", 1]', "[port]"):
         path.write_text(bad)
         with pytest.raises(ValueError, match="must be"):
             DaemonConfig.load(path)
@@ -162,9 +164,37 @@ def test_config_rejects_unknown_and_mistyped_settings(tmp_path: Path) -> None:
 
 def test_config_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("QSV_CLIENTD_HOME", str(tmp_path))
+    assert config.config_path() == tmp_path / "daemon.toml"
     assert DaemonConfig.load() == DaemonConfig()
-    (tmp_path / "daemon.json").write_text('{"port": 0}')
+    (tmp_path / "daemon.toml").write_text("port = 0\n")
     assert DaemonConfig.load().port == 0
+
+
+def test_the_config_template_changes_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "daemon.toml"
+    path.write_text(config.config_template())
+    assert DaemonConfig.load(path) == DaemonConfig()
+
+
+def test_every_setting_in_the_template_is_valid_uncommented(tmp_path: Path) -> None:
+    template = config.config_template()
+    assert set(config._HELP) == {f.name for f in fields(DaemonConfig)}
+    settings = [
+        line.removeprefix("# ")
+        for line in template.splitlines()
+        if line.startswith("# ") and " = " in line and line[2:].split(" = ")[0].isidentifier()
+    ]
+    assert [line.split(" = ")[0] for line in settings] == [f.name for f in fields(DaemonConfig)]
+    path = tmp_path / "daemon.toml"
+    path.write_text("\n".join(settings))
+    loaded = DaemonConfig.load(path)
+    defaults = DaemonConfig()
+    for f in fields(DaemonConfig):
+        expected = getattr(defaults, f.name)
+        if expected is None:  # no default to show: the template gives an example instead
+            assert getattr(loaded, f.name) == json.loads(config._HELP[f.name][1] or "")
+        else:
+            assert getattr(loaded, f.name) == expected
 
 
 # -- service install/uninstall --------------------------------------------------------------

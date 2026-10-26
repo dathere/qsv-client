@@ -19,8 +19,8 @@ subprocess pitfalls:
   `qsv --capabilities`.
 - **Secrets stay off the command line.** LLM settings for `describegpt` are passed as
   environment variables, so an API key never shows up in `ps` output.
-- **Sync and asyncio** clients with the same API. No runtime dependencies. Python 3.10+ on
-  Linux, macOS and Windows.
+- **Sync and asyncio** clients with the same API. No runtime dependencies (on Python 3.10, `tomli`, to read
+  the daemon's config). Python 3.10+ on Linux, macOS and Windows.
 - **A local daemon, `qsv-clientd`,** that runs qsv for your own processes and lets a Data
   Schematic from `qsv viz smart` work with its live data, with an optional system tray to
   run and control it. See [The qsv-clientd daemon](#the-qsv-clientd-daemon).
