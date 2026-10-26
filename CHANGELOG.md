@@ -32,6 +32,9 @@ gets the current version.
   URL) for `ckan://` sources.
 - `register --schematic` takes the source URL (and its CKAN site) from a schematic that
   records one, as qsv records it for data downloaded with `qsv get`. ([#34](https://github.com/dathere/qsv-client/pull/34))
+- With a qsv older than 27.0.0, whose schematics can't connect, `qsv-clientd serve` logs a
+  warning and the tray shows a notification once, instead of leaving schematics silently
+  offline. Everything else still works with qsv 25.0.0 or later.
 
 ### Changed
 

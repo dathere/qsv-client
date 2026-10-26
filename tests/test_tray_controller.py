@@ -39,9 +39,20 @@ def home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _qsv_reporting(version: str) -> str:
+    """A fake qsv body whose --capabilities reports ``version``."""
+    caps = json.dumps({"binary": "qsv", "version": version, "error_formats": ["text", "json"]})
+    return f"""
+        if sys.argv[1:] == ["--capabilities"]:
+            print({caps!r})
+            sys.exit(0)
+    """
+
+
 @pytest.fixture
 def make_daemon(home: Path, fake_qsv: Callable[[str], str]) -> Callable[[], Daemon]:
-    binary = fake_qsv("")
+    # the first qsv whose schematics go live: older ones add a notification
+    binary = fake_qsv(_qsv_reporting("27.0.0"))
     return lambda: Daemon(DaemonConfig(binary=binary), home=home, tcp_port=0)
 
 
@@ -99,7 +110,7 @@ def test_hosts_a_daemon_when_none_is_running(make_controller: MakeController, ho
     c.on_change = seen.append
     state = _do(c, model.START)
     assert state.mode is Mode.HOSTED and state.status is not None
-    assert state.status["qsv"]["version"] == "25.0.0"
+    assert state.status["qsv"]["version"] == "27.0.0"
     assert [s.mode for s in seen] == [Mode.STARTING, Mode.HOSTED]
     assert DaemonClient().available()
     assert (home / "run" / "local-token").exists()
@@ -378,6 +389,26 @@ def test_the_default_daemon_reads_daemon_toml(home: Path, fake_qsv: Callable[[st
 class Notes(list[tuple[str, str]]):
     def __call__(self, title: str, message: str) -> None:
         self.append((title, message))
+
+
+def test_a_qsv_older_than_27_is_noted_once(
+    make_controller: MakeController, home: Path, fake_qsv: Callable[[str], str]
+) -> None:
+    binary = fake_qsv(_qsv_reporting("26.0.0"))
+    c = make_controller(
+        make_daemon=lambda: Daemon(DaemonConfig(binary=binary), home=home, tcp_port=0)
+    )
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.START)
+    _do(c, model.RESTART)
+    assert notes == [
+        (
+            "Data Schematics won't go live",
+            "qsv 26.0.0 writes Data Schematics that can't connect to qsv-clientd. "
+            "Live schematics need qsv 27.0.0 or later.",
+        )
+    ]
 
 
 @pytest.fixture

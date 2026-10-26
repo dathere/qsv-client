@@ -416,3 +416,22 @@ def test_service_environment_copies_only_daemon_locations(
     monkeypatch.setenv("QSV_CLIENTD_SOCKET", "")  # empty means unset
     assert "QSV_CLIENTD_SOCKET" not in service.service_environment()
     assert os.environ["QSV_LLM_APIKEY"] == "secret"
+
+
+@pytest.mark.parametrize(
+    ("version", "noted"),
+    [
+        ("26.0.0", True),
+        ("25.1.0-rc1", True),
+        ("27.0.0", False),
+        ("27.0.0-dev", False),
+        ("28.1.0", False),
+        ("not a version", False),
+        (None, False),
+    ],
+)
+def test_schematics_notice_names_qsv_27(version: object, noted: bool) -> None:
+    notice = config.schematics_notice(version)
+    assert (notice is not None) is noted
+    if notice:
+        assert f"qsv {version} " in notice and "qsv 27.0.0 or later" in notice

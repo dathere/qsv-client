@@ -21,7 +21,13 @@ from typing import Any
 
 from ..daemon import service
 from ..daemon.client import DaemonClient
-from ..daemon.config import DaemonConfig, config_path, config_template, log_path
+from ..daemon.config import (
+    DaemonConfig,
+    config_path,
+    config_template,
+    log_path,
+    schematics_notice,
+)
 from ..daemon.host import DaemonHost
 from ..daemon.server import Daemon
 from ..errors import QsvDaemonError
@@ -75,6 +81,7 @@ class Controller:
         self.notify: Notifier = nothing
         """Shows a desktop notification, on the worker thread."""
         self._announced: set[str] = set()
+        self._qsv_noted: object = None
         self._state = TrayState()
         self._lock = threading.Lock()
         self._emit_lock = threading.Lock()
@@ -218,6 +225,17 @@ class Controller:
             )
         self._announced = codes
 
+    def _note_qsv(self, status: Mapping[str, Any]) -> None:
+        """Say once per qsv version when its schematics can't go live."""
+        qsv = status.get("qsv")
+        version = qsv.get("version") if isinstance(qsv, Mapping) else None
+        if version == self._qsv_noted:
+            return
+        self._qsv_noted = version
+        notice = schematics_notice(version)
+        if notice:
+            self.notify("Data Schematics won't go live", notice)
+
     def _attached(self, client: DaemonClient) -> None:
         status = self._status(client)
         pairings = self._pairings(client, status)
@@ -233,6 +251,7 @@ class Controller:
             error=None,
         )
         self._announce(pairings)
+        self._note_qsv(status)
         log.info("attached to qsv-clientd (pid %s)", status.get("pid"))
 
     def _start(self) -> None:
@@ -255,6 +274,7 @@ class Controller:
             mode=Mode.HOSTED, status=status, pairings=pairings, datasets=datasets, service=None
         )
         self._announce(pairings)
+        self._note_qsv(status)
         log.info("hosting qsv-clientd")
 
     def _stop_host(self) -> None:
