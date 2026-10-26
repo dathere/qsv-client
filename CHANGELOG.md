@@ -10,8 +10,8 @@ All notable changes to this project are documented here. The format follows
 
 This release accompanies qsv 27.0.0, the first qsv whose Data Schematics connect to
 `qsv-clientd`. `qsv-clientd viz <URL>` turns a download link or a CKAN page into a live
-schematic in one step, and a schematic remembers where its data came from, so Fetch latest
-can get new data.
+schematic in one step, and `qsv-clientd` remembers where the data came from, so Fetch latest
+gets the current version.
 
 ### Added
 
