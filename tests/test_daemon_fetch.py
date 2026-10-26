@@ -103,6 +103,7 @@ else:
 # a qsv with `get`: logs its argv, and `get cache-fetch ... --output <path>` writes the data
 GET_QSV = """
 import json
+import os
 if sys.argv[1:] == ["--capabilities"]:
     print(json.dumps({"binary": "qsv", "version": "26.0.0", "error_formats": ["text", "json"],
                       "commands": ["get", "count", "slice"]}))
@@ -110,7 +111,10 @@ if sys.argv[1:] == ["--capabilities"]:
 with open(LOG, "a") as fh:
     fh.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1:3] == ["get", "cache-fetch"]:
-    open(sys.argv[sys.argv.index("--output") + 1], "w").write("name\\nfetched\\n")
+    # like qsv: a new file at --output, with the umask's mode, not the one already there
+    out = sys.argv[sys.argv.index("--output") + 1]
+    open(out + ".tmp", "w").write("name\\nfetched\\n")
+    os.replace(out + ".tmp", out)
 elif sys.argv[1] == "slice":
     print(open(sys.argv[-1]).readline().rstrip("\\n"))
 else:
@@ -205,6 +209,19 @@ async def test_fetch_goes_through_qsv_get_when_available(
     assert staged.parent == daemon.home / "cache" / ds.id and not staged.exists()
     assert calls[2] == ["count", str(staged)]
     assert _staging_files(daemon, ds) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+async def test_a_download_through_qsv_get_stays_private(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path
+) -> None:
+    log = tmp_path / "argv.log"
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + GET_QSV), home)
+    staged, _via = await fetch.download(
+        daemon, "https://example.invalid/d.csv", tmp_path, name="qsv-clientd-x.csv"
+    )
+    assert staged.read_text() == "name\nfetched\n"
+    assert staged.stat().st_mode & 0o777 == 0o600  # the data may be private
 
 
 @pytest.mark.parametrize("ctype", ["text/html", "text/html; charset=utf-8"])
