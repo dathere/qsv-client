@@ -11,7 +11,7 @@ from pathlib import Path
 
 if sys.version_info >= (3, 11):
     import tomllib
-else:  # pragma: no cover - CI's 3.10 jobs run it, coverage merges from 3.11+
+else:  # Python 3.10
     import tomli as tomllib
 
 DEFAULT_PORT = 14470
