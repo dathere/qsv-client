@@ -19,8 +19,10 @@ gets the current version.
   the schematic in one step. The URL can be an http(s) download link, `ckan://<id>`, or a
   CKAN resource page copied from the browser. It is also where Fetch latest gets new data.
   The data is saved beside the schematic (`--save-as` to choose), readable only by you
-  since it may be private, never replacing an existing file. `-o` now defaults to
-  the data's name with `.html`. `--no-open` skips the browser.
+  since it may be private, never replacing an existing file. A qsv with `get` also keeps a
+  copy in its own cache (`~/.qsv-cache` by default, or `QSV_CACHE_DIR`), which follows
+  your umask. `-o` now defaults to the data's name with `.html`. `--no-open` skips the
+  browser.
 - **CKAN pages as sources.** ([#34](https://github.com/dathere/qsv-client/pull/34)) A CKAN resource page (`<site>/dataset/<name>/resource/<id>`) is
   fetched as `ckan://<id>` from that site. A CKAN dataset page with exactly one CSV or TSV
   resource, found with `package_show`, is fetched as that resource; with several, the
