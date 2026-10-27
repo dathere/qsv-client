@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- With qsv 26.x or older that has `get` (`qsvdp` or a source build; the prebuilt `qsv` has it
+  from 27.0.1), `qsv-clientd` points `qsv get` at a cache of its own that only you can read
+  (`qsv-cache` in the daemon's directory), since those versions make their cache with your
+  umask's modes and the data may be private. qsv 27 already keeps the cache owner-only on
+  Unix, so its cache stays where it is; so does a `QSV_CACHE_DIR` you set yourself. This
+  corrects 0.6.0's note that qsv's cache "follows your umask": that is only true of qsv 26.x
+  and older.
+- `qsv-clientd viz <URL>` and `register --download` through a qsv with `get` no longer leave
+  the download readable by others while qsv writes it. qsv writes it with your umask's modes,
+  like its other output files, so 0.6.0 restricted it to you only after qsv was done, in the
+  folder you chose for the data, where other users might open it in the meantime. qsv now
+  writes it in a directory only you can enter. Fetch latest was never affected: it downloads
+  into the daemon's own private directory.
+
+### Changed
+
+- qsv 27.0.0 was withdrawn before its release, so live Data Schematics need **qsv 27.0.1 or
+  later**, not 27.0.0 as the 0.6.0 notes say. The README, and the message `qsv-clientd serve`
+  and the tray show with an older qsv, now name 27.0.1. Builds of qsv's development version
+  that report 27.0.0 have everything 27.0.1 does, and work as it does.
+
 ## [0.6.0] - 2026-10-26
 
 This release accompanies qsv 27.0.0, the first qsv whose Data Schematics connect to

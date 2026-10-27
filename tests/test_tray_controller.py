@@ -406,7 +406,7 @@ def test_a_qsv_older_than_27_is_noted_once(
         (
             "Data Schematics won't go live",
             "qsv 26.0.0 writes Data Schematics that can't connect to qsv-clientd. "
-            "Live schematics need qsv 27.0.0 or later.",
+            "Live schematics need qsv 27.0.1 or later.",
         )
     ]
 

@@ -26,7 +26,7 @@ subprocess pitfalls:
   run and control it. See [The qsv-clientd daemon](#the-qsv-clientd-daemon).
 
 qsv itself is not bundled, and **qsv 25.0.0 or later** is required; live Data Schematics
-need **qsv 27.0.0 or later** (with an older qsv, `qsv-clientd serve` and the tray say so).
+need **qsv 27.0.1 or later** (with an older qsv, `qsv-clientd serve` and the tray say so).
 Install it from the [qsv releases](https://github.com/dathere/qsv/releases) or a
 [package manager](https://github.com/dathere/qsv#installation-options).
 
@@ -129,7 +129,7 @@ client per call costs nothing extra after the first.
 
 `qsv-clientd` (installed with the package) is a per-user daemon that runs qsv for local
 processes, through `DaemonClient` / `AsyncDaemonClient` (the same `run()` as `Qsv`), and for
-open **Data Schematics** from `qsv viz smart` (qsv 27.0.0 or later). Once you approve a
+open **Data Schematics** from `qsv viz smart` (qsv 27.0.1 or later). Once you approve a
 schematic with a pairing code, it can drill into the rows behind a chart, refresh its
 statistics, re-render itself, run read-only queries and fetch the latest data. Large results
 are paged from the daemon, so every row is reachable.

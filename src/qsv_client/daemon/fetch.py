@@ -43,8 +43,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .._process import _finish_despite_cancel
+from ..capabilities import parse_version
 from ._http import HttpError
-from .config import ensure_private_dir
+from .config import PRIVATE_GET_CACHE_QSV, ensure_private_dir
 from .registry import Dataset
 
 if TYPE_CHECKING:
@@ -129,17 +130,29 @@ async def download(
             argv = ["get", url, "--name", name]
             if scheme == "ckan":
                 argv += ["--ckan-api", _ckan_api_for(target)]
+            # both runs must see the same cache, or cache-fetch can't find the entry
+            env = _get_cache_env(daemon, caps.version_tuple)
+            # qsv writes --output with the umask's mode (often 0644), and staging_dir may be
+            # one others can read, so it writes into a directory only we can enter
+            private = Path(tempfile.mkdtemp(prefix=".qsv-clientd-", dir=staging_dir))
             try:
-                await daemon._browser_run(ds, argv, timeout=timeout)
-                await daemon._browser_run(
-                    ds, ["get", "cache-fetch", name, "--output", str(incoming)], timeout=timeout
-                )
-            except HttpError as exc:
-                if exc.code == "qsv_timeout":
-                    raise _timed_out(timeout) from None
-                raise
-            # qsv puts a new file at --output with the umask's mode (often 0644), not our 0600
-            incoming.chmod(0o600)
+                output = private / incoming.name
+                try:
+                    await daemon._browser_run(ds, argv, timeout=timeout, env=env)
+                    await daemon._browser_run(
+                        ds,
+                        ["get", "cache-fetch", name, "--output", str(output)],
+                        timeout=timeout,
+                        env=env,
+                    )
+                except HttpError as exc:
+                    if exc.code == "qsv_timeout":
+                        raise _timed_out(timeout) from None
+                    raise
+                output.chmod(0o600)
+                os.replace(output, incoming)
+            finally:
+                shutil.rmtree(private, ignore_errors=True)
             # qsv downloads it, so the size can only be checked once it is here
             if incoming.stat().st_size > max_bytes:
                 raise _too_large(max_bytes)
@@ -170,6 +183,16 @@ async def download(
         incoming.unlink(missing_ok=True)
         raise
     return incoming, target.via
+
+
+def _get_cache_env(daemon: Daemon, qsv_version: tuple[int, int, int]) -> dict[str, str] | None:
+    """Before 27.0.0, qsv's get cache follows the umask, and downloads may be private, so give
+    it one only we can read. A QSV_CACHE_DIR the user set, and qsv 27.0.0+, are left alone."""
+    if qsv_version >= parse_version(PRIVATE_GET_CACHE_QSV):
+        return None
+    if daemon.config.inherit_env and "QSV_CACHE_DIR" in os.environ:
+        return None
+    return {"QSV_CACHE_DIR": str(ensure_private_dir(daemon.home / "qsv-cache"))}
 
 
 async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -> dict[str, Any]:

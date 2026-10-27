@@ -434,4 +434,4 @@ def test_schematics_notice_names_qsv_27(version: object, noted: bool) -> None:
     notice = config.schematics_notice(version)
     assert (notice is not None) is noted
     if notice:
-        assert f"qsv {version} " in notice and "qsv 27.0.0 or later" in notice
+        assert f"qsv {version} " in notice and "qsv 27.0.1 or later" in notice
