@@ -250,7 +250,13 @@ a minute. It cannot pair without your approval.
 Browsers' private/local network access rules for loopback requests (Chrome's Local Network
 Access, Safari's and Firefox's equivalents) are still changing. The daemon answers
 `Access-Control-Request-Private-Network` preflights, but a browser may still ask you for
-permission the first time a schematic connects.
+permission the first time a schematic connects. (In October 2026, Chrome didn't ask for a
+page served from `127.0.0.1`.)
+
+A schematic is usually opened as a file. To serve one over http instead, for a browser
+automation tool that can't open `file://` pages for example, add the page's origin (such as
+`"http://127.0.0.1:8765"`) to `browser_origins`. Approving its code then shows the "not a
+local file" warning, as for any origin but `null`. Remove the origin when you're done.
 
 ## Protocol (API v1)
 
