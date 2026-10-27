@@ -206,22 +206,56 @@ async def test_fetch_goes_through_qsv_get_when_available(
     assert calls[0] == ["get", source, "--name", name]
     assert calls[1][:4] == ["get", "cache-fetch", name, "--output"]
     staged = Path(calls[1][4])
-    assert staged.parent == daemon.home / "cache" / ds.id and not staged.exists()
-    assert calls[2] == ["count", str(staged)]
+    # qsv writes in a private directory inside the cache, then the file is moved up a level
+    cache = daemon.home / "cache" / ds.id
+    assert staged.parent.parent == cache and not staged.parent.exists()
+    assert calls[2] == ["count", str(cache / staged.name)]
     assert _staging_files(daemon, ds) == []
+
+
+_WRITES_OUTPUT = '    out = sys.argv[sys.argv.index("--output") + 1]\n'
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 async def test_a_download_through_qsv_get_stays_private(
     fake_qsv: Callable[[str], str], home: Path, tmp_path: Path
 ) -> None:
-    log = tmp_path / "argv.log"
-    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + GET_QSV), home)
+    log, seen, staging = tmp_path / "argv.log", tmp_path / "seen.json", tmp_path / "staging"
+    staging.mkdir()
+    # where qsv writes, and who can enter it, while qsv is still writing
+    body = GET_QSV.replace(
+        _WRITES_OUTPUT,
+        _WRITES_OUTPUT + "    d = os.path.dirname(out)\n"
+        "    open(SEEN, 'w').write(json.dumps([d, os.stat(d).st_mode & 0o777]))\n",
+    )
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\nSEEN = {str(seen)!r}\n" + body), home)
     staged, _via = await fetch.download(
-        daemon, "https://example.invalid/d.csv", tmp_path, name="qsv-clientd-x.csv"
+        daemon, "https://example.invalid/d.csv", staging, name="qsv-clientd-x.csv"
     )
     assert staged.read_text() == "name\nfetched\n"
     assert staged.stat().st_mode & 0o777 == 0o600  # the data may be private
+    written_in, mode = json.loads(seen.read_text())
+    # the staging directory may be one others can read, so qsv never writes in it directly
+    assert Path(written_in).parent == staging
+    assert mode == 0o700
+    assert list(staging.iterdir()) == [staged]
+
+
+async def test_a_failed_qsv_get_leaves_no_private_dir(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path
+) -> None:
+    log, staging = tmp_path / "argv.log", tmp_path / "staging"
+    staging.mkdir()
+    body = GET_QSV.replace(
+        '    os.replace(out + ".tmp", out)\n',
+        '    os.replace(out + ".tmp", out)\n    sys.exit(1)\n',
+    )
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + body), home)
+    with pytest.raises(HttpError):
+        await fetch.download(
+            daemon, "https://example.invalid/d.csv", staging, name="qsv-clientd-x.csv"
+        )
+    assert list(staging.iterdir()) == []
 
 
 @pytest.mark.parametrize(

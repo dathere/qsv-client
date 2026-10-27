@@ -15,6 +15,12 @@ All notable changes to this project are documented here. The format follows
   keep the cache owner-only on Unix, so their cache stays where it is; so does a
   `QSV_CACHE_DIR` you set yourself. This corrects 0.6.0's note that qsv's cache "follows your
   umask": that is only true of qsv 26.x and older.
+- `qsv-clientd viz <URL>` and `register --download` through a qsv with `get` no longer leave
+  the download readable by others while qsv writes it. qsv writes it with your umask's modes,
+  so 0.6.0 restricted it to you only after qsv was done, in the folder you chose for the
+  data, where other users might open it in the meantime. qsv now writes it in a directory
+  only you can enter. Fetch latest was never affected: it downloads into the daemon's own
+  private directory.
 
 ## [0.6.0] - 2026-10-26
 

@@ -132,20 +132,27 @@ async def download(
                 argv += ["--ckan-api", _ckan_api_for(target)]
             # both runs must see the same cache, or cache-fetch can't find the entry
             env = _get_cache_env(daemon, caps.version_tuple)
+            # qsv writes --output with the umask's mode (often 0644), and staging_dir may be
+            # one others can read, so it writes into a directory only we can enter
+            private = Path(tempfile.mkdtemp(prefix=".qsv-clientd-", dir=staging_dir))
             try:
-                await daemon._browser_run(ds, argv, timeout=timeout, env=env)
-                await daemon._browser_run(
-                    ds,
-                    ["get", "cache-fetch", name, "--output", str(incoming)],
-                    timeout=timeout,
-                    env=env,
-                )
-            except HttpError as exc:
-                if exc.code == "qsv_timeout":
-                    raise _timed_out(timeout) from None
-                raise
-            # qsv puts a new file at --output with the umask's mode (often 0644), not our 0600
-            incoming.chmod(0o600)
+                output = private / incoming.name
+                try:
+                    await daemon._browser_run(ds, argv, timeout=timeout, env=env)
+                    await daemon._browser_run(
+                        ds,
+                        ["get", "cache-fetch", name, "--output", str(output)],
+                        timeout=timeout,
+                        env=env,
+                    )
+                except HttpError as exc:
+                    if exc.code == "qsv_timeout":
+                        raise _timed_out(timeout) from None
+                    raise
+                output.chmod(0o600)
+                os.replace(output, incoming)
+            finally:
+                shutil.rmtree(private, ignore_errors=True)
             # qsv downloads it, so the size can only be checked once it is here
             if incoming.stat().st_size > max_bytes:
                 raise _too_large(max_bytes)
