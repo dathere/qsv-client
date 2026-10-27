@@ -20,6 +20,9 @@ API_VERSION = 1
 LIVE_SCHEMATICS_QSV = "27.0.0"
 """The first qsv whose Data Schematics connect to qsv-clientd."""
 
+PRIVATE_GET_CACHE_QSV = "27.0.0"
+"""The first qsv that keeps its `get` cache readable by its owner only (on Unix)."""
+
 
 def schematics_notice(qsv_version: object) -> str | None:
     """Why schematics won't go live with this qsv, or None when they will (or it can't tell)."""

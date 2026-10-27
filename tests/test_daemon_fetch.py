@@ -224,6 +224,46 @@ async def test_a_download_through_qsv_get_stays_private(
     assert staged.stat().st_mode & 0o777 == 0o600  # the data may be private
 
 
+@pytest.mark.parametrize(
+    ("version", "users_own", "private"),
+    [("26.0.0", False, True), ("27.0.0", False, False), ("26.0.0", True, False)],
+)
+async def test_qsv_get_before_27_gets_a_private_cache(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+    users_own: bool,
+    private: bool,
+) -> None:
+    # qsv before 27.0.0 makes its get cache with the umask's modes
+    log = tmp_path / "argv.log"
+    mine = tmp_path / "mine"
+    if users_own:
+        monkeypatch.setenv("QSV_CACHE_DIR", str(mine))
+    else:
+        monkeypatch.delenv("QSV_CACHE_DIR", raising=False)
+    body = GET_QSV.replace('"26.0.0"', f'"{version}"').replace(
+        'fh.write(json.dumps(sys.argv[1:]) + "\\n")',
+        'fh.write(json.dumps([sys.argv[1:], os.environ.get("QSV_CACHE_DIR")]) + "\\n")',
+    )
+    daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + body), home)
+    await fetch.download(
+        daemon, "https://example.invalid/d.csv", tmp_path, name="qsv-clientd-x.csv"
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    cache_dirs = {cache_dir for argv, cache_dir in calls if argv[0] == "get"}
+    own_cache = daemon.home / "qsv-cache"
+    if private:
+        assert cache_dirs == {str(own_cache)}  # get and cache-fetch must share one cache
+        if sys.platform != "win32":
+            assert own_cache.stat().st_mode & 0o777 == 0o700
+    else:
+        assert cache_dirs == {str(mine) if users_own else None}
+        assert not own_cache.exists()
+
+
 @pytest.mark.parametrize("ctype", ["text/html", "text/html; charset=utf-8"])
 async def test_download_refuses_a_web_page(
     fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, web: _Routes, ctype: str

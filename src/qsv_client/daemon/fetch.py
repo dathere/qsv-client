@@ -43,8 +43,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .._process import _finish_despite_cancel
+from ..capabilities import parse_version
 from ._http import HttpError
-from .config import ensure_private_dir
+from .config import PRIVATE_GET_CACHE_QSV, ensure_private_dir
 from .registry import Dataset
 
 if TYPE_CHECKING:
@@ -129,10 +130,15 @@ async def download(
             argv = ["get", url, "--name", name]
             if scheme == "ckan":
                 argv += ["--ckan-api", _ckan_api_for(target)]
+            # both runs must see the same cache, or cache-fetch can't find the entry
+            env = _get_cache_env(daemon, caps.version_tuple)
             try:
-                await daemon._browser_run(ds, argv, timeout=timeout)
+                await daemon._browser_run(ds, argv, timeout=timeout, env=env)
                 await daemon._browser_run(
-                    ds, ["get", "cache-fetch", name, "--output", str(incoming)], timeout=timeout
+                    ds,
+                    ["get", "cache-fetch", name, "--output", str(incoming)],
+                    timeout=timeout,
+                    env=env,
                 )
             except HttpError as exc:
                 if exc.code == "qsv_timeout":
@@ -170,6 +176,16 @@ async def download(
         incoming.unlink(missing_ok=True)
         raise
     return incoming, target.via
+
+
+def _get_cache_env(daemon: Daemon, qsv_version: tuple[int, int, int]) -> dict[str, str] | None:
+    """Before 27.0.0, qsv's get cache follows the umask, and downloads may be private, so give
+    it one only we can read. A QSV_CACHE_DIR the user set, and qsv 27.0.0+, are left alone."""
+    if qsv_version >= parse_version(PRIVATE_GET_CACHE_QSV):
+        return None
+    if daemon.config.inherit_env and "QSV_CACHE_DIR" in os.environ:
+        return None
+    return {"QSV_CACHE_DIR": str(ensure_private_dir(daemon.home / "qsv-cache"))}
 
 
 async def _fetch_locked(daemon: Daemon, ds: Dataset, source: str, force: bool) -> dict[str, Any]:
