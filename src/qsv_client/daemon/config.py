@@ -17,8 +17,13 @@ DEFAULT_PORT = 14470
 
 API_VERSION = 1
 
+# 27.0.0 was withdrawn before release, but builds of qsv master report it and have these
+# features, so the version checks use it; what users are told names 27.0.1
 LIVE_SCHEMATICS_QSV = "27.0.0"
 """The first qsv whose Data Schematics connect to qsv-clientd."""
+
+LIVE_SCHEMATICS_RELEASE = "27.0.1"
+"""The first released qsv whose Data Schematics connect to qsv-clientd."""
 
 PRIVATE_GET_CACHE_QSV = "27.0.0"
 """The first qsv that keeps its `get` cache readable by its owner only (on Unix)."""
@@ -36,7 +41,7 @@ def schematics_notice(qsv_version: object) -> str | None:
         return None
     return (
         f"qsv {qsv_version} writes Data Schematics that can't connect to qsv-clientd. "
-        f"Live schematics need qsv {LIVE_SCHEMATICS_QSV} or later."
+        f"Live schematics need qsv {LIVE_SCHEMATICS_RELEASE} or later."
     )
 
 

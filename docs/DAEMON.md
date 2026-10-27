@@ -312,7 +312,7 @@ size or modification time, as with an edit or a fetch with `--allow-replace`. A 
 a registered dataset by it:
 
 ```html
-<script type="application/json" id="qsv-schematic-source">{"schema":1,"qsv_version":"27.0.0",
+<script type="application/json" id="qsv-schematic-source">{"schema":1,"qsv_version":"27.0.1",
   "schematic_uuid":"…","fingerprint":{"algo":"blake3","digest":"…","bytes":123},
   "rows":4,"viz_args":["--dict-info"],"redacted":[],"pid":"https://doi.org/…"}</script>
 ```
