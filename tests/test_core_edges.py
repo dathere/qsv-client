@@ -206,10 +206,19 @@ def batch_qsv(fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch) -
     return str(batch)
 
 
-@pytest.mark.parametrize("arg", ["a&calc", "x|y", "<in", "50%", "^z", "hi!", "a\nb", "a\rb"])
+@pytest.mark.parametrize(
+    "arg",
+    [
+        *("a&calc", "x|y", "<in", "^z", "hi!", "a\nb", "a\rb"),
+        # variables cmd.exe would expand: the run's own, case-insensitively; substring
+        # syntax; dynamic ones; and one right after an undefined candidate (%E2%)
+        *("%QSV_TEST_SECRET%", "%qsv_test_secret%", "%QSV_TEST_SECRET:~0,2%", "%CD%"),
+        "%E2%QSV_TEST_SECRET%",
+    ],
+)
 def test_a_batch_file_qsv_refuses_what_cmd_would_act_on(batch_qsv: str, arg: str) -> None:
     with pytest.raises(QsvUsageError, match=r"argument 2 has .* batch file") as info:
-        Qsv(batch_qsv).run("search", arg, "data.csv")
+        Qsv(batch_qsv).run("search", arg, "data.csv", env={"QSV_TEST_SECRET": "x"})
     assert batch_qsv not in info.value.message  # a paired page may read it
 
 
@@ -222,6 +231,9 @@ def test_a_batch_file_qsv_still_takes_quotes_and_groups(batch_qsv: str) -> None:
     # what the daemon sends: --select "<column>", (?:...) searches, \A...\z drill-downs
     args = ["--select", '"team"', "(?:red)", r"\Ared\z"]
     assert Qsv(batch_qsv).run("search", *args).json() == ["search", *args]
+    # % that names no variable stays as it is (on Windows CI this goes through cmd.exe)
+    args = ["https://h/a%20b%E2%80%99c.csv", "100%", "%QSV_TEST_UNSET_VAR%"]
+    assert Qsv(batch_qsv).run("get", *args).json() == ["get", *args]
 
 
 @posix_only  # on Windows the fake qsv is itself a .cmd

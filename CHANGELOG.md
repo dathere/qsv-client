@@ -12,8 +12,10 @@ All notable changes to this project are documented here. The format follows
   through `cmd.exe`, which Python doesn't quote arguments for. An argument with `&` or `|`
   could then run a command of its own: a search typed into a paired Data Schematic, or a
   URL a DOI or CKAN lookup returned to `qsv-clientd`. The client now refuses arguments with
-  `&`, `|`, `<`, `>`, `^`, `%`, `!` or a line break before running a batch-file `binary`,
-  with `QsvUsageError`. An `.exe` `binary` is unaffected.
+  `&`, `|`, `<`, `>`, `^`, `!`, a line break, or a `%NAME%` that `cmd.exe` would expand (a
+  variable of the run's environment, or one of its own such as `%CD%`) before running a
+  batch-file `binary`, with `QsvUsageError`. Other `%`s, such as URL escapes (`%20`), pass.
+  An `.exe` `binary` is unaffected.
 
 ### Changed
 
