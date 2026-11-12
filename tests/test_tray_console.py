@@ -137,8 +137,10 @@ def test_the_kernel32_seam() -> None:
 # tray attaches to the hidden console, and then it does, with no console window.
 DRIVER = r"""
 import ctypes, pathlib, sys
-from qsv_client import Qsv, QsvTimeout
+from qsv_client import Qsv, QsvTimeout, client
 from qsv_client.tray import _console
+
+client._ALLOW_BATCH_FILES = True  # the fake qsv is a .cmd; fake_qsv's opt-in is in-process
 
 fake, marker = sys.argv[1], pathlib.Path(sys.argv[2])
 kernel32 = ctypes.WinDLL("kernel32")
