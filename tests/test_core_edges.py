@@ -7,6 +7,7 @@ import asyncio
 import errno
 import json
 import os
+import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -190,6 +191,47 @@ async def test_async_windows_keeps_systemroot_without_inherit_env(
     monkeypatch.setenv("EXTRA", "from-parent")
     out = (await AsyncQsv(fake_qsv(ECHO_SYSTEMROOT), inherit_env=False).run("x")).json()
     assert out == {"SYSTEMROOT": "C:\\Windows", "EXTRA": None}
+
+
+ECHO_ARGV = "import json; print(json.dumps(sys.argv[1:]))\n"
+
+
+@pytest.fixture
+def batch_qsv(fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch) -> str:
+    """A qsv that Windows would run through cmd.exe (here a script named like a batch file)."""
+    monkeypatch.setattr(_process, "IS_WINDOWS", True)
+    script = Path(fake_qsv(ECHO_ARGV))
+    batch = script.with_name("qsv-wrapper.CMD")
+    shutil.copy2(script, batch)
+    return str(batch)
+
+
+@pytest.mark.parametrize("arg", ["a&calc", "x|y", "<in", "50%", "^z", "hi!", "a\nb", "a\rb"])
+def test_a_batch_file_qsv_refuses_what_cmd_would_act_on(batch_qsv: str, arg: str) -> None:
+    with pytest.raises(QsvUsageError, match=r"argument 2 has .* batch file") as info:
+        Qsv(batch_qsv).run("search", arg, "data.csv")
+    assert batch_qsv not in info.value.message  # a paired page may read it
+
+
+async def test_async_a_batch_file_qsv_refuses_what_cmd_would_act_on(batch_qsv: str) -> None:
+    with pytest.raises(QsvUsageError, match="argument 2"):  # the command is argument 1
+        await AsyncQsv(batch_qsv).run("search", "a&calc")
+
+
+def test_a_batch_file_qsv_still_takes_quotes_and_groups(batch_qsv: str) -> None:
+    # what the daemon sends: --select "<column>", (?:...) searches, \A...\z drill-downs
+    args = ["--select", '"team"', "(?:red)", r"\Ared\z"]
+    assert Qsv(batch_qsv).run("search", *args).json() == ["search", *args]
+
+
+@posix_only  # on Windows the fake qsv is itself a .cmd
+def test_only_a_batch_file_qsv_is_restricted(
+    fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary = fake_qsv(ECHO_ARGV)
+    assert Qsv(binary).run("search", "a&b").json() == ["search", "a&b"]  # not Windows
+    monkeypatch.setattr(_process, "IS_WINDOWS", True)
+    assert Qsv(binary).run("search", "a&b").json() == ["search", "a&b"]  # not a batch file
 
 
 @pytest.mark.skipif(

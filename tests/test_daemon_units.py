@@ -104,7 +104,7 @@ def test_query_respects_installed_commands() -> None:
 
 
 def test_exact_match_regex_escapes_like_rust() -> None:
-    assert exact_match_regex("-a.b c") == r"^\-a\.b c$"
+    assert exact_match_regex("-a.b c") == r"\A\-a\.b c\z"
     assert not exact_match_regex("-x").startswith("-")
 
 

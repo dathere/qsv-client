@@ -26,6 +26,7 @@ from .errors import (
     QsvError,
     QsvNotFound,
     QsvTimeout,
+    QsvUsageError,
     QsvVersionError,
     error_from_run,
 )
@@ -37,6 +38,12 @@ DEFAULT_BINARIES = ("qsv", "qsvmcp", "qsvdp", "qsvlite")
 MIN_QSV_VERSION = "25.0.0"
 
 Arg = str | os.PathLike[str] | int | float
+
+# what cmd.exe acts on in a batch file's arguments: command separators and redirection, its
+# escape (dropped silently), variable expansion (% and, delayed, !), and line breaks. Refused
+# quoted or not, so " (which only switches them on and off) can pass: /rows selects "<column>".
+# Nor ( and ): harmless on a plain `qsv.exe %*` line, and the daemon's searches use (?:...)
+_CMD_SPECIAL = frozenset("&|<>^%!\r\n")
 
 
 def _with_pathext(cand: str) -> list[Path]:
@@ -189,6 +196,19 @@ class _Base:
         if command:
             argv.append(command)
         argv.extend(os.fspath(a) if isinstance(a, os.PathLike) else str(a) for a in args)
+        if _process.IS_WINDOWS and Path(self.binary).suffix.lower() in (".bat", ".cmd"):
+            # Windows runs a batch file through cmd.exe, which subprocess doesn't quote for:
+            # an argument with "&" (from a URL, a search) would run the rest as a command
+            for i, arg in enumerate(argv[1:], 1):
+                if _CMD_SPECIAL.intersection(arg):
+                    raise QsvUsageError(
+                        # no binary path: a paired page may read this
+                        f"argument {i} has {''.join(sorted(_CMD_SPECIAL.intersection(arg)))!r}, "
+                        "which cmd.exe acts on, and the qsv binary is a batch file that runs "
+                        "through cmd.exe; use qsv.exe itself to pass such arguments",
+                        command=command or None,
+                        args=argv[1:],
+                    )
         return argv
 
     def _check_min_version(self, caps: Capabilities) -> None:

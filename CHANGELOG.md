@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- On Windows, a `binary` that is a `.bat` or `.cmd` file (a sandbox wrapper, say) runs
+  through `cmd.exe`, which Python doesn't quote arguments for. An argument with `&` or `|`
+  could then run a command of its own: a search typed into a paired Data Schematic, or a
+  URL a DOI or CKAN lookup returned to `qsv-clientd`. The client now refuses arguments with
+  `&`, `|`, `<`, `>`, `^`, `%`, `!` or a line break before running a batch-file `binary`,
+  with `QsvUsageError`. An `.exe` `binary` is unaffected.
+
+### Changed
+
+- `qsv-clientd`'s drill-downs (`/rows`) match with `\A...\z` instead of `^...$` (the same
+  match in qsv's regex syntax), so they work through a batch-file `binary`, where `cmd.exe`
+  would drop the `^`.
+
 ## [0.6.1] - 2026-10-27
 
 This release accompanies qsv 27.0.1, which replaces the withdrawn 27.0.0 as the first qsv
