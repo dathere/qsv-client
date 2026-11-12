@@ -686,6 +686,14 @@ async def test_a_result_being_read_is_removed_once_the_read_ends(
     assert not new.directory.exists()
 
 
+def test_scrub_leaves_network_urls_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", "/tmp")
+    text = "read /tmp/x and FILE:///tmp/y, not https://h/tmp/d.csv?t=1 or (http://h/tmp)"
+    assert server._scrub(text, None) == (
+        "read <tmp>/x and FILE://<tmp>/y, not https://h/tmp/d.csv?t=1 or (http://h/tmp)"
+    )
+
+
 async def test_serve_forever_cleans_up_on_sigterm(
     fake_qsv: Callable[[str], str], home: Path
 ) -> None:

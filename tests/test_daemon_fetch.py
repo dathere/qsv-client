@@ -1141,8 +1141,22 @@ async def test_a_failed_qsv_get_is_reported_as_it_failed(
     assert data.read_text() == "name\nold\n"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.org/d.csv?token=SECRET123",
+        "https://example.org/d.csv?filter='x'&token=SECRET123",  # ' is legal in a URL
+        # the temp dir is /tmp on Linux: path scrubbing must not split the URL first
+        "https://example.org/tmp/d.csv?token=SECRET123",
+    ],
+)
 async def test_a_failed_fetch_hides_the_source_url_from_pages(
-    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
 ) -> None:
     log = tmp_path / "argv.log"
     data = tmp_path / "d.csv"
@@ -1154,8 +1168,8 @@ async def test_a_failed_fetch_hides_the_source_url_from_pages(
         'elif sys.argv[1:3] == ["get", "cache-fetch"]:',
     )
     daemon = _daemon(fake_qsv(f"LOG = {str(log)!r}\n" + failing_get), home)
-    url = "https://example.org/d.csv?token=SECRET123"
     ds = _dataset(daemon, data, source_url=url, allow_replace=True)
+    monkeypatch.setattr(tempfile, "tempdir", "/tmp")
     with caplog.at_level("INFO"), pytest.raises(HttpError) as info:
         await daemon._fetch(ds, {}, "browser", "")
     assert "SECRET123" not in info.value.message and "<url>" in info.value.message
