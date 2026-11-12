@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -651,7 +652,9 @@ class Daemon:
                 "this schematic matches no registered dataset; register it first "
                 "(qsv-clientd register <data> --schematic <html>) and pair again",
             )
-        self.pairing.approve(code)
+        if self.pairing.approve(code) is None:
+            decided = "denied" if pending.denied else "approved"
+            raise HttpError(409, "already_decided", f"that pairing was already {decided}")
         log.info("pairing approved: origin %s, dataset %s", pending.origin, pending.dataset_id)
         return Response.json({"approved": pending.code, "dataset_id": pending.dataset_id})
 
@@ -860,9 +863,14 @@ class Daemon:
         log.info("fetch started: dataset %s (%s)", ds.id, tier)
         try:
             result = await fetch.fetch_latest(self, ds, force=force)
-        except fetch.FetchError as exc:
-            log.info("fetch failed: dataset %s: %s", ds.id, exc)
-            raise HttpError(exc.status, exc.code, _scrub(str(exc), ds)) from None
+        except (fetch.FetchError, HttpError) as exc:
+            # source URLs can carry credentials (signed URLs, ?token=), and qsv's and the
+            # resolvers' errors quote them: neither the log nor a page gets them
+            # redacted before _scrub, whose path replacements could split a URL (/tmp)
+            redacted = _URL.sub(_redact_url, str(exc))
+            log.info("fetch failed: dataset %s: %s", ds.id, redacted)
+            message = _scrub(redacted if tier == "browser" else str(exc), ds)
+            raise HttpError(exc.status, exc.code, message) from None
         log.info("fetch finished: dataset %s", ds.id)
         return Response.json(result)
 
@@ -1105,7 +1113,26 @@ def _private(ds: Dataset) -> dict[str, Any]:
     return asdict(ds)
 
 
+# ' is legal inside a URL, so a quoted one ('...') keeps only its closing quote outside
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"<>]+")
+_NETWORK_URL = re.compile(r"(?<![A-Za-z0-9+.-])(?!file://)" + _URL.pattern, re.IGNORECASE)
+
+
+def _redact_url(match: re.Match[str]) -> str:
+    return "<url>'" if match[0].endswith("'") else "<url>"
+
+
 def _scrub(text: str, ds: Dataset | None) -> str:
+    # a network URL holds no local path, and replacing one inside it (the temp dir /tmp in
+    # its path) would split it so that redacting the URL later misses its query
+    out, last = [], 0
+    for url in _NETWORK_URL.finditer(text):
+        out += [_scrub_paths(text[last : url.start()], ds), url[0]]
+        last = url.end()
+    return "".join([*out, _scrub_paths(text[last:], ds)])
+
+
+def _scrub_paths(text: str, ds: Dataset | None) -> str:
     if ds is not None:
         label = ds.title or "dataset"
         for path in filter(None, (ds.path, ds.original_path, ds.schematic_path)):

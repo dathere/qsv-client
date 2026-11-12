@@ -75,6 +75,7 @@ class ResultStore:
         self._results: dict[str, Stored] = {}
         # one per caller: creating, deriving and paging its result never overlap
         self._locks: dict[str, asyncio.Lock] = {}
+        self._removals: set[asyncio.Task[None]] = set()
 
     # ---- lifetime
 
@@ -90,7 +91,9 @@ class ResultStore:
             self._drop(key)
         if self.root.is_dir():
             for path in self.root.iterdir():
-                if path.name not in live:
+                lock = self._locks.get(path.name)
+                # a held lock: _drop's removal, or create()'s own cleanup, comes after it
+                if path.name not in live and not (lock is not None and lock.locked()):
                     shutil.rmtree(path, ignore_errors=True)
 
     def remove_dataset(self, dataset_id: str) -> None:
@@ -103,8 +106,23 @@ class ResultStore:
 
     def _drop(self, key: str) -> None:
         stored = self._results.pop(key, None)
-        if stored is not None:
+        if stored is None:
+            return
+        lock = self._locks.get(key)
+        if lock is None or not lock.locked():
             shutil.rmtree(stored.directory, ignore_errors=True)
+            return
+        # a page() may be reading it: removing it underneath would fail that request with
+        # qsv errors (naming paths here) instead of the next one getting a clean 410
+        task = asyncio.get_running_loop().create_task(self._remove_when_free(lock, stored))
+        self._removals.add(task)
+        task.add_done_callback(self._removals.discard)
+
+    async def _remove_when_free(self, lock: asyncio.Lock, stored: Stored) -> None:
+        async with lock:
+            # a create() that got the lock first has stored a new result in the same directory
+            if all(r.directory != stored.directory for r in self._results.values()):
+                shutil.rmtree(stored.directory, ignore_errors=True)
 
     # ---- creating
 
@@ -123,7 +141,8 @@ class ResultStore:
         if source is None:
             source = snapshot(ds)
         async with self._locks.setdefault(key, asyncio.Lock()):
-            self._drop(key)
+            if (old := self._results.pop(key, None)) is not None:
+                shutil.rmtree(old.directory, ignore_errors=True)  # we hold the lock: no reader
             directory = ensure_private_dir(self.root / key)
             stored = Stored(
                 id=secrets.token_hex(8),

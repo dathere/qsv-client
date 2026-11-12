@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     if ns.enable_autostart or ns.disable_autostart:
         # before the checks below: writing a login item needs neither the extra nor the lock
         try:
-            done = autostart.enable() if ns.enable_autostart else autostart.disable()
+            done = autostart.enable(ns.binary) if ns.enable_autostart else autostart.disable()
         except Exception as exc:  # no qsv to pin, a bad daemon.toml, a permission error
             _message_box(f"couldn't change starting at login: {exc}")
             return 1
@@ -67,7 +67,10 @@ def main(argv: list[str] | None = None) -> int:
     logs.configure_logging(logging.DEBUG if ns.verbose else logging.INFO, log_path())
     logging.getLogger("PIL").setLevel(logging.INFO)  # its debug lines are PNG chunk dumps
     _console.attach_hidden()  # before anything starts qsv
-    controller = Controller(make_daemon=functools.partial(load_daemon, ns.binary))
+    controller = Controller(
+        make_daemon=functools.partial(load_daemon, ns.binary),
+        enable_autostart=functools.partial(autostart.enable, ns.binary),
+    )
     try:
         app.run(controller)
     except Exception as exc:

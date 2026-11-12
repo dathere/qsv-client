@@ -188,6 +188,9 @@ class DaemonConfig:
 
     @classmethod
     def load(cls, path: Path | None = None) -> DaemonConfig:
+        if path is not None and not path.exists():
+            # a mistyped --config must not start the daemon on the defaults
+            raise ValueError(f"{path}: no such config file")
         path = path or config_path()
         if not path.exists():
             return cls()
@@ -208,6 +211,8 @@ class DaemonConfig:
             expected = str(known[name].type)
             if not _TYPE_CHECKS[expected](value):
                 raise ValueError(f"{path}: {name} must be {expected}, not {value!r}")
+        if data.get("max_jobs", 1) < 1:
+            raise ValueError(f"{path}: max_jobs must be at least 1, not {data['max_jobs']!r}")
         return cls(**data)
 
     def socket_path(self) -> Path:
