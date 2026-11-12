@@ -1145,7 +1145,8 @@ async def test_a_failed_qsv_get_is_reported_as_it_failed(
     "url",
     [
         "https://example.org/d.csv?token=SECRET123",
-        "https://example.org/d.csv?filter='x'&token=SECRET123",  # ' is legal in a URL
+        # ' is legal in a URL (no &: the fake qsv is a .bat on Windows, where cmd splits on it)
+        "https://example.org/d.csv?token='SECRET123'",
         # the temp dir is /tmp on Linux: path scrubbing must not split the URL first
         "https://example.org/tmp/d.csv?token=SECRET123",
     ],
