@@ -16,7 +16,7 @@ from qsv_client import (
     QsvUsageError,
     QsvVersionError,
 )
-from qsv_client.daemon._http import HttpError, read_body, read_head
+from qsv_client.daemon._http import HttpError, Request, read_body, read_head
 from qsv_client.daemon.allowlist import (
     NotAllowed,
     build_query,
@@ -297,12 +297,22 @@ async def _parse(raw: bytes, limit: int = 100) -> None:
         (b"GET /v1/hello HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", 400),
         (b"GET /v1/hello HTTP/2\r\n\r\n", 400),
         (b"GET /v1/hello HTTP/1.1\r\nX-" + b"a" * 20000 + b": 1\r\n\r\n", 413),
+        (b"GET //[ HTTP/1.1\r\n\r\n", 400),  # urlsplit raises: an invalid IPv6 netloc
+        (b"POST /v1/run HTTP/1.1\r\nContent-Length: \xb2\r\n\r\n", 400),  # "²" is a digit
     ],
 )
 async def test_malformed_requests_are_refused(raw: bytes, status: int) -> None:
     with pytest.raises(HttpError) as info:
         await _parse(raw)
     assert info.value.status == status
+
+
+def test_deeply_nested_json_is_a_bad_request() -> None:
+    # any page can send it to /v1/pair; json.loads raises RecursionError, not ValueError
+    request = Request("POST", "/v1/pair", {}, {}, b"[" * 100_000)
+    with pytest.raises(HttpError, match="not JSON") as info:
+        request.json()
+    assert info.value.status == 400
 
 
 def test_stats_never_writes_cache_files() -> None:

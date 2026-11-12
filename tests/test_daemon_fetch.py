@@ -37,14 +37,17 @@ Route = tuple[int, str, bytes]  # status, Content-Type, body
 
 
 class _Routes:
-    """A loopback HTTP server answering each path from a table set by the test."""
+    """A loopback HTTP server answering each path from a table set by the test. ``requests``
+    has each request's path and headers."""
 
     def __init__(self) -> None:
         self.routes: dict[str, Route] = {}
-        routes = self.routes
+        self.requests: list[tuple[str, Any]] = []
+        routes, requests = self.routes, self.requests
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                requests.append((self.path, self.headers))
                 status, ctype, body = routes.get(self.path, (404, "text/plain", b"not found"))
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
@@ -74,20 +77,11 @@ def web() -> Iterator[_Routes]:
 
 
 @pytest.fixture
-def doi_org(web: _Routes, monkeypatch: pytest.MonkeyPatch) -> list[urllib.request.Request]:
-    """Send requests for https://doi.org/<path> to ``web``'s ``/doi/<path>``; return them."""
-    real = urllib.request.urlopen
-    seen: list[urllib.request.Request] = []
-
-    def urlopen(req: urllib.request.Request, timeout: float | None = None) -> Any:
-        parts = urllib.parse.urlsplit(req.full_url)
-        if parts.hostname == "doi.org":
-            seen.append(req)
-            req = urllib.request.Request(web.url("/doi" + parts.path), headers=req.headers)
-        return real(req, timeout=timeout)
-
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    return seen
+def doi_org(web: _Routes, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]]:
+    """Send requests for https://doi.org/<path> to ``web``'s ``/doi/<path>``; return the
+    requests ``web`` gets (path and headers)."""
+    monkeypatch.setattr(fetch, "_DOI_RESOLVER", web.url("/doi/"))
+    return web.requests
 
 
 # -- the daemon side: an unstarted Daemon with a fake qsv -------------------------------------
@@ -338,7 +332,7 @@ async def test_fetch_from_a_doi(
     home: Path,
     tmp_path: Path,
     web: _Routes,
-    doi_org: list[urllib.request.Request],
+    doi_org: list[tuple[str, Any]],
 ) -> None:
     web.routes["/data/latest.csv"] = (200, "text/csv", b"name\nnew\n")
     web.routes["/doi/10.5072/abc"] = (
@@ -355,8 +349,9 @@ async def test_fetch_from_a_doi(
     # without --allow-replace the user's file is untouched and the dataset reads a copy
     assert data.read_text() == "name\nold\n"
     assert Path(ds.path).read_text() == "name\nnew\n"
-    assert doi_org[0].get_header("Accept") == "application/vnd.datacite.datacite+json"
-    assert doi_org[0].get_header("User-agent") == "qsv-clientd"
+    assert doi_org[0][0] == "/doi/10.5072/abc"
+    assert doi_org[0][1]["Accept"] == "application/vnd.datacite.datacite+json"
+    assert doi_org[0][1]["User-Agent"] == "qsv-clientd"
 
 
 async def test_a_doi_without_data_is_refused(
@@ -364,7 +359,7 @@ async def test_a_doi_without_data_is_refused(
     home: Path,
     tmp_path: Path,
     web: _Routes,
-    doi_org: list[urllib.request.Request],
+    doi_org: list[tuple[str, Any]],
 ) -> None:
     web.routes["/doi/10.5072/landing"] = (200, "application/json", b'{"url": "https://x"}')
     data = tmp_path / "d.csv"
@@ -663,6 +658,22 @@ async def test_a_dataset_url_that_is_not_ckan_is_downloaded_as_it_is(
     assert data.read_text() == "name\nnew\n"
 
 
+async def test_a_file_under_a_dataset_path_is_no_ckan_dataset_page(
+    fake_qsv: Callable[[str], str], home: Path, tmp_path: Path, web: _Routes
+) -> None:
+    # e.g. S3, which answers 403 for a missing key: a CKAN probe would refuse the fetch as a
+    # private dataset. CKAN dataset names are [a-z0-9_-], so "sales.csv" can't be one
+    web.routes["/api/3/action/package_show?id=sales.csv"] = (403, "text/plain", b"denied")
+    web.routes["/dataset/sales.csv"] = (200, "text/csv", b"name\nnew\n")
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, source_url=web.url("/dataset/sales.csv"), allow_replace=True)
+    result = await fetch.fetch_latest(daemon, ds)
+    assert result["via"] == "url"
+    assert data.read_text() == "name\nnew\n"
+
+
 @pytest.mark.parametrize(
     ("url", "expected"),
     [
@@ -763,11 +774,11 @@ def test_doi_forms(source: str, doi: str | None) -> None:
     assert fetch._doi(source) == doi
 
 
-def test_datacite_request_quotes_the_doi(
-    web: _Routes, doi_org: list[urllib.request.Request]
-) -> None:
-    assert fetch._datacite_content_url("10.5072/a b?c") is None  # 404 from the local server
-    assert urllib.parse.urlsplit(doi_org[0].full_url).path == "/10.5072/a%20b%3Fc"
+def test_datacite_request_quotes_the_doi(web: _Routes, doi_org: list[tuple[str, Any]]) -> None:
+    downloads = fetch.Downloads()
+    # 404 from the local server
+    assert fetch._datacite_content_url("10.5072/a b?c", timeout=5, downloads=downloads) is None
+    assert doi_org[0][0] == "/doi/10.5072/a%20b%3Fc"
 
 
 @pytest.mark.parametrize(
@@ -794,10 +805,11 @@ def test_datacite_request_quotes_the_doi(
     ],
 )
 def test_datacite_content_url(
-    web: _Routes, doi_org: list[urllib.request.Request], route: Route, expected: str | None
+    web: _Routes, doi_org: list[tuple[str, Any]], route: Route, expected: str | None
 ) -> None:
     web.routes["/doi/10.5072/x"] = route
-    assert fetch._datacite_content_url("10.5072/x") == expected
+    downloads = fetch.Downloads()
+    assert fetch._datacite_content_url("10.5072/x", timeout=5, downloads=downloads) == expected
 
 
 def test_replace_creates_a_missing_target_privately(tmp_path: Path) -> None:
@@ -1095,6 +1107,40 @@ async def test_a_malformed_response_is_a_download_failure(
         await fetch.fetch_latest(daemon, ds)
     assert (info.value.status, info.value.code) == (502, "download_failed")
     assert data.read_text() == "name\nold\n"
+
+
+async def test_a_redirect_off_http_is_refused(
+    fake_qsv: Callable[[str], str],
+    home: Path,
+    tmp_path: Path,
+    raw: Callable[[list[bytes], float], _Raw],
+) -> None:
+    # urllib would follow it to its FTP handler, which no watchdog bounds
+    location = b"Location: ftp://127.0.0.1:9/d.csv\r\nContent-Length: 0\r\n\r\n"
+    server = raw([b"HTTP/1.1 302 Found\r\n" + location], 0)
+    data = tmp_path / "d.csv"
+    data.write_text("name\nold\n")
+    daemon = _daemon(fake_qsv(PLAIN_QSV), home)
+    ds = _dataset(daemon, data, source_url=server.url, allow_replace=True)
+    with pytest.raises(FetchError) as info:
+        await fetch.fetch_latest(daemon, ds)
+    assert (info.value.status, info.value.code) == (502, "download_failed")
+    assert "redirect to a URL that isn't HTTP" in str(info.value)
+    assert data.read_text() == "name\nold\n"
+
+
+def test_doi_resolution_goes_through_the_download_watchdog(
+    web: _Routes, doi_org: list[tuple[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloads = fetch.Downloads()
+    downloads.abort_all()  # the daemon is closing: no new lookup starts
+    with pytest.raises(FetchError) as info:
+        fetch._datacite_content_url("10.5072/x", timeout=5, downloads=downloads)
+    assert info.value.code == "shutting_down"
+    monkeypatch.setattr(fetch, "_METADATA_MAX_BYTES", 16)  # and the answer is size-limited
+    web.routes["/doi/10.5072/x"] = (200, "application/json", b'{"contentUrl": "' + b"x" * 16)
+    with pytest.raises(FetchError, match="over 0 MiB"):
+        fetch._datacite_content_url("10.5072/x", timeout=5, downloads=fetch.Downloads())
 
 
 async def test_a_qsv_get_past_fetch_timeout_is_a_download_timeout(

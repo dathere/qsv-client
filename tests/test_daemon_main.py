@@ -11,6 +11,7 @@ import json
 import logging
 import runpy
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Iterator
@@ -248,6 +249,28 @@ def test_install_failure_exits_1(
     monkeypatch.setattr(service, "install", fail)
     assert cli.main(["install"]) == 1
     assert capsys.readouterr().err == "qsv-clientd: no systemctl\n"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        subprocess.CalledProcessError(1, ["systemctl", "--user", "enable", "qsv-clientd"]),
+        FileNotFoundError(2, "No such file or directory", "systemctl"),
+    ],
+)
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+def test_a_failing_service_manager_is_reported_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    error: Exception,
+) -> None:
+    def fail() -> str:
+        raise error
+
+    monkeypatch.setattr(service, command, fail)
+    assert cli.main([command]) == 1
+    assert capsys.readouterr().err == f"qsv-clientd: {command} failed: {error}\n"
 
 
 # -- simple API subcommands -----------------------------------------------------------------

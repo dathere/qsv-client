@@ -336,6 +336,18 @@ def test_uninstall_on_linux(
     assert service.uninstall() == f"removed {unit}"
 
 
+def test_the_systemd_unit_follows_xdg_config_home(
+    calls: _Calls, user_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # where `systemctl --user` looks for it, as the tray's autostart entry does
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    service.install()
+    unit = tmp_path / "cfg" / "systemd" / "user" / "qsv-clientd.service"
+    assert unit.exists() and service.service_installed() == "systemd"
+    assert not (user_home / ".config").exists()
+
+
 def test_uninstall_elsewhere_prints_the_task_command(
     calls: _Calls, monkeypatch: pytest.MonkeyPatch
 ) -> None:

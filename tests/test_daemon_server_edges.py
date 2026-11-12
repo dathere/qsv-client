@@ -397,6 +397,28 @@ def test_render_answers_each_tier_differently(
     _assert_refused(browser, 413, "too_large", data, schematic, tmp_path)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+@pytest.mark.parametrize("data_mode", [0o600, 0o644])
+def test_a_new_schematic_is_no_more_readable_than_its_data(
+    fake_qsv: Callable[[str], str],
+    start_daemon: StartDaemon,
+    data: Path,
+    tmp_path: Path,
+    data_mode: int,
+) -> None:
+    # e.g. `qsv-clientd viz <signed URL>` keeps the download 0600; the page summarizes it
+    data.chmod(data_mode)
+    d = start_daemon(fake_qsv(GENERIC))
+    schematic = tmp_path / "s.html"
+    ds_id = _register(d, data, schematic_path=str(schematic))
+    assert _local(d, "POST", f"/v1/datasets/{ds_id}/render", {}).status == 200
+    assert schematic.stat().st_mode & 0o777 == data_mode
+    # an existing schematic keeps the mode its owner gave it
+    schematic.chmod(0o640)
+    assert _local(d, "POST", f"/v1/datasets/{ds_id}/render", {}).status == 200
+    assert schematic.stat().st_mode & 0o777 == 0o640
+
+
 def test_render_with_viz_args_only_or_nothing_to_render(
     fake_qsv: Callable[[str], str], start_daemon: StartDaemon, data: Path, tmp_path: Path
 ) -> None:
@@ -517,6 +539,23 @@ def test_a_peer_that_stops_reading_is_dropped_after_the_flush_timeout(
         await original(writer, response)
 
     monkeypatch.setattr(server, "write_response", buffered)
+    monkeypatch.setattr(server, "_FLUSH_TIMEOUT", 0.3)
+    d = start_daemon(fake_qsv('sys.stdout.write("x" * (32 << 20))\n'))
+    with socket.create_connection(("127.0.0.1", d.port), timeout=30) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        s.sendall(_local_run_request(d, {"command": "count"}))
+        s.recv(1024)  # the response has started; now stop reading
+        deadline = time.monotonic() + 20
+        while d.daemon._writers or d.daemon._tcp_open:
+            assert time.monotonic() < deadline, "the stalled connection was never dropped"
+            time.sleep(0.05)
+    assert d.http("GET", "/v1/hello").status == 200
+
+
+def test_a_peer_that_stops_reading_mid_response_is_dropped_too(
+    fake_qsv: Callable[[str], str], start_daemon: StartDaemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # default buffer limits: the stall is in write_response's drain(), before any cleanup
     monkeypatch.setattr(server, "_FLUSH_TIMEOUT", 0.3)
     d = start_daemon(fake_qsv('sys.stdout.write("x" * (32 << 20))\n'))
     with socket.create_connection(("127.0.0.1", d.port), timeout=30) as s:

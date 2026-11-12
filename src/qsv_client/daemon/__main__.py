@@ -8,6 +8,7 @@ import contextlib
 import json
 import logging
 import re
+import subprocess
 import sys
 import urllib.parse
 import webbrowser
@@ -271,11 +272,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if ns.cmd == "serve":
             return _serve(ns)
-        if ns.cmd == "install":
-            print(service.install())
-            return 0
-        if ns.cmd == "uninstall":
-            print(service.uninstall())
+        if ns.cmd in ("install", "uninstall"):
+            try:
+                print(service.install() if ns.cmd == "install" else service.uninstall())
+            except (subprocess.CalledProcessError, OSError) as exc:  # launchctl, systemctl
+                print(f"qsv-clientd: {ns.cmd} failed: {exc}", file=sys.stderr)
+                return 1
             return 0
         client = DaemonClient()
         if ns.cmd == "status":
