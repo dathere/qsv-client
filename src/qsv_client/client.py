@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 import weakref
@@ -225,10 +226,17 @@ class _Base:
             # Windows runs a batch file through cmd.exe, which subprocess doesn't quote for:
             # an argument with "&" (from a URL, a search) would run the rest as a command
             names = {name.upper() for name in env} | _CMD_DYNAMIC_VARS
+            # a %NAME% may span arguments, so look at the command line cmd.exe gets
+            if _cmd_expands(subprocess.list2cmdline(argv[1:]), names):
+                raise QsvUsageError(
+                    "the arguments have a %NAME% that cmd.exe would replace with a variable, "
+                    "and the qsv binary is a batch file that runs through cmd.exe; use qsv.exe "
+                    "itself to pass such arguments",
+                    command=command or None,
+                    args=argv[1:],
+                )
             for i, arg in enumerate(argv[1:], 1):
                 found = "".join(sorted(_CMD_SPECIAL.intersection(arg)))
-                if not found and _cmd_expands(arg, names):
-                    found = "%"
                 if found:
                     raise QsvUsageError(
                         # no binary path: a paired page may read this

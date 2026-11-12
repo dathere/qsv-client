@@ -217,9 +217,15 @@ def batch_qsv(fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch) -
     ],
 )
 def test_a_batch_file_qsv_refuses_what_cmd_would_act_on(batch_qsv: str, arg: str) -> None:
-    with pytest.raises(QsvUsageError, match=r"argument 2 has .* batch file") as info:
+    with pytest.raises(QsvUsageError, match=r"batch file that runs through cmd\.exe") as info:
         Qsv(batch_qsv).run("search", arg, "data.csv", env={"QSV_TEST_SECRET": "x"})
     assert batch_qsv not in info.value.message  # a paired page may read it
+
+
+def test_a_batch_file_qsv_refuses_a_variable_split_across_arguments(batch_qsv: str) -> None:
+    # cmd.exe expands over its whole command line: this is "%QSV_TEST_SECRET:unused= %"
+    with pytest.raises(QsvUsageError, match="arguments have a %NAME%"):
+        Qsv(batch_qsv).run("search", "%QSV_TEST_SECRET:unused=", "%", env={"QSV_TEST_SECRET": "x"})
 
 
 async def test_async_a_batch_file_qsv_refuses_what_cmd_would_act_on(batch_qsv: str) -> None:
