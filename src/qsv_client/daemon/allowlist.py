@@ -142,9 +142,8 @@ _RUST_META = frozenset("\\.+*?()|[]{}^$#&-~")
 
 
 def exact_match_regex(value: str) -> str:
-    """A Rust regex matching exactly ``value``; safe as a positional even if it starts with -.
-    \\A and \\z, not ^ and $: cmd.exe drops ^ from a batch-file qsv's arguments."""
-    return "\\A" + "".join("\\" + c if c in _RUST_META else c for c in value) + "\\z"
+    """A Rust regex matching exactly ``value``; safe as a positional even if it starts with -."""
+    return "^" + "".join("\\" + c if c in _RUST_META else c for c in value) + "$"
 
 
 def contains_regex(value: str) -> str:

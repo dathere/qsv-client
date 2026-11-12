@@ -193,63 +193,25 @@ async def test_async_windows_keeps_systemroot_without_inherit_env(
     assert out == {"SYSTEMROOT": "C:\\Windows", "EXTRA": None}
 
 
-ECHO_ARGV = "import json; print(json.dumps(sys.argv[1:]))\n"
-
-
-@pytest.fixture
-def batch_qsv(fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch) -> str:
-    """A qsv that Windows would run through cmd.exe (here a script named like a batch file)."""
-    monkeypatch.setattr(_process, "IS_WINDOWS", True)
-    script = Path(fake_qsv(ECHO_ARGV))
-    batch = script.with_name("qsv-wrapper.CMD")
-    shutil.copy2(script, batch)
-    return str(batch)
-
-
-@pytest.mark.parametrize(
-    "arg",
-    [
-        *("a&calc", "x|y", "<in", "^z", "hi!", "a\nb", "a\rb"),
-        # variables cmd.exe would expand: the run's own, case-insensitively; substring
-        # syntax; dynamic ones; and one right after an undefined candidate (%E2%)
-        *("%QSV_TEST_SECRET%", "%qsv_test_secret%", "%QSV_TEST_SECRET:~0,2%", "%CD%"),
-        "%E2%QSV_TEST_SECRET%",
-    ],
-)
-def test_a_batch_file_qsv_refuses_what_cmd_would_act_on(batch_qsv: str, arg: str) -> None:
-    with pytest.raises(QsvUsageError, match=r"batch file that runs through cmd\.exe") as info:
-        Qsv(batch_qsv).run("search", arg, "data.csv", env={"QSV_TEST_SECRET": "x"})
-    assert batch_qsv not in info.value.message  # a paired page may read it
-
-
-def test_a_batch_file_qsv_refuses_a_variable_split_across_arguments(batch_qsv: str) -> None:
-    # cmd.exe expands over its whole command line: this is "%QSV_TEST_SECRET:unused= %"
-    with pytest.raises(QsvUsageError, match="arguments have a %NAME%"):
-        Qsv(batch_qsv).run("search", "%QSV_TEST_SECRET:unused=", "%", env={"QSV_TEST_SECRET": "x"})
-
-
-async def test_async_a_batch_file_qsv_refuses_what_cmd_would_act_on(batch_qsv: str) -> None:
-    with pytest.raises(QsvUsageError, match="argument 2"):  # the command is argument 1
-        await AsyncQsv(batch_qsv).run("search", "a&calc")
-
-
-def test_a_batch_file_qsv_still_takes_quotes_and_groups(batch_qsv: str) -> None:
-    # what the daemon sends: --select "<column>", (?:...) searches, \A...\z drill-downs
-    args = ["--select", '"team"', "(?:red)", r"\Ared\z"]
-    assert Qsv(batch_qsv).run("search", *args).json() == ["search", *args]
-    # % that names no variable stays as it is (on Windows CI this goes through cmd.exe)
-    args = ["https://h/a%20b%E2%80%99c.csv", "100%", "%QSV_TEST_UNSET_VAR%"]
-    assert Qsv(batch_qsv).run("get", *args).json() == ["get", *args]
-
-
-@posix_only  # on Windows the fake qsv is itself a .cmd
-def test_only_a_batch_file_qsv_is_restricted(
-    fake_qsv: Callable[[str], str], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("cls", [Qsv, AsyncQsv])
+@pytest.mark.parametrize("name", ["qsv-wrapper.bat", "qsv-wrapper.CMD"])
+def test_windows_refuses_a_batch_file_binary(
+    fake_qsv: Callable[[str], str],
+    monkeypatch: pytest.MonkeyPatch,
+    cls: type[Qsv] | type[AsyncQsv],
+    name: str,
 ) -> None:
-    binary = fake_qsv(ECHO_ARGV)
-    assert Qsv(binary).run("search", "a&b").json() == ["search", "a&b"]  # not Windows
+    script = Path(fake_qsv(""))
+    batch, exe = script.with_name(name), script.with_name("qsv-wrapper.exe")
+    shutil.copy2(script, batch)
+    shutil.copy2(script, exe)
     monkeypatch.setattr(_process, "IS_WINDOWS", True)
-    assert Qsv(binary).run("search", "a&b").json() == ["search", "a&b"]  # not a batch file
+    monkeypatch.setattr(client, "_ALLOW_BATCH_FILES", False)  # as outside the tests
+    with pytest.raises(ValueError, match=r"is a batch file, which Windows runs through cmd\.exe"):
+        cls(str(batch))
+    assert cls(str(exe)).binary == str(exe)  # not a batch file
+    monkeypatch.setattr(_process, "IS_WINDOWS", False)
+    assert cls(str(batch)).binary == str(batch)  # only Windows runs it through cmd.exe
 
 
 @pytest.mark.skipif(

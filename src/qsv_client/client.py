@@ -9,9 +9,7 @@ import errno
 import io
 import json
 import os
-import re
 import shutil
-import subprocess
 import threading
 import time
 import weakref
@@ -28,7 +26,6 @@ from .errors import (
     QsvError,
     QsvNotFound,
     QsvTimeout,
-    QsvUsageError,
     QsvVersionError,
     error_from_run,
 )
@@ -41,34 +38,8 @@ MIN_QSV_VERSION = "25.0.0"
 
 Arg = str | os.PathLike[str] | int | float
 
-# what cmd.exe acts on in a batch file's arguments: command separators and redirection, its
-# escape (dropped silently), delayed expansion (!), and line breaks. Refused quoted or not, so
-# " (which only switches them on and off) can pass: /rows selects "<column>". Nor ( and ):
-# harmless on a plain `qsv.exe %*` line, and the daemon's searches use (?:...)
-_CMD_SPECIAL = frozenset("&|<>^!\r\n")
-# % only matters as %NAME% (or %NAME:...%) naming a variable: cmd.exe expands those once, on
-# its own command line, and leaves the rest, so URL escapes such as %20 pass. Every % starts
-# a candidate (lookahead): after an undefined %A%, cmd.exe resumes the scan at its second %
-_CMD_VAR = re.compile(r"(?=%([^%]+)%)")
-# expanded though not in the environment
-_CMD_DYNAMIC_VARS = frozenset(
-    {
-        "CD",
-        "DATE",
-        "TIME",
-        "RANDOM",
-        "ERRORLEVEL",
-        "CMDEXTVERSION",
-        "CMDCMDLINE",
-        "HIGHESTNUMANODENUMBER",
-        "__APPDIR__",
-        "__CD__",
-    }
-)
-
-
-def _cmd_expands(arg: str, names: frozenset[str] | set[str]) -> bool:
-    return any(m[1].split(":", 1)[0].upper() in names for m in _CMD_VAR.finditer(arg))
+# tests only: their stand-in for qsv is a .cmd on Windows
+_ALLOW_BATCH_FILES = False
 
 
 def _with_pathext(cand: str) -> list[Path]:
@@ -164,7 +135,8 @@ class _Base:
         """
         Args:
             binary: path or name of the qsv binary. Default: ``$QSV_BIN``, else the first of
-                qsv, qsvmcp, qsvdp, qsvlite found on ``PATH``.
+                qsv, qsvmcp, qsvdp, qsvlite found on ``PATH``. On Windows, a ``.bat`` or
+                ``.cmd`` file raises ``ValueError`` here (see "Running qsv in a sandbox").
             timeout: default per-run timeout in seconds (None = no limit). On timeout the run's
                 whole process group is sent SIGTERM, then SIGKILL after ``kill_grace`` seconds,
                 and :class:`QsvTimeout` is raised.
@@ -186,6 +158,18 @@ class _Base:
         if min_version is not None:
             parse_version(min_version)  # fail now, not on every run
         self.binary = find_qsv(binary)
+        if (
+            _process.IS_WINDOWS
+            and not _ALLOW_BATCH_FILES
+            and Path(self.binary).suffix.lower() in (".bat", ".cmd")
+        ):
+            # Windows runs a batch file through cmd.exe, which subprocess doesn't quote
+            # arguments for: "&" in a URL or a search would run the rest as a command
+            raise ValueError(
+                f"{self.binary} is a batch file, which Windows runs through cmd.exe, and an "
+                "argument could then run a command of its own; use qsv.exe (or a wrapper "
+                "that is an .exe)"
+            )
         self.timeout = timeout
         self.inherit_env = inherit_env
         self.cwd = os.fspath(cwd) if cwd is not None else None
@@ -216,36 +200,11 @@ class _Base:
         env["QSV_ERROR_FORMAT"] = "json"
         return env
 
-    def _argv(self, command: str, args: Sequence[Arg], env: Mapping[str, str]) -> list[str]:
-        """``env`` is the run's environment: the variables a batch-file ``binary`` would see."""
+    def _argv(self, command: str, args: Sequence[Arg]) -> list[str]:
         argv = [self.binary]
         if command:
             argv.append(command)
         argv.extend(os.fspath(a) if isinstance(a, os.PathLike) else str(a) for a in args)
-        if _process.IS_WINDOWS and Path(self.binary).suffix.lower() in (".bat", ".cmd"):
-            # Windows runs a batch file through cmd.exe, which subprocess doesn't quote for:
-            # an argument with "&" (from a URL, a search) would run the rest as a command
-            names = {name.upper() for name in env} | _CMD_DYNAMIC_VARS
-            # a %NAME% may span arguments, so look at the command line cmd.exe gets
-            if _cmd_expands(subprocess.list2cmdline(argv[1:]), names):
-                raise QsvUsageError(
-                    "the arguments have a %NAME% that cmd.exe would replace with a variable, "
-                    "and the qsv binary is a batch file that runs through cmd.exe; use qsv.exe "
-                    "itself to pass such arguments",
-                    command=command or None,
-                    args=argv[1:],
-                )
-            for i, arg in enumerate(argv[1:], 1):
-                found = "".join(sorted(_CMD_SPECIAL.intersection(arg)))
-                if found:
-                    raise QsvUsageError(
-                        # no binary path: a paired page may read this
-                        f"argument {i} has {found!r}, which cmd.exe acts on, and the qsv "
-                        "binary is a batch file that runs through cmd.exe; use qsv.exe "
-                        "itself to pass such arguments",
-                        command=command or None,
-                        args=argv[1:],
-                    )
         return argv
 
     def _check_min_version(self, caps: Capabilities) -> None:
@@ -477,15 +436,14 @@ class Qsv(_Base):
         check: bool = True,
         text: bool = True,
     ) -> QsvResult:
-        run_env = self._build_env(env)
-        argv = self._argv(command, args, run_env)
+        argv = self._argv(command, args)
         effective_timeout = timeout if timeout is not None else self.timeout
         path, fh = _open_stdout(stdout_path, self.cwd)
         started = time.monotonic()
         try:
             raw = _process.run_sync(
                 argv,
-                env=run_env,
+                env=self._build_env(env),
                 cwd=self.cwd,
                 stdin=stdin.encode("utf-8") if isinstance(stdin, str) else stdin,
                 stdout_file=fh,
@@ -633,15 +591,14 @@ class AsyncQsv(_Base):
         check: bool = True,
         text: bool = True,
     ) -> QsvResult:
-        run_env = self._build_env(env)
-        argv = self._argv(command, args, run_env)
+        argv = self._argv(command, args)
         effective_timeout = timeout if timeout is not None else self.timeout
         path, fh = _open_stdout(stdout_path, self.cwd)
         started = time.monotonic()
         try:
             raw = await _process.run_async(
                 argv,
-                env=run_env,
+                env=self._build_env(env),
                 cwd=self.cwd,
                 stdin=stdin.encode("utf-8") if isinstance(stdin, str) else stdin,
                 stdout_file=fh,

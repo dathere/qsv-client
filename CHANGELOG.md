@@ -11,17 +11,10 @@ All notable changes to this project are documented here. The format follows
 - On Windows, a `binary` that is a `.bat` or `.cmd` file (a sandbox wrapper, say) runs
   through `cmd.exe`, which Python doesn't quote arguments for. An argument with `&` or `|`
   could then run a command of its own: a search typed into a paired Data Schematic, or a
-  URL a DOI or CKAN lookup returned to `qsv-clientd`. The client now refuses arguments with
-  `&`, `|`, `<`, `>`, `^`, `!`, a line break, or a `%NAME%` that `cmd.exe` would expand (a
-  variable of the run's environment, or one of its own such as `%CD%`) before running a
-  batch-file `binary`, with `QsvUsageError`. Other `%`s, such as URL escapes (`%20`), pass.
-  An `.exe` `binary` is unaffected.
-
-### Changed
-
-- `qsv-clientd`'s drill-downs (`/rows`) match with `\A...\z` instead of `^...$` (the same
-  match in qsv's regex syntax), so they work through a batch-file `binary`, where `cmd.exe`
-  would drop the `^`.
+  URL a DOI or CKAN lookup returned to `qsv-clientd`. `Qsv` and `AsyncQsv` (and so
+  `qsv-clientd` and the tray) now raise `ValueError` for a batch-file `binary` on Windows,
+  however it was given (`binary=`, `$QSV_BIN`, `daemon.toml`). Use `qsv.exe`, or a wrapper
+  that is an `.exe`.
 
 ## [0.6.1] - 2026-10-27
 

@@ -307,11 +307,10 @@ For any wrapper:
   check only confirms that the wrapper behaves like qsv.
 - Capabilities are cached per wrapper file, not per qsv binary. If you upgrade qsv while a
   long-running process is using it, restart the process.
-- On Windows, a `.bat` or `.cmd` wrapper runs through `cmd.exe`, which would treat `&`, `|`,
-  `<`, `>`, `^`, `!`, line breaks, and `%NAME%` naming a variable in an argument as commands,
-  redirections or variables. Python doesn't quote arguments for `cmd.exe`, so the client
-  refuses such an argument with `QsvUsageError` before running a batch-file `binary`. Other
-  uses of `%`, such as `%20` in a URL, pass. To pass the rest, point `binary` at an `.exe`.
+- On Windows, the wrapper can't be a `.bat` or `.cmd` file. Windows runs those through
+  `cmd.exe`, which Python doesn't quote arguments for, so `&` or `|` in an argument (from a
+  URL or a search) could run a command of its own. The client raises `ValueError` for such a
+  `binary`.
 
 ## Development
 
