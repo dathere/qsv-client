@@ -117,9 +117,7 @@ def _launchd_path() -> Path:
 
 
 def _systemd_path() -> Path:
-    # where `systemctl --user` looks (as the tray's autostart entry does)
-    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
-    return Path(base) / "systemd" / "user" / "qsv-clientd.service"
+    return Path.home() / ".config" / "systemd" / "user" / "qsv-clientd.service"
 
 
 def install() -> str:

@@ -349,7 +349,9 @@ re-rendering. Flags whose value is a file keep only its basename and are listed 
   `contentUrl`. Most DOIs resolve to a landing page instead, so register `--source-url` for
   those.
 - **CKAN pages.** A resource page (`<site>/dataset/<name>/resource/<id>`, with or without a
-  subpath before `/dataset/`) is fetched as `ckan://<id>` from that site. A dataset page is
+  subpath before `/dataset/`) is fetched as `ckan://<id>` from that site. A dataset page
+  (`<site>/dataset/<name>`, where `<name>` is lowercase letters, digits, `-` and `_`, as CKAN
+  requires, so `.../dataset/sales.csv` is downloaded as it is) is
   looked up with `package_show`: with exactly one CSV or TSV resource it is fetched as that
   one; with several, the error lists them, so register one with `--source-url`. A private
   dataset's page is refused with a message saying so: the daemon sends no CKAN token to

@@ -398,21 +398,32 @@ def test_render_answers_each_tier_differently(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
-@pytest.mark.parametrize("data_mode", [0o600, 0o644])
+@pytest.mark.parametrize(
+    ("data_mode", "expected"),
+    [
+        (0o600, 0o600),  # e.g. `qsv-clientd viz <signed URL>` keeps the download private
+        (0o640, 0o640),
+        (0o644, 0o644),
+        # only ever narrower than 0644: not writable by others, still writable by its owner
+        (0o664, 0o644),
+        (0o666, 0o644),
+        (0o444, 0o644),
+    ],
+)
 def test_a_new_schematic_is_no_more_readable_than_its_data(
     fake_qsv: Callable[[str], str],
     start_daemon: StartDaemon,
     data: Path,
     tmp_path: Path,
     data_mode: int,
+    expected: int,
 ) -> None:
-    # e.g. `qsv-clientd viz <signed URL>` keeps the download 0600; the page summarizes it
     data.chmod(data_mode)
     d = start_daemon(fake_qsv(GENERIC))
     schematic = tmp_path / "s.html"
     ds_id = _register(d, data, schematic_path=str(schematic))
     assert _local(d, "POST", f"/v1/datasets/{ds_id}/render", {}).status == 200
-    assert schematic.stat().st_mode & 0o777 == data_mode
+    assert schematic.stat().st_mode & 0o777 == expected
     # an existing schematic keeps the mode its owner gave it
     schematic.chmod(0o640)
     assert _local(d, "POST", f"/v1/datasets/{ds_id}/render", {}).status == 200

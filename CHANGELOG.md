@@ -21,9 +21,10 @@ All notable changes to this project are documented here. The format follows
 - A stored result that is replaced, forgotten, or swept with its token while a page is
   reading it is removed once that read ends, instead of underneath it (which failed the read
   with a 500).
-- A schematic `qsv-clientd` renders for the first time gets its data file's read and write
-  permissions, not a fixed 0644: the page summarizes data that may be private, such as a
-  download `qsv-clientd viz` keeps owner-only. A schematic that exists keeps its own.
+- A schematic `qsv-clientd` renders for the first time is readable only by those who can read
+  its data, not always 0644: the page summarizes data that may be private, such as a download
+  `qsv-clientd viz` keeps owner-only. It is never writable by others, and a schematic that
+  exists keeps its own permissions.
 
 ### Fixed
 
@@ -40,9 +41,8 @@ All notable changes to this project are documented here. The format follows
 - `qsv-clientd` drops a client that stops reading a large response after 30 seconds, as it
   already did once the response was written; the connection could otherwise stay open until
   shutdown.
-- `qsv-clientd install` writes the systemd user unit under `$XDG_CONFIG_HOME` when it is set,
-  where `systemctl --user` looks for it. `install` and `uninstall` report a failing
-  `systemctl` or `launchctl` instead of a traceback.
+- `qsv-clientd install` and `uninstall` report a failing `systemctl` or `launchctl` instead
+  of a traceback.
 
 - `sample --systematic` takes its value (`first` or `random`) from a paired page; it was
   allowlisted as a switch, so qsv took the dataset path as its value.

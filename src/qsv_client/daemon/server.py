@@ -922,12 +922,13 @@ class Daemon:
             ds.fingerprint = fp
             if ds.schematic_path:
                 target = Path(ds.schematic_path)
-                # mkstemp made it 0600; keep the schematic's existing mode, or give a new one
-                # its data's: the page summarizes the data, which may be private (a download)
+                # mkstemp made it 0600; keep the schematic's existing mode. A new one is
+                # readable by no one who can't read its data (the page summarizes it, and a
+                # download may be private), and writable by its owner only
                 if target.exists():
                     mode = target.stat().st_mode & 0o777
                 else:
-                    mode = Path(ds.path).stat().st_mode & 0o666  # read/write bits only
+                    mode = 0o600 | (Path(ds.path).stat().st_mode & 0o044)
                 tmp.chmod(mode)
                 os.replace(tmp, target)
             self.registry.save()
