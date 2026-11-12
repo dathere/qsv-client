@@ -7,6 +7,7 @@ import asyncio
 import errno
 import json
 import os
+import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -190,6 +191,27 @@ async def test_async_windows_keeps_systemroot_without_inherit_env(
     monkeypatch.setenv("EXTRA", "from-parent")
     out = (await AsyncQsv(fake_qsv(ECHO_SYSTEMROOT), inherit_env=False).run("x")).json()
     assert out == {"SYSTEMROOT": "C:\\Windows", "EXTRA": None}
+
+
+@pytest.mark.parametrize("cls", [Qsv, AsyncQsv])
+@pytest.mark.parametrize("name", ["qsv-wrapper.bat", "qsv-wrapper.CMD"])
+def test_windows_refuses_a_batch_file_binary(
+    fake_qsv: Callable[[str], str],
+    monkeypatch: pytest.MonkeyPatch,
+    cls: type[Qsv] | type[AsyncQsv],
+    name: str,
+) -> None:
+    script = Path(fake_qsv(""))
+    batch, exe = script.with_name(name), script.with_name("qsv-wrapper.exe")
+    shutil.copy2(script, batch)
+    shutil.copy2(script, exe)
+    monkeypatch.setattr(_process, "IS_WINDOWS", True)
+    monkeypatch.setattr(client, "_ALLOW_BATCH_FILES", False)  # as outside the tests
+    with pytest.raises(ValueError, match=r"is a batch file, which Windows runs through cmd\.exe"):
+        cls(str(batch))
+    assert cls(str(exe)).binary == str(exe)  # not a batch file
+    monkeypatch.setattr(_process, "IS_WINDOWS", False)
+    assert cls(str(batch)).binary == str(batch)  # only Windows runs it through cmd.exe
 
 
 @pytest.mark.skipif(

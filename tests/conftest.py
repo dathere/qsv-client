@@ -45,7 +45,7 @@ def csv_files(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def fake_qsv(tmp_path: Path) -> Callable[[str], str]:
+def fake_qsv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[str], str]:
     """Write an executable stand-in for qsv running the given Python body; return its path.
 
     The client probes ``--capabilities`` before its first run, so unless ``body`` mentions
@@ -68,6 +68,9 @@ def fake_qsv(tmp_path: Path) -> Callable[[str], str]:
             script += capabilities
         script += textwrap.dedent(body)
         if sys.platform == "win32":
+            # the client refuses batch files (cmd.exe would act on & and the like in
+            # arguments); this one gets only the tests' own arguments
+            monkeypatch.setattr(client, "_ALLOW_BATCH_FILES", True)
             (tmp_path / "fake-qsv.py").write_text(script)
             wrapper = tmp_path / "fake-qsv.cmd"
             wrapper.write_text(f'@"{sys.executable}" "%~dp0fake-qsv.py" %*\n')

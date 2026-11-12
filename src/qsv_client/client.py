@@ -38,6 +38,9 @@ MIN_QSV_VERSION = "25.0.0"
 
 Arg = str | os.PathLike[str] | int | float
 
+# tests only: their stand-in for qsv is a .cmd on Windows
+_ALLOW_BATCH_FILES = False
+
 
 def _with_pathext(cand: str) -> list[Path]:
     """``cand``, then on Windows ``cand`` + each ``PATHEXT`` extension (``C:/qsv/qsv`` ->
@@ -132,7 +135,8 @@ class _Base:
         """
         Args:
             binary: path or name of the qsv binary. Default: ``$QSV_BIN``, else the first of
-                qsv, qsvmcp, qsvdp, qsvlite found on ``PATH``.
+                qsv, qsvmcp, qsvdp, qsvlite found on ``PATH``. On Windows, a ``.bat`` or
+                ``.cmd`` file raises ``ValueError`` here (see "Running qsv in a sandbox").
             timeout: default per-run timeout in seconds (None = no limit). On timeout the run's
                 whole process group is sent SIGTERM, then SIGKILL after ``kill_grace`` seconds,
                 and :class:`QsvTimeout` is raised.
@@ -154,6 +158,18 @@ class _Base:
         if min_version is not None:
             parse_version(min_version)  # fail now, not on every run
         self.binary = find_qsv(binary)
+        if (
+            _process.IS_WINDOWS
+            and not _ALLOW_BATCH_FILES
+            and Path(self.binary).suffix.lower() in (".bat", ".cmd")
+        ):
+            # Windows runs a batch file through cmd.exe, which subprocess doesn't quote
+            # arguments for: "&" in a URL or a search would run the rest as a command
+            raise ValueError(
+                f"{self.binary} is a batch file, which Windows runs through cmd.exe, and an "
+                "argument could then run a command of its own; use qsv.exe (or a wrapper "
+                "that is an .exe)"
+            )
         self.timeout = timeout
         self.inherit_env = inherit_env
         self.cwd = os.fspath(cwd) if cwd is not None else None

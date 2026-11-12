@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- On Windows, a `binary` that is a `.bat` or `.cmd` file (a sandbox wrapper, say) runs
+  through `cmd.exe`, which Python doesn't quote arguments for. An argument with `&` or `|`
+  could then run a command of its own: a search typed into a paired Data Schematic, or a
+  URL a DOI or CKAN lookup returned to `qsv-clientd`. `Qsv` and `AsyncQsv` (and so
+  `qsv-clientd` and the tray) now raise `ValueError` for a batch-file `binary` on Windows,
+  however it was given (`binary=`, `$QSV_BIN`, `daemon.toml`). Use `qsv.exe`, or a wrapper
+  that is an `.exe`.
 - A failed fetch no longer shows a paired page the dataset's source URL (which can carry a
   token or a signature), nor writes it to the daemon's log: URLs in fetch errors are replaced
   with `<url>`. The local tier's reply still has them.
