@@ -249,6 +249,9 @@ def test_a_daemon_that_never_answers_times_out(
     [
         pytest.param(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n{}", id="short-body"),
         pytest.param(b"HTTP/1.1 OK\r\n\r\n", id="bad-status-line"),
+        # what a stale port held by some other program might send
+        pytest.param(b"garbage\r\n\r\n", id="no-status-code"),
+        pytest.param(b"HTTP/1.1 200 OK\r\nX: " + b"a" * 70_000 + b"\r\n\r\n", id="huge-head"),
     ],
 )
 @pytest.mark.parametrize(

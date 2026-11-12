@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..client import find_qsv
 from ..daemon.config import log_path
 from ..daemon.service import launchd_plist, service_environment
 
@@ -92,11 +93,12 @@ def is_enabled() -> bool | None:
     return None
 
 
-def enable() -> str:
-    """Start the tray at login (from the next one); returns what was done."""
+def enable(binary: str | None = None) -> str:
+    """Start the tray at login (from the next one); returns what was done. ``binary`` is the
+    tray's ``--binary``, which the login item keeps."""
     if sys.platform == "darwin":
         # launchd's PATH can't find qsv: pin it, as `qsv-clientd install` does
-        env = service_environment()
+        env = service_environment(binary)
         stderr = log_path().with_name("qsv-clientd-tray.stderr.log")
         stderr.parent.mkdir(parents=True, exist_ok=True)
         path = _plist_path()
@@ -109,15 +111,17 @@ def enable() -> str:
             launchd_plist(argv, env, label=LABEL, keep_alive=False, log=stderr, session_type="Aqua")
         )
         return f"the tray will start at login ({path})"
+    # absolute, as the login session's working directory is not this one
+    argv = command() if binary is None else [*command(), "--binary", find_qsv(binary)]
     if sys.platform.startswith("linux"):
         path = _desktop_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(desktop_entry(command()))
+        path.write_text(desktop_entry(argv))
         return f"the tray will start at login ({path})"
     if sys.platform == "win32":
         reg = _winreg()
         with reg.CreateKey(reg.HKEY_CURRENT_USER, _RUN_KEY) as key:
-            reg.SetValueEx(key, _RUN_VALUE, 0, reg.REG_SZ, subprocess.list2cmdline(command()))
+            reg.SetValueEx(key, _RUN_VALUE, 0, reg.REG_SZ, subprocess.list2cmdline(argv))
         return "the tray will start at login (HKCU\\" + _RUN_KEY + ")"
     raise OSError(f"starting the tray at login isn't supported on {sys.platform}")
 

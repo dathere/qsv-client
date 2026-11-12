@@ -27,7 +27,7 @@ from qsv_client.errors import QsvDaemonError, QsvDaemonUnavailable, QsvNotFound
 from qsv_client.tray import controller as controller_mod
 from qsv_client.tray import model
 from qsv_client.tray.controller import REFRESH, Controller
-from qsv_client.tray.model import Mode, TrayState
+from qsv_client.tray.model import Mode, ServiceKind, TrayState
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ def make_controller(make_daemon: Callable[[], Daemon]) -> Iterator[MakeControlle
     def make(**overrides: object) -> Controller:
         settings: dict[str, object] = {
             "make_daemon": make_daemon,
-            "service_installed": lambda: None,
+            "running_service": lambda pid: None,
             "stop_service": lambda: "stopped",
             "poll_interval": 0.05,
             # never the real login items or files of whoever runs the tests
@@ -143,10 +143,17 @@ def test_shutdown_stops_the_hosted_daemon(make_controller: MakeController, home:
 def test_attaches_to_a_running_daemon(
     make_controller: MakeController, outside: DaemonThread
 ) -> None:
-    c = make_controller(service_installed=lambda: "systemd")
+    asked: list[object] = []
+
+    def running_service(pid: object) -> ServiceKind:
+        asked.append(pid)
+        return "systemd"
+
+    c = make_controller(running_service=running_service)
     state = _do(c, model.START)
     assert state.mode is Mode.ATTACHED and state.service == "systemd"
-    assert state.status is not None and "pid" in state.status
+    # the service runs *this* daemon, not just one installed: asked by the daemon's pid
+    assert state.status is not None and asked == [state.status["pid"]]
     assert c._host is None
     # quitting the tray leaves someone else's daemon alone
     c.shutdown()
@@ -197,7 +204,7 @@ def test_takeover_stops_the_service_and_hosts(
         outside.stop()
         return "stopped launchd agent"
 
-    c = make_controller(service_installed=lambda: "launchd", stop_service=stop_service)
+    c = make_controller(running_service=lambda pid: "launchd", stop_service=stop_service)
     assert _do(c, model.START).mode is Mode.ATTACHED
     seen: list[TrayState] = []
     c.on_change = seen.append
@@ -209,7 +216,7 @@ def test_takeover_stops_the_service_and_hosts(
 def test_takeover_gives_up_when_the_service_keeps_running(
     make_controller: MakeController, outside: DaemonThread
 ) -> None:
-    c = make_controller(service_installed=lambda: "launchd", takeover_timeout=0.3)
+    c = make_controller(running_service=lambda pid: "launchd", takeover_timeout=0.3)
     _do(c, model.START)
     c.start_polling()  # its refreshes wait behind the takeover, one at a time
     state = _do(c, model.TAKEOVER)

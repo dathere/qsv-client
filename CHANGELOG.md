@@ -15,6 +15,29 @@ All notable changes to this project are documented here. The format follows
   `qsv-clientd` and the tray) now raise `ValueError` for a batch-file `binary` on Windows,
   however it was given (`binary=`, `$QSV_BIN`, `daemon.toml`). Use `qsv.exe`, or a wrapper
   that is an `.exe`.
+- A failed fetch no longer shows a paired page the dataset's source URL (which can carry a
+  token or a signature), nor writes it to the daemon's log: URLs in fetch errors are replaced
+  with `<url>`. The local tier's reply still has them.
+- A stored result that is replaced, forgotten, or swept with its token while a page is
+  reading it is removed once that read ends, instead of underneath it (which failed the read
+  with a 500).
+
+### Fixed
+
+- `sample --systematic` takes its value (`first` or `random`) from a paired page; it was
+  allowlisted as a switch, so qsv took the dataset path as its value.
+- Approving a pairing request that was already denied (or approved) replies 409
+  `already_decided` instead of reporting success.
+- `qsv-clientd serve --config <file>` fails when the file doesn't exist, instead of starting
+  on the defaults.
+- `max_jobs` below 1 is refused when the config is loaded.
+- The tray's "Start at login" (and `--enable-autostart`) keeps the tray's `--binary`.
+- The tray treats the daemon it attaches to as the installed service only when the service
+  is what runs it (by its pid), not whenever one is installed. A `qsv-clientd serve` in a
+  terminal, with the service installed but stopped, no longer offers "Stop service and run it
+  here" (which then failed) or points at the service's log.
+- `AsyncDaemonClient` raises `QsvDaemonError` for a reply that isn't HTTP, as
+  `DaemonClient` does, instead of `IndexError` or `LimitOverrunError`.
 
 ## [0.6.1] - 2026-10-27
 

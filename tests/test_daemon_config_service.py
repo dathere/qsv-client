@@ -169,6 +169,22 @@ def test_config_rejects_unknown_and_mistyped_settings(tmp_path: Path) -> None:
             DaemonConfig.load(path)
 
 
+def test_config_needs_at_least_one_job(tmp_path: Path) -> None:
+    path = tmp_path / "daemon.toml"
+    for bad in ("max_jobs = 0", "max_jobs = -1"):
+        path.write_text(bad)
+        with pytest.raises(ValueError, match="max_jobs must be at least 1"):
+            DaemonConfig.load(path)
+    path.write_text("max_jobs = 1")
+    assert DaemonConfig.load(path).max_jobs == 1
+
+
+def test_a_config_named_but_missing_is_an_error(tmp_path: Path) -> None:
+    # a typo in --config must not quietly start the daemon on the defaults
+    with pytest.raises(ValueError, match=r"daemon\.tml: no such config file"):
+        DaemonConfig.load(tmp_path / "daemon.tml")
+
+
 def test_config_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("QSV_CLIENTD_HOME", str(tmp_path))
     assert config.config_path() == tmp_path / "daemon.toml"
@@ -360,6 +376,56 @@ def test_service_installed(
         path.parent.mkdir(parents=True)
         path.write_text("")
     assert service.service_installed() == kind
+
+
+@pytest.mark.parametrize(
+    ("platform", "kind", "running", "stopped"),
+    [
+        ("linux", "systemd", (0, "4321\n"), (0, "0\n")),
+        ("darwin", "launchd", (0, '{\n\t"Label" = "x";\n\t"PID" = 4321;\n};\n'), (0, "{\n};\n")),
+    ],
+)
+def test_running_service_is_the_one_with_the_daemons_pid(
+    user_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    kind: str,
+    running: tuple[int, str],
+    stopped: tuple[int, str],
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    reply: list[tuple[int, str] | BaseException] = [running]
+    argvs: list[list[str]] = []
+
+    def run(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        argvs.append(argv)
+        if isinstance(reply[0], BaseException):
+            raise reply[0]
+        code, out = reply[0]
+        return subprocess.CompletedProcess(argv, code, out, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert service.running_service(4321) is None  # nothing installed: not even asked
+    assert argvs == []
+    for path in (
+        user_home / "Library" / "LaunchAgents" / f"{service.LABEL}.plist",
+        user_home / ".config" / "systemd" / "user" / "qsv-clientd.service",
+    ):
+        path.parent.mkdir(parents=True)
+        path.write_text("")
+    assert service.running_service(4321) == kind
+    # installed, but the daemon is a `qsv-clientd serve` in a terminal
+    assert service.running_service(999) is None
+    assert service.running_service(None) is None and service.running_service(True) is None
+    for other in (
+        stopped,
+        (1, ""),
+        (0, "n/a\n"),
+        FileNotFoundError(),
+        subprocess.TimeoutExpired("", 5),
+    ):
+        reply[0] = other
+        assert service.running_service(4321) is None
 
 
 def test_stop_service(calls: _Calls, user_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:

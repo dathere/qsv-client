@@ -308,7 +308,7 @@ class AsyncDaemonClient:
             raise QsvDaemonError("qsv-clientd did not answer in time") from None
         except OSError as exc:
             raise QsvDaemonError(_os_error_message(t, exc)) from exc
-        except (asyncio.IncompleteReadError, ValueError) as exc:
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError) as exc:
             raise QsvDaemonError(f"talking to qsv-clientd failed: {exc}") from exc
         return _decode(status, data)
 
@@ -327,7 +327,10 @@ class AsyncDaemonClient:
             await writer.drain()
             raw = await reader.readuntil(b"\r\n\r\n")
             lines = raw.decode("latin-1").split("\r\n")
-            status = int(lines[0].split(" ", 2)[1])
+            parts = lines[0].split(" ", 2)
+            if len(parts) < 2:
+                raise ValueError(f"not an HTTP reply: {lines[0][:80]!r}")
+            status = int(parts[1])
             length = 0
             for line in lines[1:]:
                 name, _, value = line.partition(":")

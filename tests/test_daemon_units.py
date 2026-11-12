@@ -382,6 +382,11 @@ def test_service_overrides_configured_binary_and_paths(
     assert env["QSV_CLIENTD_HOME"] == str(tmp_path / "home")
     command = service._command(env["QSV_BIN"])
     assert command[-3:] == ["serve", "--binary", str(lite)]
+    # a binary given here outranks daemon.toml's (the tray's --binary)
+    assert service.service_environment(str(lite))["QSV_BIN"] == str(lite)
+    (home / "daemon.toml").write_text('binary = "missing"\n')
+    assert service.service_environment("qsvlite")["QSV_BIN"] == str(lite)
+    (home / "daemon.toml").write_text('binary = "qsvlite"\n')
 
     # Linux: a reinstall restarts the running unit so it picks up the new settings
     calls: list[list[str]] = []
