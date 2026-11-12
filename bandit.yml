@@ -1,0 +1,4 @@
+# Read by Codacy (Bandit's "use configuration file" setting is on for this repo).
+# B404 flags any `import subprocess`; running qsv as a subprocess is this library's job.
+# How subprocess is called (B603/B607 etc.) is still checked.
+skips: ["B404"]
