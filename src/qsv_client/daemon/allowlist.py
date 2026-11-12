@@ -75,7 +75,7 @@ BROWSER_COMMANDS: dict[str, CommandRule] = {
         "-s --select --seed",
     ),
     "dedup": _rule("-N --numeric -i --ignore-case --sorted", "-s --select"),
-    "sample": _rule("--bernoulli --systematic", "--seed", positionals=1),
+    "sample": _rule("--bernoulli", "--systematic --seed", positionals=1),
     # width and padding multiply the output size, and the output cap only applies afterwards
     "table": _rule(
         "",

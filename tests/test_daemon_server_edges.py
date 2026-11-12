@@ -27,6 +27,7 @@ from qsv_client.daemon import DaemonConfig, server
 from qsv_client.daemon._http import HttpError
 from qsv_client.daemon.pairing import MAX_REQUESTS_PER_MINUTE
 from qsv_client.daemon.registry import Dataset, SchematicSource
+from qsv_client.daemon.results import Stored
 from qsv_client.daemon.server import Daemon
 
 StartDaemon = Callable[..., DaemonThread]
@@ -287,6 +288,14 @@ def test_pairing_deny_poll_and_local_requests(
     assert d.http("GET", f"/v1/pair/{page['request_id']}").json() == {"status": "pending"}
     denied = _local(d, "POST", f"/v1/pairings/{page['code']}/deny")
     assert denied.json() == {"denied": page["code"]}
+    # approving it afterwards doesn't claim success the page never sees
+    late = _local(d, "POST", f"/v1/pairings/{page['code']}/approve")
+    _assert_refused(late, 409, "already_decided")
+    assert "denied" in late.json()["daemon_error"]["message"]
+    assert _local(d, "POST", f"/v1/pairings/{local['code']}/approve").status == 200
+    again = _local(d, "POST", f"/v1/pairings/{local['code']}/approve")
+    _assert_refused(again, 409, "already_decided")
+    assert "approved" in again.json()["daemon_error"]["message"]
     # a denied page hears so once, gets no token, and the request is then gone
     assert d.http("GET", f"/v1/pair/{page['request_id']}").json() == {"status": "denied"}
     assert d.http("GET", f"/v1/pair/{page['request_id']}").json() == {"status": "unknown"}
@@ -641,6 +650,40 @@ async def test_closing_an_unstarted_daemon_leaves_results_alone(
     kept.write_text("a\n1\n")
     await Daemon(DaemonConfig(binary=fake_qsv(GENERIC)), home=home).close()
     assert kept.exists()
+
+
+async def test_a_result_being_read_is_removed_once_the_read_ends(
+    fake_qsv: Callable[[str], str], home: Path
+) -> None:
+    store = Daemon(DaemonConfig(binary=fake_qsv(GENERIC)), home=home).results
+
+    def stored(key: str) -> Stored:
+        directory = home / "results" / key
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "result.csv").write_text("a\n1\n")
+        s = Stored("id", key, "ds", "d.csv", None, directory, ["a"], 1)
+        store._results[key] = s
+        return s
+
+    old = stored("k")
+    lock = store._locks.setdefault("k", asyncio.Lock())
+    async with lock:  # a page() reading it
+        store.discard("k")
+        store.sweep(set())  # nor does a revoked token's sweep remove it underneath
+        await asyncio.sleep(0)
+        assert old.result.exists()
+    await asyncio.gather(*store._removals)
+    assert not old.directory.exists() and not store._removals
+
+    # a create() that got the lock first keeps the directory for its new result
+    stored("k")
+    async with lock:
+        store.discard("k")
+        new = stored("k")
+    await asyncio.gather(*store._removals)
+    assert new.result.exists()
+    store.discard("k")  # no reader: removed now
+    assert not new.directory.exists()
 
 
 async def test_serve_forever_cleans_up_on_sigterm(

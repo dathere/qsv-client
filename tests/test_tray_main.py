@@ -151,12 +151,13 @@ def test_lock_is_exclusive_until_closed(home: Path) -> None:
 def test_autostart_flags_work_without_the_extra_or_the_lock(
     home: Path, monkeypatch: pytest.MonkeyPatch, shown: list[str], flag: str, result: str
 ) -> None:
-    monkeypatch.setattr(autostart, "enable", lambda: "enabled it")
+    # the login item keeps --binary
+    monkeypatch.setattr(autostart, "enable", lambda binary: "enabled it" * (binary == "/q"))
     monkeypatch.setattr(autostart, "disable", lambda: "disabled it")
     monkeypatch.setitem(sys.modules, "pystray", None)  # no extra
     held = _lock.acquire(home / "run" / "tray.lock")  # a tray is running
     try:
-        assert cli.main([flag]) == 0
+        assert cli.main([flag, "--binary", "/q"]) == 0
     finally:
         held.close()
     assert shown == [result]
@@ -165,7 +166,7 @@ def test_autostart_flags_work_without_the_extra_or_the_lock(
 def test_an_autostart_flag_that_fails(
     home: Path, monkeypatch: pytest.MonkeyPatch, shown: list[str]
 ) -> None:
-    def no_qsv() -> str:
+    def no_qsv(binary: str | None) -> str:
         raise QsvNotFound("qsv not found on PATH")
 
     monkeypatch.setattr(autostart, "enable", no_qsv)
@@ -183,5 +184,7 @@ def test_binary_overrides_daemon_json(fake_gui: Recorder) -> None:
     assert cli.main(["--binary", "/opt/q s/qsv"]) == 0
     make = fake_gui.runs[0]._make_daemon
     assert isinstance(make, functools.partial) and make.args == ("/opt/q s/qsv",)
+    enable = fake_gui.runs[0]._enable_autostart  # Start at login keeps it too
+    assert isinstance(enable, functools.partial) and enable.args == ("/opt/q s/qsv",)
     assert cli.main([]) == 0
     assert fake_gui.runs[1]._make_daemon.args == (None,)  # type: ignore[attr-defined]

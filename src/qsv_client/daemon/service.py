@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -25,16 +26,16 @@ def _command(binary: str) -> list[str]:
     return [*base, "serve", "--binary", binary]
 
 
-def service_environment() -> dict[str, str]:
+def service_environment(binary: str | None = None) -> dict[str, str]:
     """What the service needs from this shell, which launchd/systemd won't otherwise give it.
 
     Services don't read shell profiles (launchd's PATH is just /usr/bin:/bin:/usr/sbin:/sbin),
-    so qsv is resolved now, the way the daemon would (daemon.toml ``binary``, ``$QSV_BIN``,
-    PATH), and pinned as QSV_BIN. Raises QsvNotFound if there is no qsv to pin. Other QSV_*
-    settings are deliberately not copied: the service file is world-readable and they can
-    hold secrets such as QSV_LLM_APIKEY.
+    so qsv is resolved now, the way the daemon would (``binary``, else daemon.toml ``binary``,
+    ``$QSV_BIN``, PATH), and pinned as QSV_BIN. Raises QsvNotFound if there is no qsv to
+    pin. Other QSV_* settings are deliberately not copied: the service file is world-readable
+    and they can hold secrets such as QSV_LLM_APIKEY.
     """
-    env = {"QSV_BIN": find_qsv(DaemonConfig.load().binary)}
+    env = {"QSV_BIN": find_qsv(binary if binary is not None else DaemonConfig.load().binary)}
     for name in ("QSV_CLIENTD_HOME", "QSV_CLIENTD_SOCKET"):
         if os.environ.get(name):
             # absolute: the service has its own working directory. absolute(), not
@@ -175,6 +176,35 @@ def service_installed() -> Literal["launchd", "systemd"] | None:
     if sys.platform.startswith("linux") and _systemd_path().exists():
         return "systemd"
     return None
+
+
+def running_service(pid: object) -> Literal["launchd", "systemd"] | None:
+    """Which installed service runs the daemon whose pid is ``pid``, or None: one installed
+    but stopped doesn't make a `qsv-clientd serve` in a terminal that service."""
+    kind = service_installed()
+    if kind is None or not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+    return kind if _service_pid(kind) == pid else None
+
+
+def _service_pid(kind: Literal["launchd", "systemd"]) -> int | None:
+    if kind == "systemd":
+        argv = ["systemctl", "--user", "show", "--property=MainPID", "--value", "qsv-clientd"]
+    else:
+        argv = ["launchctl", "list", LABEL]
+    try:
+        result = subprocess.run(argv, check=False, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:  # launchctl: not loaded
+        return None
+    if kind == "systemd":
+        text = result.stdout.strip()
+        if not (text.isascii() and text.isdigit()):
+            return None
+        return int(text) or None  # 0 when the unit isn't running
+    match = re.search(r'^\s*"PID" = (\d+);', result.stdout, re.MULTILINE)
+    return int(match[1]) if match else None
 
 
 def _stop_command() -> tuple[list[str], str] | None:

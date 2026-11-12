@@ -3,8 +3,10 @@ into tmp_path, the platform is patched, and the Windows registry is a fake."""
 
 from __future__ import annotations
 
+import os
 import plistlib
 import shutil
+import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,7 +27,11 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for name in ("XDG_CONFIG_HOME", "QSV_CLIENTD_HOME", "QSV_CLIENTD_SOCKET"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: "/opt/bin/qsv-clientd-tray")
-    monkeypatch.setattr(autostart, "service_environment", lambda: {"QSV_BIN": "/opt/q s/qsv"})
+    monkeypatch.setattr(
+        autostart,
+        "service_environment",
+        lambda binary=None: {"QSV_BIN": binary or "/opt/q s/qsv"},
+    )
     return home
 
 
@@ -165,6 +171,34 @@ def test_windows(winreg: FakeWinreg) -> None:
     assert autostart.is_enabled() is False and run == {}
     assert ("OpenKey", "HKCU", autostart._RUN_KEY, 0, 2) in winreg.calls  # opened to write
     autostart.disable()  # the value is gone: fine
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_the_login_item_keeps_the_trays_binary(
+    platform: str, home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    qsv = tmp_path / "my qsv"
+    qsv.write_text("")
+    reg = FakeWinreg()
+    monkeypatch.setattr(autostart, "_winreg", lambda: reg)
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.chdir(tmp_path)
+    autostart.enable(os.path.join(".", "my qsv"))  # relative: the login item gets it absolute
+    if platform == "darwin":
+        path = home / "Library" / "LaunchAgents" / f"{autostart.LABEL}.plist"
+        argv = plistlib.loads(path.read_bytes())["ProgramArguments"]
+        assert argv[1:] == [
+            "--binary",
+            os.path.join(".", "my qsv"),
+        ]  # as service_environment pins it
+        return
+    argv = ["/opt/bin/qsv-clientd-tray", "--binary", str(qsv)]
+    if platform == "linux":
+        text = (home / ".config" / "autostart" / "qsv-clientd-tray.desktop").read_text()
+        assert f"\nExec={autostart._desktop_exec(argv)}\n" in text
+    else:
+        value = reg.keys[autostart._RUN_KEY]["qsv-clientd-tray"][1]
+        assert value == subprocess.list2cmdline(argv)
 
 
 def test_elsewhere_it_is_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:

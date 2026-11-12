@@ -116,6 +116,14 @@ def test_negative_numbers_are_values_not_flags() -> None:
         build_query("slice", ["--start", "-x"], ALL)
 
 
+def test_sample_systematic_takes_its_value() -> None:
+    # a bare --systematic would take the appended dataset path as its value
+    argv = build_query("sample", ["--systematic", "first", "10"], ALL)
+    assert argv == ["sample", "--systematic", "first", "10"]
+    with pytest.raises(NotAllowed, match="--systematic needs a value"):
+        build_query("sample", ["10", "--systematic"], ALL)
+
+
 # -- pairing --------------------------------------------------------------------------------
 
 

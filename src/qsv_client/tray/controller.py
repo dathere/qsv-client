@@ -57,7 +57,7 @@ class Controller:
         *,
         make_daemon: Callable[[], Daemon] = load_daemon,
         attach: Callable[[], DaemonClient] = DaemonClient,
-        service_installed: Callable[[], ServiceKind | None] = service.service_installed,
+        running_service: Callable[[object], ServiceKind | None] = service.running_service,
         stop_service: Callable[[], str] = service.stop_service,
         poll_interval: float = 2.0,
         takeover_timeout: float = 30.0,
@@ -68,7 +68,7 @@ class Controller:
     ) -> None:
         self._make_daemon = make_daemon
         self._attach = attach
-        self._service_installed = service_installed
+        self._running_service = running_service
         self._stop_service = stop_service
         self._poll_interval = poll_interval
         self._takeover_timeout = takeover_timeout
@@ -246,7 +246,7 @@ class Controller:
             status=status,
             pairings=pairings,
             datasets=datasets,
-            service=self._service_installed(),
+            service=self._running_service(status.get("pid")),
             busy=None,
             error=None,
         )
