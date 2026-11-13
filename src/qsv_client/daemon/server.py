@@ -326,8 +326,12 @@ class Daemon:
                 and origin in self.config.browser_origins
             ):
                 self._cors(response, origin, request)
-            with contextlib.suppress(ConnectionError):
-                await write_response(writer, response)
+            try:
+                with contextlib.suppress(ConnectionError):
+                    # drain() waits on a peer that stopped reading a big response, too
+                    await asyncio.wait_for(write_response(writer, response), _FLUSH_TIMEOUT)
+            except TimeoutError:
+                writer.transport.abort()
         finally:
             writer.close()
             # close() flushes first: a peer that stopped reading would hold us here forever.
@@ -918,8 +922,13 @@ class Daemon:
             ds.fingerprint = fp
             if ds.schematic_path:
                 target = Path(ds.schematic_path)
-                # mkstemp made it 0600; keep the schematic's existing mode (or a normal 0644)
-                mode = target.stat().st_mode & 0o777 if target.exists() else 0o644
+                # mkstemp made it 0600; keep the schematic's existing mode. A new one is
+                # readable by no one who can't read its data (the page summarizes it, and a
+                # download may be private), and writable by its owner only
+                if target.exists():
+                    mode = target.stat().st_mode & 0o777
+                else:
+                    mode = 0o600 | (Path(ds.path).stat().st_mode & 0o044)
                 tmp.chmod(mode)
                 os.replace(tmp, target)
             self.registry.save()

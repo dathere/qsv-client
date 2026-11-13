@@ -58,7 +58,7 @@ class Request:
             return {}
         try:
             data = json.loads(self.body)
-        except (ValueError, UnicodeDecodeError) as exc:
+        except (ValueError, RecursionError) as exc:  # RecursionError: deeply nested
             raise HttpError(400, "bad_json", f"request body is not JSON: {exc}") from None
         if not isinstance(data, dict):
             raise HttpError(400, "bad_json", "request body must be a JSON object")
@@ -112,7 +112,10 @@ async def read_head(reader: asyncio.StreamReader) -> Request:
         headers[key] = value.strip()
     if "transfer-encoding" in headers:
         raise HttpError(501, "unsupported", "Transfer-Encoding is not supported")
-    url = urlsplit(target)
+    try:
+        url = urlsplit(target)
+    except ValueError:  # e.g. "//[": an invalid IPv6 netloc
+        raise HttpError(400, "bad_request", "request target must be a path") from None
     if url.scheme or url.netloc or not url.path.startswith("/"):
         raise HttpError(400, "bad_request", "request target must be a path")
     return Request(method, unquote(url.path), dict(parse_qsl(url.query)), headers)
@@ -124,7 +127,7 @@ async def read_body(reader: asyncio.StreamReader, request: Request, limit: int) 
         if request.method in ("POST", "PUT"):
             raise HttpError(411, "length_required", "Content-Length is required")
         return
-    if not length_header.isdigit():
+    if not (length_header.isascii() and length_header.isdigit()):  # "²" is a digit to isdigit
         raise HttpError(400, "bad_request", "invalid Content-Length")
     length = int(length_header)
     if length > limit:

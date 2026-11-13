@@ -58,13 +58,16 @@ _HTTP_TIMEOUT = 60.0
 _METADATA_MAX_BYTES = 8 << 20
 _UA = "qsv-clientd"
 _CKAN_ACTION_PATH = "/api/3/action"
+_DOI_RESOLVER = "https://doi.org/"
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 # CKAN may be mounted below the host's root, so the site is everything before /dataset/
 _CKAN_RESOURCE_PAGE = re.compile(
     r"^(?P<site>https?://[^?#]+?)/dataset/[^/?#]+/resource/(?P<rid>" + _UUID + r")/?(?:[?#].*)?$"
 )
+# a dataset's name (or id) is [a-z0-9_-] in CKAN, so a file such as .../dataset/sales.csv on
+# another host (S3 answers its probe 403, which would read as a private dataset) isn't one
 _CKAN_DATASET_PAGE = re.compile(
-    r"^(?P<site>https?://[^?#]+?)/dataset/(?P<name>[^/?#]+)/?(?:[?#].*)?$"
+    r"^(?P<site>https?://[^?#]+?)/dataset/(?P<name>[a-z0-9_-]+)/?(?:[?#].*)?$"
 )
 
 
@@ -294,7 +297,9 @@ async def _resolve(
 ) -> _Target:
     doi = _doi(source)
     if doi is not None:
-        url = await asyncio.to_thread(_datacite_content_url, doi)
+        url = await _finish_despite_cancel(
+            asyncio.to_thread(_datacite_content_url, doi, timeout=timeout, downloads=downloads)
+        )
         if url is None:
             raise FetchError(
                 422,
@@ -462,16 +467,15 @@ def _doi(source: str) -> str | None:
     return None
 
 
-def _datacite_content_url(doi: str) -> str | None:
-    req = urllib.request.Request(
-        "https://doi.org/" + urllib.parse.quote(doi, safe="/"),
-        headers={"Accept": "application/vnd.datacite.datacite+json", "User-Agent": _UA},
-    )
+def _datacite_content_url(doi: str, *, timeout: float, downloads: Downloads) -> str | None:
     try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-            if "json" not in resp.headers.get("Content-Type", ""):
-                return None
-            data = json.load(resp)
+        data = _get_json(
+            _DOI_RESOLVER + urllib.parse.quote(doi, safe="/"),
+            timeout=timeout,
+            downloads=downloads,
+            accept="application/vnd.datacite.datacite+json",
+            json_type_only=True,  # a landing page is no DataCite record
+        )
     except (OSError, ValueError):
         return None
     urls = data.get("contentUrl") if isinstance(data, dict) else None
@@ -535,16 +539,28 @@ def _download(
         downloads.finish(watchdog)
 
 
-def _get_json(url: str, *, timeout: float, downloads: Downloads) -> Any:
+def _get_json(
+    url: str,
+    *,
+    timeout: float,
+    downloads: Downloads,
+    accept: str = "application/json",
+    json_type_only: bool = False,
+) -> Any:
     """``url``'s JSON, read under a download watchdog: bounded in time and size, and cut off
     when the daemon closes. Fails with OSError (urllib's HTTPError for a 4xx/5xx answer) or
-    ValueError, or FetchError at the deadline or the size limit."""
+    ValueError (also for a non-JSON Content-Type, with ``json_type_only``), or FetchError at
+    the deadline or the size limit."""
     watchdog = _Watchdog(timeout)
     downloads.start(watchdog)
-    opener = urllib.request.build_opener(_WatchedHTTP(watchdog), _WatchedHTTPS(watchdog))
-    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": _UA})
+    opener = urllib.request.build_opener(
+        _WatchedHTTP(watchdog), _WatchedHTTPS(watchdog), _DefaultPortRedirects()
+    )
+    req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": _UA})
     try:
         with opener.open(req, timeout=min(_HTTP_TIMEOUT, timeout)) as resp:
+            if json_type_only and "json" not in resp.headers.get("Content-Type", ""):
+                raise ValueError(f"{url} answered with {resp.headers.get('Content-Type')}")
             body = resp.read(_METADATA_MAX_BYTES + 1)
         if watchdog.fired:
             raise _cut_off(watchdog, timeout)
@@ -683,6 +699,11 @@ class _DefaultPortRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(
         self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
     ) -> urllib.request.Request | None:
+        # urllib follows redirects to ftp:// too, where no watchdog bounds the transfer
+        if urllib.parse.urlsplit(newurl).scheme.lower() not in ("http", "https"):
+            raise urllib.error.HTTPError(
+                newurl, code, "redirect to a URL that isn't HTTP", headers, fp
+            )
         return super().redirect_request(req, fp, code, msg, headers, _drop_default_port(newurl))
 
 

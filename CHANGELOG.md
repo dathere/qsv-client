@@ -21,8 +21,28 @@ All notable changes to this project are documented here. The format follows
 - A stored result that is replaced, forgotten, or swept with its token while a page is
   reading it is removed once that read ends, instead of underneath it (which failed the read
   with a 500).
+- A schematic `qsv-clientd` renders for the first time is readable only by those who can read
+  its data, not always 0644: the page summarizes data that may be private, such as a download
+  `qsv-clientd viz` keeps owner-only. It is never writable by others, and a schematic that
+  exists keeps its own permissions.
 
 ### Fixed
+
+- `qsv-clientd` resolves a DOI under `fetch_timeout`, its size limit for metadata, and its
+  shutdown cut-off, as it does CKAN lookups, and refuses a download's redirect to a URL that
+  isn't HTTP(S) (urllib would have followed one to `ftp://`, where `fetch_timeout` didn't
+  apply).
+- A URL such as `https://bucket.s3.amazonaws.com/dataset/sales.csv` is downloaded as it is
+  rather than taken for a CKAN dataset page: CKAN dataset names are lowercase letters,
+  digits, `-` and `_`. (S3's 403 to the CKAN lookup made the fetch fail as a private dataset.)
+- Malformed requests to `qsv-clientd` get a 400 instead of a 500 and a logged traceback: a
+  request target such as `//[`, a non-ASCII digit in `Content-Length`, and deeply nested
+  JSON.
+- `qsv-clientd` drops a client that stops reading a large response after 30 seconds, as it
+  already did once the response was written; the connection could otherwise stay open until
+  shutdown.
+- `qsv-clientd install` and `uninstall` report a failing `systemctl` or `launchctl` instead
+  of a traceback.
 
 - `sample --systematic` takes its value (`first` or `random`) from a paired page; it was
   allowlisted as a switch, so qsv took the dataset path as its value.
