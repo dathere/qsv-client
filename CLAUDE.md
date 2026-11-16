@@ -15,7 +15,8 @@ uv run pytest --cov                      # with branch coverage (config in pypro
 ```
 
 CI runs lint, format check, and mypy, plus tests on ubuntu/macos x Python 3.11–3.14 against
-qsv, qsvlite, and qsvdp (Linux only).
+qsv, qsvlite, and qsvdp (Linux only), all from the latest qsv release. The `test-min-qsv` job
+runs the integration tests against the release `MIN_QSV_VERSION` names (Linux, all three).
 On Windows (Python 3.11–3.14) it runs the full suite against qsv, plus the integration tests
 against qsvlite. Windows teardown uses Job Objects via ctypes (`_ProcessTree` in `_process.py`);
 type-check it with `uv run mypy --platform win32` (the lint job runs both).
@@ -48,9 +49,10 @@ below the base commit's, and new or changed lines need 100% coverage.
 
 ## Invariants
 
-- qsv 25.0.0 is the minimum (`MIN_QSV_VERSION`): the first `--capabilities` qsv with JSON
-  errors. `--capabilities` is probed before the first run; a binary that rejects the flag
-  raises `QsvVersionError`. `min_version=` can raise the floor, not lower it.
+- qsv 27.0.1 is the minimum (`MIN_QSV_VERSION`): the first released qsv whose Data Schematics
+  connect to `qsv-clientd` (25.0.0 was the first with `--capabilities` and JSON errors, so
+  older binaries reject the flag). `--capabilities` is probed before the first run; a binary
+  that rejects the flag raises `QsvVersionError`. `min_version=` can raise the floor, not lower it.
 - Successful probes are cached process-wide in `client._caps_cache`, keyed by
   (path, size, mtime_ns) and shared by `Qsv` and `AsyncQsv`. A per-key lock (per event loop
   for async, held weakly so loops can be collected) dedups concurrent probes; sync and async

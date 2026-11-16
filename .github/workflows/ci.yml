@@ -65,6 +65,38 @@ jobs:
           use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
           fail_ci_if_error: false
 
+  # `test` uses whatever qsv was released last; this keeps the oldest qsv we accept working.
+  test-min-qsv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+      - run: uv sync
+      - name: Download the qsv release named by MIN_QSV_VERSION
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(uv run python -c "import qsv_client; print(qsv_client.MIN_QSV_VERSION)")
+          mkdir -p "$RUNNER_TEMP/qsv"
+          gh release download "$v" --repo dathere/qsv --pattern "qsv-${v}-x86_64-unknown-linux-musl.zip" --dir "$RUNNER_TEMP/qsv"
+          unzip -o -q "$RUNNER_TEMP"/qsv/*.zip -d "$RUNNER_TEMP/qsv"
+          chmod +x "$RUNNER_TEMP"/qsv/qsv*
+          for b in qsv qsvlite qsvdp; do
+            reported=$("$RUNNER_TEMP/qsv/$b" --version)
+            case "$reported" in
+              "$b $v-"*) ;;
+              *) echo "expected $b $v, got: $reported"; exit 1 ;;
+            esac
+          done
+      - name: Integration tests (qsv)
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsv" uv run pytest -v tests/test_integration.py tests/test_integration_daemon.py
+      - name: Integration tests (qsvlite)
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsvlite" uv run pytest -q tests/test_integration.py
+      - name: Integration tests (qsvdp)
+        run: QSV_BIN="$RUNNER_TEMP/qsv/qsvdp" uv run pytest -q tests/test_integration.py
+
   # Separate from `test` because Windows steps run in PowerShell and use the MSVC build.
   test-windows:
     strategy:

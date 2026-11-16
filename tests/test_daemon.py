@@ -381,7 +381,7 @@ def test_registration_checks_schematic_fingerprint(
 B3_QSV = """
 import hashlib
 if sys.argv[1:] == ["--capabilities"]:
-    print('{"binary": "qsv", "version": "25.0.0", "error_formats": ["text", "json"],'
+    print('{"binary": "qsv", "version": "27.0.1", "error_formats": ["text", "json"],'
           ' "commands": ["blake3", "count"]}')
     sys.exit(0)
 if sys.argv[1] == "blake3":

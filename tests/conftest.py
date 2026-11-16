@@ -49,7 +49,7 @@ def fake_qsv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[str],
     """Write an executable stand-in for qsv running the given Python body; return its path.
 
     The client probes ``--capabilities`` before its first run, so unless ``body`` mentions
-    ``--capabilities`` (to answer it itself), the stand-in answers as qsv 25.0.0.
+    ``--capabilities`` (to answer it itself), the stand-in answers as qsv 27.0.1.
 
     POSIX: a script with a shebang. Windows: the script plus a ``fake-qsv.cmd`` wrapper that
     runs it (the extra ``cmd.exe`` is inside the run's Job Object, so it is killed with it).
@@ -58,7 +58,7 @@ def fake_qsv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[str],
     prelude = 'import sys; sys.stdout.reconfigure(newline="\\n")\n'
     capabilities = (
         'if sys.argv[1:] == ["--capabilities"]:\n'
-        '    print(\'{"binary": "qsv", "version": "25.0.0", "error_formats": ["text", "json"]}\')\n'
+        '    print(\'{"binary": "qsv", "version": "27.0.1", "error_formats": ["text", "json"]}\')\n'
         "    sys.exit(0)\n"
     )
 

@@ -34,7 +34,7 @@ from .errors import (
 DEFAULT_BINARIES = ("qsv", "qsvmcp", "qsvdp", "qsvlite")
 
 #: oldest qsv this client supports: the first with ``--capabilities`` and ``QSV_ERROR_FORMAT``
-MIN_QSV_VERSION = "25.0.0"
+MIN_QSV_VERSION = "27.0.1"
 
 Arg = str | os.PathLike[str] | int | float
 
@@ -148,7 +148,7 @@ class _Base:
                 ``QSV_LLM_APIKEY`` / ``QSV_LLM_BASE_URL`` / ``QSV_LLM_MODEL`` environment
                 variables, so the key never appears in the process table.
             min_version: raise :class:`QsvVersionError` on first use if the binary is older.
-                The binary must be at least :data:`MIN_QSV_VERSION` (25.0.0) regardless;
+                The binary must be at least :data:`MIN_QSV_VERSION` (27.0.1) regardless;
                 this can only raise that floor. A string that is not a version
                 (``"major.minor.patch"``) raises ``ValueError`` here.
             kill_grace: seconds to wait between the polite stop (SIGTERM, or

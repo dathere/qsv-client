@@ -52,7 +52,7 @@ def _qsv_reporting(version: str) -> str:
 @pytest.fixture
 def make_daemon(home: Path, fake_qsv: Callable[[str], str]) -> Callable[[], Daemon]:
     # the first qsv whose schematics go live: older ones add a notification
-    binary = fake_qsv(_qsv_reporting("27.0.0"))
+    binary = fake_qsv(_qsv_reporting("27.0.1"))
     return lambda: Daemon(DaemonConfig(binary=binary), home=home, tcp_port=0)
 
 
@@ -110,7 +110,7 @@ def test_hosts_a_daemon_when_none_is_running(make_controller: MakeController, ho
     c.on_change = seen.append
     state = _do(c, model.START)
     assert state.mode is Mode.HOSTED and state.status is not None
-    assert state.status["qsv"]["version"] == "27.0.0"
+    assert state.status["qsv"]["version"] == "27.0.1"
     assert [s.mode for s in seen] == [Mode.STARTING, Mode.HOSTED]
     assert DaemonClient().available()
     assert (home / "run" / "local-token").exists()
@@ -398,24 +398,17 @@ class Notes(list[tuple[str, str]]):
         self.append((title, message))
 
 
-def test_a_qsv_older_than_27_is_noted_once(
+def test_a_qsv_older_than_the_minimum_is_an_error(
     make_controller: MakeController, home: Path, fake_qsv: Callable[[str], str]
 ) -> None:
     binary = fake_qsv(_qsv_reporting("26.0.0"))
     c = make_controller(
         make_daemon=lambda: Daemon(DaemonConfig(binary=binary), home=home, tcp_port=0)
     )
-    notes = Notes()
-    c.notify = notes
     _do(c, model.START)
-    _do(c, model.RESTART)
-    assert notes == [
-        (
-            "Data Schematics won't go live",
-            "qsv 26.0.0 writes Data Schematics that can't connect to qsv-clientd. "
-            "Live schematics need qsv 27.0.1 or later.",
-        )
-    ]
+    state = c.state
+    assert state.mode is Mode.ERROR
+    assert state.error is not None and "qsv 26.0.0; at least 27.0.1 is required" in state.error
 
 
 @pytest.fixture

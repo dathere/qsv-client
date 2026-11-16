@@ -1,4 +1,4 @@
-"""Against a real qsv 25.0.0+ binary ($QSV_BIN or `qsv` on PATH)."""
+"""Against a real qsv 27.0.1+ binary ($QSV_BIN or `qsv` on PATH)."""
 
 from __future__ import annotations
 

@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+qsv 27.0.1 or later is now required, for everything. It is the first released qsv whose Data
+Schematics connect to `qsv-clientd`, so there is no longer a separate, lower minimum for the
+rest of the library.
+
+### Changed
+
+- **Behavior change:** qsv 27.0.1 or later is now required (`MIN_QSV_VERSION`, was 25.0.0).
+  An older qsv raises `QsvVersionError` before the first command, as a qsv older than 25.0.0
+  did before. `qsv-clientd serve` exits with that error instead of starting with a warning
+  that schematics can't connect, and the tray shows it as an error instead of a
+  notification. Development builds of qsv that report 27.0.0 (the release that was
+  withdrawn) are now refused too; any qsv built since has a later version.
+- `qsv-clientd` no longer gives `qsv get` a private cache of its own: every qsv it now accepts
+  keeps that cache readable by its owner only.
+- CI runs the integration tests against qsv 27.0.1 (`qsv`, `qsvlite` and `qsvdp`) as well as
+  the latest release, so the minimum stays tested.
+
 ### Security
 
 - On Windows, a `binary` that is a `.bat` or `.cmd` file (a sandbox wrapper, say) runs

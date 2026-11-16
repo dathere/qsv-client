@@ -160,7 +160,7 @@ class QsvNotFound(FileNotFoundError):
 
 
 class QsvVersionError(QsvError):
-    """The qsv binary is older than 25.0.0, or than the client's ``min_version``.
+    """The qsv binary is older than 27.0.1, or than the client's ``min_version``.
 
     Raised before the command runs. ``exit_code``, ``args_run`` and ``stderr`` describe the
     ``--capabilities`` check, not the command.

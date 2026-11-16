@@ -10,39 +10,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
-from ..capabilities import parse_version
-
 DEFAULT_PORT = 14470
 """Loopback port for browsers (Data Schematics). qsv pro's API uses 14462."""
 
 API_VERSION = 1
-
-# 27.0.0 was withdrawn before release, but builds of qsv master report it and have these
-# features, so the version checks use it; what users are told names 27.0.1
-LIVE_SCHEMATICS_QSV = "27.0.0"
-"""The first qsv whose Data Schematics connect to qsv-clientd."""
-
-LIVE_SCHEMATICS_RELEASE = "27.0.1"
-"""The first released qsv whose Data Schematics connect to qsv-clientd."""
-
-PRIVATE_GET_CACHE_QSV = "27.0.0"
-"""The first qsv that keeps its `get` cache readable by its owner only (on Unix)."""
-
-
-def schematics_notice(qsv_version: object) -> str | None:
-    """Why schematics won't go live with this qsv, or None when they will (or it can't tell)."""
-    if not isinstance(qsv_version, str):
-        return None
-    try:
-        older = parse_version(qsv_version) < parse_version(LIVE_SCHEMATICS_QSV)
-    except ValueError:
-        return None
-    if not older:
-        return None
-    return (
-        f"qsv {qsv_version} writes Data Schematics that can't connect to qsv-clientd. "
-        f"Live schematics need qsv {LIVE_SCHEMATICS_RELEASE} or later."
-    )
 
 
 def _home_override() -> Path | None:
