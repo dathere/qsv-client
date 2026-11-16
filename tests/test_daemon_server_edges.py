@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 from daemon_helpers import DaemonThread, Reply
 
+from qsv_client import QsvVersionError
 from qsv_client.daemon import DaemonConfig, server
 from qsv_client.daemon._http import HttpError
 from qsv_client.daemon.pairing import MAX_REQUESTS_PER_MINUTE
@@ -222,7 +223,7 @@ def test_local_status_listing_and_unknown_routes(
     assert status["service"] == "qsv-clientd" and status["api"] == 1
     assert status["pid"] == os.getpid()
     assert status["binary"] == d.daemon.binary
-    assert status["qsv"]["version"] == "25.0.0"
+    assert status["qsv"]["version"] == "27.0.1"
     assert status["jobs"] == {"max": 3, "running": 0}
     assert status["datasets"] == 1 and status["pending_pairings"] == 0
     assert status["port"] == d.port
@@ -490,7 +491,7 @@ def test_failed_fingerprint_at_registration_is_a_qsv_error(
 ) -> None:
     body = """
 if sys.argv[1:] == ["--capabilities"]:
-    print('{"binary": "qsv", "version": "25.0.0", "error_formats": ["text", "json"],'
+    print('{"binary": "qsv", "version": "27.0.1", "error_formats": ["text", "json"],'
           ' "commands": ["blake3"]}')
     sys.exit(0)
 sys.stderr.write('{"error": {"kind": "io", "message": "cannot read input", "exit_code": 1,'
@@ -846,7 +847,7 @@ def test_registering_a_url_downloads_it_beside_the_schematic(
 GET_GENERIC = """
 import json
 if sys.argv[1:] == ["--capabilities"]:
-    print(json.dumps({"binary": "qsv", "version": "26.0.0", "error_formats": ["text", "json"],
+    print(json.dumps({"binary": "qsv", "version": "27.0.1", "error_formats": ["text", "json"],
                       "commands": ["get", "count", "viz", "slice"]}))
     sys.exit(0)
 with open(LOG, "a") as fh:
@@ -1167,16 +1168,12 @@ def test_a_page_from_this_data_lends_its_source(
     assert listed[ds_id]["source_url"] == "https://h.example/d.csv"
 
 
-@pytest.mark.parametrize(("version", "noted"), [("26.0.0", True), ("27.0.0", False)])
-def test_serve_warns_when_qsv_schematics_cannot_go_live(
-    fake_qsv: Callable[[str], str],
-    start_daemon: StartDaemon,
-    caplog: pytest.LogCaptureFixture,
-    version: str,
-    noted: bool,
+def test_a_qsv_older_than_the_minimum_stops_the_daemon_before_it_binds(
+    fake_qsv: Callable[[str], str], home: Path
 ) -> None:
-    caps = json.dumps({"binary": "qsv", "version": version, "error_formats": ["text", "json"]})
+    caps = json.dumps({"binary": "qsv", "version": "26.0.0", "error_formats": ["text", "json"]})
     body = f'if sys.argv[1:] == ["--capabilities"]:\n    print({caps!r})\n    sys.exit(0)\n'
-    with caplog.at_level(logging.WARNING, logger="qsv_client.daemon"):
-        start_daemon(fake_qsv(body))
-    assert any("can't connect" in r.getMessage() for r in caplog.records) is noted
+    daemon = Daemon(DaemonConfig(binary=fake_qsv(body)), home=home, tcp_port=0)
+    with pytest.raises(QsvVersionError, match=r"qsv 26\.0\.0; at least 27\.0\.1"):
+        asyncio.run(daemon.start())
+    assert not daemon.socket_path.exists()

@@ -1,7 +1,7 @@
 """Run the qsv CSV toolkit from Python.
 
 Timeouts kill the whole process tree, failures raise typed exceptions, and capability
-detection replaces parsing ``qsv --version``. Requires qsv 25.0.0 or later.
+detection replaces parsing ``qsv --version``. Requires qsv 27.0.1 or later.
 See https://github.com/dathere/qsv-client.
 """
 

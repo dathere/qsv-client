@@ -53,7 +53,6 @@ from .config import (
     ensure_private_dir,
     local_token_path,
     runtime_dir,
-    schematics_notice,
     socket_path_error,
     state_dir,
     write_private_file,
@@ -132,9 +131,6 @@ class Daemon:
     async def start(self) -> None:
         caps = await self._qsv.capabilities()
         log.info("qsv-clientd %s using %s %s", __version__, caps.binary, caps.version)
-        notice = schematics_notice(caps.version)
-        if notice:
-            log.warning("%s", notice)
         ensure_private_dir(self.home)
         # bind everything before publishing the token: a second instance that fails to bind
         # must not replace the running daemon's credentials
