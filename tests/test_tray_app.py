@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("PIL")
 
-from qsv_client.tray import app, icons, model
+from qsv_client.tray import app, icons, model, updates
 from qsv_client.tray.controller import Controller
 from qsv_client.tray.model import Mode, TrayState
 
@@ -81,7 +81,11 @@ class FakeController(Controller):
     """Records submissions instead of running them."""
 
     def __init__(self) -> None:
-        super().__init__(make_daemon=lambda: pytest.fail("no daemon in app tests"))
+        super().__init__(
+            make_daemon=lambda: pytest.fail("no daemon in app tests"),
+            # never the tray settings of whoever runs the tests
+            load_settings=updates.Settings,
+        )
         self.submitted: list[str] = []
         self.polling = False
 
@@ -156,6 +160,7 @@ def test_the_menu_follows_the_state(
         "—",
         "Open config…",
         "Open log…",
+        "Check for qsv updates",
         "—",
         "Quit",
     ]

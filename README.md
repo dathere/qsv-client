@@ -160,7 +160,9 @@ qsv-clientd-tray
 qsv-clientd-tray --enable-autostart       # start it at login (or tick Start at login)
 ```
 
-On Linux the tray needs a desktop with AppIndicator or GTK tray support (see the doc).
+On Linux the tray needs a desktop with AppIndicator or GTK tray support (see the doc). Tick
+**Check for qsv updates** in its menu to be told when a newer qsv is released: off by default,
+it asks GitHub's API once a day and sends nothing else.
 
 See [docs/DAEMON.md](docs/DAEMON.md) for the security model and protocol.
 

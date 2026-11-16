@@ -25,7 +25,7 @@ from qsv_client.daemon.host import DaemonHost
 from qsv_client.daemon.server import Daemon
 from qsv_client.errors import QsvDaemonError, QsvDaemonUnavailable, QsvNotFound
 from qsv_client.tray import controller as controller_mod
-from qsv_client.tray import model
+from qsv_client.tray import model, updates
 from qsv_client.tray.controller import REFRESH, Controller
 from qsv_client.tray.model import Mode, ServiceKind, TrayState
 
@@ -51,12 +51,16 @@ def _qsv_reporting(version: str) -> str:
 
 @pytest.fixture
 def make_daemon(home: Path, fake_qsv: Callable[[str], str]) -> Callable[[], Daemon]:
-    # the first qsv whose schematics go live: older ones add a notification
+    # the oldest qsv the daemon accepts
     binary = fake_qsv(_qsv_reporting("27.0.1"))
     return lambda: Daemon(DaemonConfig(binary=binary), home=home, tcp_port=0)
 
 
 MakeController = Callable[..., Controller]
+
+
+def _offline() -> updates.Version:
+    raise OSError("the tests never ask GitHub")
 
 
 @pytest.fixture
@@ -72,6 +76,10 @@ def make_controller(make_daemon: Callable[[], Daemon]) -> Iterator[MakeControlle
             # never the real login items or files of whoever runs the tests
             "autostart_enabled": lambda: None,
             "open_path": lambda path: None,
+            # nor their tray settings, nor GitHub
+            "load_settings": updates.Settings,
+            "save_settings": lambda settings: None,
+            "latest_release": _offline,
         }
         settings.update(overrides)
         c = Controller(**settings)  # type: ignore[arg-type]
@@ -969,3 +977,235 @@ def test_an_unwritable_config_directory_is_a_notification(
     c.submit(model.OPEN_CONFIG).result(60)
     assert opened == [] and c.state.mode is Mode.HOSTED
     assert notes[0][0] == "Couldn't create daemon.toml" and "Permission denied" in notes[0][1]
+
+
+class Releases:
+    """A stand-in for updates.latest_release: answers in turn (the last one repeats), each
+    once ``gate`` is set."""
+
+    def __init__(self, *answers: updates.Version | Exception) -> None:
+        self.answers = answers
+        self.calls = 0
+        self.gate = threading.Event()
+        self.gate.set()
+
+    def __call__(self) -> updates.Version:
+        self.calls += 1
+        assert self.gate.wait(30)
+        answer = self.answers[min(self.calls, len(self.answers)) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+_OPTED_IN = updates.Settings(check_updates=True)
+
+
+def _checker(
+    make_controller: MakeController,
+    releases: Releases,
+    settings: updates.Settings = _OPTED_IN,
+    save: Callable[[updates.Settings], None] | None = None,
+    **overrides: object,
+) -> tuple[Controller, list[updates.Settings], Notes]:
+    saved: list[updates.Settings] = []
+
+    def save_settings(s: updates.Settings) -> None:
+        if save is not None:
+            save(s)
+        saved.append(s)
+
+    c = make_controller(
+        load_settings=lambda: settings,
+        save_settings=save_settings,
+        latest_release=releases,
+        **overrides,
+    )
+    notes = Notes()
+    c.notify = notes
+    return c, saved, notes
+
+
+def _checked(c: Controller, releases: Releases, calls: int = 1) -> TrayState:
+    deadline = time.monotonic() + 30
+    while releases.calls < calls or c._checking:
+        assert time.monotonic() < deadline, c.state
+        time.sleep(0.02)
+    return _do(c, REFRESH)  # after the reply's own action
+
+
+_ANNOUNCED = (
+    "qsv 29.0.0 is available",
+    'qsv-clientd runs qsv 27.0.1. To see the release, pick "qsv 29.0.0 is available…" in '
+    "the qsv-clientd menu.",
+)
+
+
+def test_an_opted_in_tray_announces_a_newer_qsv_once(make_controller: MakeController) -> None:
+    releases = Releases((29, 0, 0))
+    c, saved, notes = _checker(make_controller, releases)
+    assert c.state.check_updates
+    _do(c, model.START)
+    _do(c, REFRESH)
+    state = _checked(c, releases)
+    assert state.latest_qsv == (29, 0, 0)
+    assert model.qsv_update(state) == "29.0.0"
+    assert notes == [_ANNOUNCED]
+    assert saved == [updates.Settings(check_updates=True, notified="29.0.0")]
+    _do(c, REFRESH)  # not again, and not checked again within the day
+    assert notes == [_ANNOUNCED] and releases.calls == 1
+
+
+def test_a_release_announced_before_is_only_offered(make_controller: MakeController) -> None:
+    releases = Releases((29, 0, 0))
+    settings = updates.Settings(check_updates=True, notified="29.0.0")
+    c, saved, notes = _checker(make_controller, releases, settings)
+    _do(c, model.START)
+    _do(c, REFRESH)
+    assert model.qsv_update(_checked(c, releases)) == "29.0.0"
+    assert notes == [] and saved == []
+
+
+def test_a_release_no_newer_than_qsv_is_not_offered(make_controller: MakeController) -> None:
+    releases = Releases((27, 0, 1))
+    c, _, notes = _checker(make_controller, releases)
+    _do(c, model.START)
+    _do(c, REFRESH)
+    state = _checked(c, releases)
+    assert state.latest_qsv == (27, 0, 1) and model.qsv_update(state) is None and notes == []
+
+
+def test_checks_repeat_after_the_interval(make_controller: MakeController) -> None:
+    releases = Releases((28, 0, 0), (29, 0, 0))
+    c, _, _ = _checker(make_controller, releases, update_interval=0.0)
+    _do(c, REFRESH)
+    _until(c, lambda s: s.latest_qsv == (28, 0, 0))
+    _do(c, REFRESH)
+    _until(c, lambda s: s.latest_qsv == (29, 0, 0))
+    _do(c, REFRESH)  # the same release again changes nothing
+    _until(c, lambda s: releases.calls >= 3 and not c._checking)
+    assert c.state.latest_qsv == (29, 0, 0)
+
+
+def test_ticking_and_unticking_the_check(make_controller: MakeController) -> None:
+    releases = Releases((29, 0, 0))
+    c, saved, notes = _checker(make_controller, releases, updates.Settings())
+    _do(c, model.START)
+    _do(c, REFRESH)
+    assert releases.calls == 0 and not c.state.check_updates
+    state = _do(c, model.CHECK_UPDATES)
+    assert state.check_updates and saved[0] == updates.Settings(check_updates=True)
+    state = _checked(c, releases)
+    assert model.qsv_update(state) == "29.0.0" and notes == [_ANNOUNCED]
+    state = _do(c, model.CHECK_UPDATES)
+    assert not state.check_updates and state.latest_qsv is None
+    assert saved[-1] == updates.Settings(check_updates=False, notified="29.0.0")
+    assert not [s for s in model.build_menu(state) if s.action == model.OPEN_RELEASE]
+
+
+def test_a_setting_that_cant_be_saved_is_a_notification(make_controller: MakeController) -> None:
+    def read_only(settings: updates.Settings) -> None:
+        raise OSError("read-only file system")
+
+    releases = Releases((29, 0, 0))
+    c, _, notes = _checker(make_controller, releases, updates.Settings(), save=read_only)
+    state = _do(c, model.CHECK_UPDATES)
+    assert not state.check_updates and state.mode is Mode.STOPPED
+    assert notes == [("Couldn't change Check for qsv updates", "read-only file system")]
+    assert releases.calls == 0
+
+
+def test_an_announcement_that_cant_be_saved_is_still_made_once(
+    make_controller: MakeController,
+) -> None:
+    def read_only(settings: updates.Settings) -> None:
+        raise OSError("read-only file system")
+
+    releases = Releases((29, 0, 0))
+    c, _, notes = _checker(make_controller, releases, save=read_only)
+    _do(c, model.START)
+    _do(c, REFRESH)
+    _checked(c, releases)
+    _do(c, REFRESH)
+    assert notes == [_ANNOUNCED]
+
+
+def test_failed_checks_are_only_logged(
+    make_controller: MakeController, caplog: pytest.LogCaptureFixture
+) -> None:
+    releases = Releases(OSError("offline"), RuntimeError("a bug"))
+    c, _, notes = _checker(make_controller, releases, update_interval=0.0)
+    with caplog.at_level(logging.INFO, logger="qsv_client.tray"):
+        _do(c, REFRESH)
+        _checked(c, releases)
+        _do(c, REFRESH)
+        state = _checked(c, releases, calls=2)
+    assert state.latest_qsv is None and state.mode is Mode.STOPPED and notes == []
+    messages = [r.getMessage() for r in caplog.records]
+    assert "couldn't check for a newer qsv: offline" in messages
+    assert "checking for a newer qsv failed" in messages
+
+
+def test_a_reply_for_an_unticked_check_is_dropped(make_controller: MakeController) -> None:
+    releases = Releases((29, 0, 0))
+    releases.gate.clear()
+    c, _, _ = _checker(make_controller, releases)
+    _do(c, REFRESH)  # the check starts and waits for the gate
+    _do(c, model.CHECK_UPDATES)
+    releases.gate.set()
+    state = _checked(c, releases)
+    assert not state.check_updates and state.latest_qsv is None
+
+
+def test_quit_during_a_check_drops_its_reply(make_controller: MakeController) -> None:
+    releases = Releases((29, 0, 0))
+    releases.gate.clear()
+    c, _, _ = _checker(make_controller, releases)
+    _do(c, REFRESH)
+    (checking,) = [t for t in threading.enumerate() if t.name == "qsv-tray-updates"]
+    c.shutdown()
+    releases.gate.set()
+    checking.join(30)
+    assert not checking.is_alive() and c.state.latest_qsv is None
+
+
+@pytest.mark.parametrize("opened", [True, False])
+def test_the_offer_opens_qsvs_releases(
+    make_controller: MakeController, monkeypatch: pytest.MonkeyPatch, opened: bool
+) -> None:
+    urls: list[str] = []
+
+    def open_url(url: str) -> bool:
+        urls.append(url)
+        return opened
+
+    monkeypatch.setattr(webbrowser, "open", open_url)
+    c = make_controller()
+    notes = Notes()
+    c.notify = notes
+    _do(c, model.OPEN_RELEASE)
+    assert urls == ["https://github.com/dathere/qsv/releases/latest"]
+    failed = ("Couldn't open qsv's releases", f"No browser could open {urls[0]}.")
+    assert notes == ([] if opened else [failed])
+
+
+def test_a_failed_check_is_retried_sooner(make_controller: MakeController) -> None:
+    releases = Releases(OSError("offline at login"), (29, 0, 0))
+    c, _, _ = _checker(make_controller, releases, retry_interval=0.0)
+    _do(c, REFRESH)
+    _checked(c, releases)  # its refresh retries at once
+    _until(c, lambda s: s.latest_qsv == (29, 0, 0))
+    _do(c, REFRESH)  # then not again for a day
+    assert releases.calls == 2
+
+
+def test_a_clock_set_back_checks_again(make_controller: MakeController) -> None:
+    releases = Releases((28, 0, 0), (29, 0, 0))
+    c, _, _ = _checker(make_controller, releases)
+    _do(c, REFRESH)
+    _until(c, lambda s: s.latest_qsv == (28, 0, 0))
+    _do(c, REFRESH)
+    assert releases.calls == 1
+    c._next_check = time.time() + 2 * updates.INTERVAL  # as if the clock had gone back
+    _do(c, REFRESH)
+    _until(c, lambda s: s.latest_qsv == (29, 0, 0))

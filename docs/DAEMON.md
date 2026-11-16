@@ -128,6 +128,16 @@ alive, so Quit stays quit), an XDG autostart entry on Linux, and the `Run` regis
 Windows. It is independent of `qsv-clientd install`; pick one. With both, the service runs the
 daemon and the tray attaches to it at login, which works but runs two things.
 
+**Check for qsv updates.** Off by default. Ticked, the tray asks GitHub which qsv release is
+the latest: right away, then once a day while it runs. That is one HTTPS request to
+`api.github.com` (`GET /repos/dathere/qsv/releases/latest`, with a `qsv-client/<version>`
+User-Agent), and nothing about your datasets or schematics goes with it. When the release is
+newer than the qsv the daemon runs, the menu offers **qsv X.Y.Z is available…**, which opens
+qsv's releases page, and a notification says so once per release. The tray installs nothing:
+upgrade qsv as you installed it (or `qsv --update` in builds that have it). A failed check
+(offline at login, say) is only logged, and tried again an hour later. The setting, and the last release announced, are kept in `tray.json` in the config
+directory.
+
 One tray runs per user. It logs to `~/Library/Logs/qsv-client/qsv-clientd.log` on macOS, and
 `qsv-clientd.log` in the state directory elsewhere (`-v` adds debug lines).
 

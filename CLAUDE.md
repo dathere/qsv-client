@@ -42,7 +42,8 @@ below the base commit's, and new or changed lines need 100% coverage.
   (state to menu and icon state, pure), `controller.py` (hosts or attaches to the daemon; all
   actions on one worker thread; renders and fetches on their own daemon threads), `app.py`
   (pystray), `icons.py` (Pillow), `notify.py` (notification backends), `_open.py` (open a
-  file in its app), `autostart.py` (start at login per OS), `_console.py` (Windows: attaches
+  file in its app), `autostart.py` (start at login per OS), `updates.py` (the opt-in check for a newer qsv
+  release, off by default; settings in `tray.json`), `_console.py` (Windows: attaches
   the console-less tray to a console without a window, so qsv runs open none and
   `CTRL_BREAK_EVENT` still reaches them), `_lock.py`, `__main__.py`. pystray is imported
   only in `app.py`, inside functions, and Pillow only in `icons.py`; `tests/test_tray_isolation.py` enforces that the rest imports without them.

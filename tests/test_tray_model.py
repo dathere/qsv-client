@@ -48,6 +48,7 @@ def test_stopped() -> None:
         "—",
         "Open config…",
         "Open log…",
+        "Check for qsv updates",
         "—",
         "Quit",
     ]
@@ -70,6 +71,7 @@ def test_hosted() -> None:
         "—",
         "Open config…",
         "Open log…",
+        "Check for qsv updates",
         "—",
         "Quit",
     ]
@@ -84,6 +86,7 @@ def test_hosted() -> None:
         None,
         model.OPEN_CONFIG,
         model.OPEN_LOG,
+        model.CHECK_UPDATES,
         None,
         model.QUIT,
     ]
@@ -125,6 +128,7 @@ def test_attached_to_a_foreground_daemon_offers_nothing_to_stop() -> None:
         "—",
         "Open config…",
         "Log: in the terminal running qsv-clientd serve",
+        "Check for qsv updates",
         "—",
         "Quit",
     ]
@@ -137,6 +141,7 @@ def test_starting_and_busy() -> None:
         "—",
         "Open config…",
         "Open log…",
+        "Check for qsv updates",
         "—",
         "Quit",
     ]
@@ -156,6 +161,7 @@ def test_error_offers_retry_and_wins_the_icon() -> None:
         "—",
         "Open config…",
         "Open log…",
+        "Check for qsv updates",
         "—",
         "Quit",
     ]
@@ -390,6 +396,7 @@ def test_datasets_and_jobs_show_only_while_the_daemon_runs() -> None:
         "—",
         "Open config…",
         "Open log…",
+        "Check for qsv updates",
         "—",
         "Quit",
     ]
@@ -415,3 +422,31 @@ def test_start_at_login_is_a_check_box_where_supported() -> None:
         menu = model.build_menu(TrayState(autostart=enabled))
         (item,) = [s for s in menu if s.text == "Start at login"]
         assert item == MenuSpec("Start at login", model.AUTOSTART, checked=enabled)
+
+
+@pytest.mark.parametrize(
+    ("changes", "update"),
+    [
+        ({}, "29.0.0"),
+        ({"check_updates": False}, None),
+        ({"latest_qsv": None}, None),
+        ({"status": None}, None),
+        ({"mode": Mode.STOPPED}, None),
+        ({"status": _status(qsv={"version": "29.0.0"})}, None),
+        ({"status": _status(qsv={"version": "29.1.0-dev"})}, None),
+        ({"status": _status(qsv={"version": "not a version"})}, None),
+        ({"status": _status(qsv=None)}, None),
+    ],
+)
+def test_a_newer_qsv_release_is_offered(changes: dict[str, Any], update: str | None) -> None:
+    state = TrayState(Mode.HOSTED, _status(), check_updates=True, latest_qsv=(29, 0, 0))
+    state = replace(state, **changes)
+    assert model.qsv_update(state) == update
+    offers = [s for s in model.build_menu(state) if s.action == model.OPEN_RELEASE]
+    assert offers == ([MenuSpec("qsv 29.0.0 is available…", model.OPEN_RELEASE)] if update else [])
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_checking_for_updates_is_a_check_box(on: bool) -> None:
+    menu = model.build_menu(TrayState(check_updates=on))
+    assert MenuSpec("Check for qsv updates", model.CHECK_UPDATES, checked=on) in menu
