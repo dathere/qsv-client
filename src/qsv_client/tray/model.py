@@ -301,20 +301,24 @@ def dataset_menu(ds: DatasetView, state: TrayState) -> MenuSpec:
     return MenuSpec(ds.title, submenu=(*details, SEPARATOR, *actions, SEPARATOR, forget))
 
 
-def qsv_update(state: TrayState) -> str | None:
-    """The latest qsv release, when it is newer than the qsv the daemon runs."""
-    if not state.check_updates or state.latest_qsv is None or state.status is None:
-        return None
-    if state.mode not in (Mode.HOSTED, Mode.ATTACHED):
+def _daemon_qsv(state: TrayState) -> tuple[int, int, int] | None:
+    """The version of the qsv the daemon runs, while it answers and reports one."""
+    if state.status is None or state.mode not in (Mode.HOSTED, Mode.ATTACHED):
         return None
     version = (state.status.get("qsv") or {}).get("version")
     try:
-        current = parse_version(version) if isinstance(version, str) else None
+        return parse_version(version) if isinstance(version, str) else None
     except ValueError:
-        current = None
-    if current is None or current >= state.latest_qsv:
         return None
-    return ".".join(map(str, state.latest_qsv))
+
+
+def qsv_update(state: TrayState) -> str | None:
+    """The latest qsv release, when it is newer than the qsv the daemon runs."""
+    latest = state.latest_qsv if state.check_updates else None
+    current = _daemon_qsv(state)
+    if latest is None or current is None or current >= latest:
+        return None
+    return ".".join(map(str, latest))
 
 
 def build_menu(state: TrayState) -> list[MenuSpec]:
