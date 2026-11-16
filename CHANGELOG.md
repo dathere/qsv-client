@@ -6,9 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-15
+
 qsv 27.0.1 or later is now required, for everything. It is the first released qsv whose Data
 Schematics connect to `qsv-clientd`, so there is no longer a separate, lower minimum for the
-rest of the library.
+rest of the library. qsv 29.0.0, released today, works as it is: CI tests every change
+against the latest qsv release and against 27.0.1.
 
 ### Added
 
@@ -68,7 +71,6 @@ rest of the library.
   shutdown.
 - `qsv-clientd install` and `uninstall` report a failing `systemctl` or `launchctl` instead
   of a traceback.
-
 - `sample --systematic` takes its value (`first` or `random`) from a paired page; it was
   allowlisted as a switch, so qsv took the dataset path as its value.
 - Approving a pairing request that was already denied (or approved) replies 409
@@ -411,7 +413,8 @@ First release. ([#1](https://github.com/dathere/qsv-client/pull/1))
   environment variables, so keys never appear on the command line.
 - Type hints (`py.typed`), no runtime dependencies, Python 3.10+.
 
-[Unreleased]: https://github.com/dathere/qsv-client/compare/0.6.1...HEAD
+[Unreleased]: https://github.com/dathere/qsv-client/compare/0.7.0...HEAD
+[0.7.0]: https://github.com/dathere/qsv-client/compare/0.6.1...0.7.0
 [0.6.1]: https://github.com/dathere/qsv-client/compare/0.6.0...0.6.1
 [0.6.0]: https://github.com/dathere/qsv-client/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/dathere/qsv-client/compare/0.4.0...0.5.0
