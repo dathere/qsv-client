@@ -30,7 +30,7 @@ from ..daemon.config import (
 from ..daemon.host import DaemonHost
 from ..daemon.server import Daemon
 from ..errors import QsvDaemonError
-from . import _open, autostart, model
+from . import _open, autostart, model, updates
 from .model import DatasetView, Job, Mode, Pending, ServiceKind, TrayState
 from .notify import Notifier, nothing
 
@@ -64,6 +64,11 @@ class Controller:
         autostart_enabled: Callable[[], bool | None] = autostart.is_enabled,
         enable_autostart: Callable[[], str] = autostart.enable,
         disable_autostart: Callable[[], str] = autostart.disable,
+        load_settings: Callable[[], updates.Settings] = updates.load_settings,
+        save_settings: Callable[[updates.Settings], None] = updates.save_settings,
+        latest_release: Callable[[], updates.Version] = updates.latest_release,
+        update_interval: float = updates.INTERVAL,
+        retry_interval: float = updates.RETRY_INTERVAL,
     ) -> None:
         self._make_daemon = make_daemon
         self._attach = attach
@@ -75,12 +80,21 @@ class Controller:
         self._autostart_enabled = autostart_enabled
         self._enable_autostart = enable_autostart
         self._disable_autostart = disable_autostart
+        self._save_settings = save_settings
+        self._latest_release = latest_release
+        self._update_interval = update_interval
+        self._retry_interval = retry_interval
         self.on_change: Callable[[TrayState], None] = lambda state: None
         """Called with each new state, on the worker thread."""
         self.notify: Notifier = nothing
         """Shows a desktop notification, on the worker thread."""
         self._announced: set[str] = set()
-        self._state = TrayState()
+        # touched only on the worker thread
+        self._settings = load_settings()
+        self._checking = False
+        self._next_check: float | None = None
+        self._check_generation = 0
+        self._state = TrayState(check_updates=self._settings.check_updates)
         self._lock = threading.Lock()
         self._emit_lock = threading.Lock()
         # touched only on the worker thread
@@ -108,6 +122,8 @@ class Controller:
             model.OPEN_CONFIG: self._open_config,
             model.OPEN_LOG: self._open_log,
             model.AUTOSTART: self._toggle_autostart,
+            model.CHECK_UPDATES: self._toggle_updates,
+            model.OPEN_RELEASE: self._open_release,
         }
 
     @property
@@ -294,6 +310,7 @@ class Controller:
         self._start()
 
     def _refresh(self) -> None:
+        self._maybe_check_updates()
         state = self.state
         if state.busy:
             return
@@ -331,6 +348,7 @@ class Controller:
                 )
             )
         self._announce(pairings)
+        self._note_update()
 
     def _approve(self, code: str) -> None:
         self._decide(code, "approve")
@@ -529,6 +547,94 @@ class Controller:
             log.warning("changing Start at login failed", exc_info=True)
             self.notify("Couldn't change Start at login", str(exc) or type(exc).__name__)
         self._read_autostart()
+
+    # -- qsv updates (opt-in) ------------------------------------------------------------------
+
+    def _toggle_updates(self) -> None:
+        settings = replace(self._settings, check_updates=not self._settings.check_updates)
+        try:
+            self._save_settings(settings)
+        except OSError as exc:  # no reason to show the daemon as broken
+            log.warning("saving Check for qsv updates failed", exc_info=True)
+            self.notify("Couldn't change Check for qsv updates", str(exc) or type(exc).__name__)
+            return
+        self._settings = settings
+        # a reply still on its way answers the old setting
+        self._check_generation += 1
+        self._next_check = None
+        self._set(check_updates=settings.check_updates, latest_qsv=None)
+        self._maybe_check_updates()
+
+    def _maybe_check_updates(self) -> None:
+        if not self._settings.check_updates or self._checking:
+            return
+        # the wall clock, which counts the hours a laptop sleeps (time.monotonic doesn't); a
+        # next check further off than one interval means the clock went back: check now
+        wait = None if self._next_check is None else self._next_check - time.time()
+        if wait is not None and 0 < wait <= self._update_interval:
+            return
+        self._checking = True
+        threading.Thread(
+            target=self._check_updates,
+            args=(self._check_generation,),
+            name="qsv-tray-updates",
+            daemon=True,
+        ).start()
+
+    def _check_updates(self, generation: int) -> None:
+        """On its own daemon thread: a slow network must hold up neither the menu nor Quit."""
+        latest: updates.Version | None = None
+        try:
+            latest = self._latest_release()
+        except (OSError, ValueError) as exc:  # offline, rate-limited, an unexpected reply
+            log.info("couldn't check for a newer qsv: %s", exc)
+        except Exception:
+            log.exception("checking for a newer qsv failed")
+        if self._stopping.is_set():
+            return
+        with contextlib.suppress(RuntimeError):  # Quit shut the worker down meanwhile
+            self._executor.submit(
+                self._run, "updates-checked", lambda: self._updates_checked(generation, latest)
+            )
+
+    def _updates_checked(self, generation: int, latest: updates.Version | None) -> None:
+        self._checking = False
+        if generation != self._check_generation:
+            return
+        failed = latest is None
+        delay = (
+            min(self._retry_interval, self._update_interval) if failed else self._update_interval
+        )
+        self._next_check = time.time() + delay
+        if latest is None:
+            return
+        if latest != self.state.latest_qsv:
+            self._set(latest_qsv=latest)
+        self._note_update()
+
+    def _note_update(self) -> None:
+        """Announce a newer qsv once per release, across restarts too."""
+        state = self.state
+        update = model.qsv_update(state)
+        if update is None or update == self._settings.notified:
+            return
+        self._settings = settings = replace(self._settings, notified=update)
+        try:
+            self._save_settings(settings)
+        except OSError:  # then it is announced again next time the tray starts
+            log.warning("couldn't save that qsv %s was announced", update, exc_info=True)
+        current = ((state.status or {}).get("qsv") or {}).get("version")
+        self.notify(
+            f"qsv {update} is available",
+            f"qsv-clientd runs qsv {current}. To see the release, pick "
+            f'"qsv {update} is available…" in the qsv-clientd menu.',
+        )
+
+    def _open_release(self) -> None:
+        if not webbrowser.open(updates.RELEASES_PAGE):
+            self.notify(
+                "Couldn't open qsv's releases", f"No browser could open {updates.RELEASES_PAGE}."
+            )
 
 
 def _dataset_path(dataset_id: str) -> str:

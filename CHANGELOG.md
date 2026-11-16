@@ -10,6 +10,14 @@ qsv 27.0.1 or later is now required, for everything. It is the first released qs
 Schematics connect to `qsv-clientd`, so there is no longer a separate, lower minimum for the
 rest of the library.
 
+### Added
+
+- The tray can tell you when a newer qsv is released: tick **Check for qsv updates** in its
+  menu (off by default). It then asks GitHub's API for qsv's latest release right away and
+  once a day, and sends nothing else. A newer release than the daemon's qsv shows as
+  **qsv X.Y.Z is available…**, which opens qsv's releases page, with one notification per
+  release. The setting is kept in `tray.json` in the config directory.
+
 ### Changed
 
 - **Behavior change:** qsv 27.0.1 or later is now required (`MIN_QSV_VERSION`, was 25.0.0).

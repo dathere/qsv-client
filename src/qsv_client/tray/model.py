@@ -9,6 +9,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ..capabilities import parse_version
 from ..daemon._text import NO_DATASET, PairingText, dataset_title, describe_pairing
 from ..daemon.pairing import CODE_ALPHABET
 
@@ -36,6 +37,8 @@ REVOKE_ALL = "revoke-all"
 OPEN_CONFIG = "open-config"
 OPEN_LOG = "open-log"
 AUTOSTART = "autostart"
+CHECK_UPDATES = "check-updates"
+OPEN_RELEASE = "open-release"
 """Toggle starting the tray at login."""
 
 # decoys can't be predicted from outside this process (not that knowing them would help a page)
@@ -71,6 +74,10 @@ class TrayState:
     """Datasets whose last fetch was refused for missing columns: offer to force it."""
     autostart: bool | None = None
     """Whether the tray starts at login; None until known, or where it can't."""
+    check_updates: bool = False
+    """Whether the tray looks for a newer qsv release (opt-in)."""
+    latest_qsv: tuple[int, int, int] | None = None
+    """qsv's latest release, once a check found it."""
 
 
 @dataclass(frozen=True)
@@ -294,10 +301,32 @@ def dataset_menu(ds: DatasetView, state: TrayState) -> MenuSpec:
     return MenuSpec(ds.title, submenu=(*details, SEPARATOR, *actions, SEPARATOR, forget))
 
 
+def _daemon_qsv(state: TrayState) -> tuple[int, int, int] | None:
+    """The version of the qsv the daemon runs, while it answers and reports one."""
+    if state.status is None or state.mode not in (Mode.HOSTED, Mode.ATTACHED):
+        return None
+    version = (state.status.get("qsv") or {}).get("version")
+    try:
+        return parse_version(version) if isinstance(version, str) else None
+    except ValueError:
+        return None
+
+
+def qsv_update(state: TrayState) -> str | None:
+    """The latest qsv release, when it is newer than the qsv the daemon runs."""
+    latest = state.latest_qsv if state.check_updates else None
+    current = _daemon_qsv(state)
+    if latest is None or current is None or current >= latest:
+        return None
+    return ".".join(map(str, latest))
+
+
 def build_menu(state: TrayState) -> list[MenuSpec]:
     items = [MenuSpec(status_line(state), enabled=False)]
     if detail := detail_line(state):
         items.append(MenuSpec(detail, enabled=False))
+    if update := qsv_update(state):
+        items.append(MenuSpec(f"qsv {update} is available…", OPEN_RELEASE))
     running = state.mode in (Mode.HOSTED, Mode.ATTACHED)
     if running:
         items += [_info(job.text) for job in state.jobs]
@@ -316,6 +345,7 @@ def build_menu(state: TrayState) -> list[MenuSpec]:
     items += [SEPARATOR, MenuSpec("Open config…", OPEN_CONFIG), log_item(state)]
     if state.autostart is not None:
         items.append(MenuSpec("Start at login", AUTOSTART, checked=state.autostart))
+    items.append(MenuSpec("Check for qsv updates", CHECK_UPDATES, checked=state.check_updates))
     items += [SEPARATOR, MenuSpec("Quit", QUIT)]
     return items
 
